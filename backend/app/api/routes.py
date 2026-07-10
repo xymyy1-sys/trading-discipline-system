@@ -1806,6 +1806,7 @@ def _holding_seesaw_item(
         profit_drawdown_trigger=sell_triggers["profit_drawdown_trigger"],
         buyback_trigger=sell_triggers["buyback_trigger"],
         evidence=evidence,
+        theme_flow_timeline=list(theme_flow.get("timeline_points", [])),
     )
 
 
@@ -2055,6 +2056,22 @@ def _holding_theme_flow_profile(
         )
     else:
         concept_summary = ""
+    # Build actual timeline from matched flows (prefer snapshots; fallback to synthetic)
+    _tl = _aggregate_flow_timeline(selected)
+    if len(_tl) < 3 and sectors:
+        # try broader industry flow timeline for the same sector name
+        broader_timeline = _broader_industry_timeline(ranked_industry_flows, sectors, theme_profile)
+        if broader_timeline and len(broader_timeline) >= len(_tl):
+            _tl = broader_timeline
+    if not _tl and current != 0:
+        _tl = {datetime.now().strftime("%H:%M"): current}
+    timeline_points = [
+        {"time": t, "value": round(v, 2)}
+        for t, v in sorted(_tl.items()) if v or v == 0
+    ]
+    if not timeline_points and current:
+        timeline_points = [{"time": datetime.now().strftime("%H:%M"), "value": round(current, 2)}]
+
     return {
         "primary_flow": primary_flow,
         "basis": basis,
@@ -2071,7 +2088,52 @@ def _holding_theme_flow_profile(
         "concept_summary": concept_summary,
         "concept_current": concept_current,
         "concept_main": concept_main,
+        "timeline_points": timeline_points,
     }
+
+
+def _broader_industry_timeline(
+    ranked_industry_flows: list[Any],
+    holding_sectors: list[str],
+    theme_profile: dict[str, Any],
+) -> dict[str, float] | None:
+    """Try to get a richer timeline from the broad industry flow list for the holding's sector."""
+    best: tuple[int, dict[str, float]] | None = None
+    # Map holding sector keywords to East Money industry names that appear in sector_flow
+    _SECTOR_TO_INDUSTRY_FLOW: dict[str, list[str]] = {
+        "半导体": ["电子信息", "电子器件", "半导体设备"],
+        "AI算力": ["电子信息", "电子器件", "计算机行业", "通信行业"],
+        "商业航天": ["飞机制造", "航天航空", "军工航天"],
+        "医药": ["生物制药", "化学制药", "医疗器械"],
+        "机器人": ["机械行业", "电器行业"],
+        "新能源": ["发电设备", "新能源车"],
+        "化工": ["化工行业", "化纤行业"],
+    }
+    for flow in ranked_industry_flows:
+        flow_names = _sector_aliases(flow)
+        match_score = 0
+        for s in holding_sectors:
+            if not s:
+                continue
+            # direct match
+            for name in flow_names:
+                if not name:
+                    continue
+                if s in name or name in s:
+                    match_score += 4
+                    break
+            # mapped match
+            mapped = _SECTOR_TO_INDUSTRY_FLOW.get(s, [])
+            for m in mapped:
+                for name in flow_names:
+                    if m in name or name in m:
+                        match_score += 3
+                        break
+        if match_score > 0:
+            tl = _aggregate_flow_timeline([flow])
+            if tl and (best is None or match_score > best[0] or len(tl) > len(best[1])):
+                best = (match_score, tl)
+    return best[1] if best else None
 
 
 def _preferred_industry_board_flow(holding: Holding) -> Any | None:
@@ -2196,11 +2258,12 @@ def _holding_stock_board_profile(holding: Holding) -> dict[str, Any]:
     if not re.fullmatch(r"\d{6}", code):
         return profile
 
+    # 1) Sina stock profile page
     try:
         resp = requests.get(
             f"https://vip.stock.finance.sina.com.cn/corp/go.php/vCI_CorpOtherInfo/stockid/{code}.phtml",
             headers={"User-Agent": "Mozilla/5.0"},
-            timeout=5,
+            timeout=8,
         )
         resp.raise_for_status()
         resp.encoding = "gb2312"
@@ -2218,7 +2281,21 @@ def _holding_stock_board_profile(holding: Holding) -> dict[str, Any]:
     except Exception:
         pass
 
-    # Fallback: reuse the local limit-up ladder cache when the stock is present.
+    # 2) East Money stock detail for board & concept
+    try:
+        em = _fetch_em_stock_board(code)
+        if em.get("industry") or em.get("concepts"):
+            profile = {
+                "industry": em.get("industry") or "",
+                "concepts": em.get("concepts") or [],
+                "source": "eastmoney-stock-detail",
+            }
+            _set_response_cache(cache_key, profile)
+            return profile
+    except Exception:
+        pass
+
+    # 3) Fallback: reuse the local limit-up ladder cache when the stock is present.
     try:
         ladder = market_provider.limit_up_ladder(force_refresh=False)
     except Exception:
@@ -2267,12 +2344,36 @@ def _strip_html(raw: str) -> str:
     return re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", raw or "")).strip()
 
 
+def _fetch_em_stock_board(code: str) -> dict[str, Any]:
+    """Try East Money stock detail for industry + concepts."""
+    try:
+        market = "1" if code.startswith("6") else "0"
+        resp = requests.get(
+            "https://push2.eastmoney.com/api/qt/stock/get",
+            params={
+                "secid": f"{market}.{code}",
+                "fields": "f57,f58,f127,f55,f100,f102,f103",
+            },
+            headers={"User-Agent": "Mozilla/5.0"},
+            timeout=5,
+        )
+        data = resp.json().get("data") or {}
+        industry = str(data.get("f100") or "")
+        concept_str = str(data.get("f103") or "")
+        concepts: list[str] = []
+        if concept_str and concept_str != "-":
+            concepts = [c.strip() for c in concept_str.split(",") if c.strip()]
+        return {"industry": industry, "concepts": concepts}
+    except Exception:
+        return {}
+
+
 _THEME_RULES: list[dict[str, Any]] = [
     {
         "primary": "AI算力链",
         "tags": ["AI算力", "服务器", "数据中心", "液冷", "东数西算"],
-        "keywords": ["算力", "服务器", "东数西算", "液冷", "云计算", "英伟达", "CPO", "光模块", "数据中心", "腾讯云", "人工智能", "AI"],
-        "flow_aliases": ["AI算力", "算力概念", "服务器", "东数西算", "液冷概念", "云计算", "英伟达概念", "数据中心", "CPO", "光模块", "人工智能"],
+        "keywords": ["算力", "服务器", "东数西算", "液冷", "云计算", "英伟达", "CPO", "光模块", "数据中心", "腾讯云", "人工智能", "AI", "铜连接", "高速连接器", "光通信"],
+        "flow_aliases": ["AI算力", "算力概念", "服务器", "东数西算", "液冷概念", "云计算", "英伟达概念", "数据中心", "CPO", "光模块", "人工智能", "铜连接", "算力租赁"],
         "prefer_concept": True,
     },
     {
@@ -2390,10 +2491,10 @@ def _holding_sector_keywords(holding: Holding) -> list[str]:
         "半导体": ("长电", "半导体", "芯片", "封测", "科创半导体"),
         "先进封装": ("长电", "封装", "封测"),
         "电子信息": ("半导体", "芯片", "电子", "PCB", "消费电子"),
-        "AI算力": ("浪潮", "算力", "服务器", "AI", "人工智能", "CPO"),
+        "AI算力": ("浪潮", "算力", "服务器", "AI", "人工智能", "CPO", "利通", "英伟达", "云计算", "液冷", "东数西算"),
         "商业航天": ("航天", "卫星", "火箭", "军工", "军民融合"),
         "创新药": ("海正", "医药", "创新药", "药业", "生物"),
-        "电子元件": ("利通", "电子", "PCB"),
+        "电子元件": ("PCB", "消费电子", "OLED"),
         "机器人": ("机器人", "减速器", "人形"),
         "新能源": ("新能源", "光伏", "锂电", "固态电池", "储能"),
         "化工材料": ("化工", "塑料", "材料"),

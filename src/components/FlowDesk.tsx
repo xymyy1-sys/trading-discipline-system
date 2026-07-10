@@ -51,6 +51,7 @@ type HoldingSeesawItem = {
   change_pct: number
   risk_level: string
   evidence: string[]
+  theme_flow_timeline: { time: string; value: number }[]
 }
 type MarketSeesaw = {
   source: string
@@ -328,7 +329,7 @@ function FlowChartSection({
 
     chart.setOption({
       backgroundColor: 'transparent',
-      grid: { left: 64, right: 24, top: 20, bottom: 48 },
+      grid: { left: 56, right: 20, top: 12, bottom: 40 },
       tooltip: {
         trigger: 'axis',
         backgroundColor: '#1a241e',
@@ -626,13 +627,23 @@ function holdingsToFlow(seesaw: MarketSeesaw | null): SectorFlow | null {
   if (!seesaw) return null
   const items: SectorFlowItem[] = seesaw.holding_alerts.map(item => {
     const current = item.theme_flow_current || 0
-    const peak = item.theme_flow_peak || current
-    const start = current - (item.sector_acceleration || 0)
-    const name = `${item.name} · ${item.holding_theme || item.primary_industry_sector || '待确认主线'}`
+    const mainName = item.holding_theme || item.primary_industry_sector || '待确认主线'
+    const display = `${item.name} · ${mainName}`
     const rawConcepts = (item.stock_concepts || []).slice(0, 8)
+
+    // Use real timeline from backend; fall back to synthetic 3-point
+    const realTl = item.theme_flow_timeline || []
+    const timeline = realTl.length >= 2
+      ? realTl.map(p => ({ time: p.time, value: p.value }))
+      : [
+          { time: '前值', value: Number((current - (item.sector_acceleration || 0)).toFixed(2)) },
+          { time: item.theme_flow_peak ? '高点' : '盘中', value: Number((item.theme_flow_peak || current).toFixed(2)) },
+          { time: '当前', value: Number(current.toFixed(2)) },
+        ]
+
     return {
-      name,
-      display_name: name,
+      name: display,
+      display_name: display,
       raw_name: item.primary_industry_sector || item.matched_flow_sector || item.holding_theme,
       board_code: item.code,
       provider: item.theme_source || 'holding-profile',
@@ -649,11 +660,7 @@ function holdingsToFlow(seesaw: MarketSeesaw | null): SectorFlow | null {
         rawConcepts.length ? `概念:${rawConcepts.join('、')}` : '',
         item.flow_basis ? `曲线:${item.flow_basis}` : '',
       ].filter(Boolean),
-      timeline: [
-        { time: '盘初', value: Number(start.toFixed(2)) },
-        { time: '高点', value: Number(peak.toFixed(2)) },
-        { time: '当前', value: Number(current.toFixed(2)) },
-      ],
+      timeline,
     }
   })
   return {

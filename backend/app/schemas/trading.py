@@ -272,6 +272,11 @@ class SectorRotationItem(BaseModel):
     evidence: str = ""
 
 
+class FlowTimelinePoint(BaseModel):
+    time: str
+    value: float = 0
+
+
 class HoldingSeesawItem(BaseModel):
     code: str
     name: str
@@ -313,6 +318,7 @@ class HoldingSeesawItem(BaseModel):
     profit_drawdown_trigger: list[str] = Field(default_factory=list)
     buyback_trigger: list[str] = Field(default_factory=list)
     evidence: list[str] = Field(default_factory=list)
+    theme_flow_timeline: list[FlowTimelinePoint] = Field(default_factory=list)
 
 
 class MarketSeesawOut(BaseModel):
