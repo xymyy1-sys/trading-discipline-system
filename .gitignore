@@ -1,0 +1,40 @@
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+node_modules
+dist
+dist-ssr
+*.local
+
+# Python backend
+backend/.venv/
+backend/data/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Editor directories and files
+.vscode/*
+!.vscode/extensions.json
+.idea
+.DS_Store
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# Codex backups
+.codex-backups/
+
+# Pre-cache snapshots
+*.pre-mainline-cache-*
+*.pre-sina-theme-radar-*
+*.bak
+*.bak-*
