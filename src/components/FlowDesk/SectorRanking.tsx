@@ -58,6 +58,15 @@ export default function SectorRanking({
             <span className="rank-bar">
               <i style={{ width: `${Math.max(4, item.strength)}%`, background: color }} />
             </span>
+            {item.flow_breakdown?.length > 0 && (
+              <span className="rank-flow-breakdown" aria-label="东方财富资金拆解">
+                {item.flow_breakdown.slice(0, 4).map(part => (
+                  <i className={part.net >= 0 ? 'in' : 'out'} key={part.name}>
+                    {part.name}{part.net >= 0 ? '+' : ''}{part.net.toFixed(1)}
+                  </i>
+                ))}
+              </span>
+            )}
             {item.leaders.filter(l => l !== '待识别').length > 0 && (
               <span className="rank-leaders">{item.leaders.filter(l => l !== '待识别').join(' · ')}</span>
             )}

@@ -76,6 +76,11 @@ export interface SectorDetail {
   main_inflow: number;
   strength: number;
   leaders: string[];
+  flow_breakdown: Array<{
+    name: string;
+    net: number;
+    ratio: number;
+  }>;
   constituents: SectorConstituent[];
   limit_up_stocks: SectorConstituent[];
   notes: string[];
@@ -97,6 +102,11 @@ export interface SectorFlowItem {
   strength: number;
   leaders: string[];
   timeline: FlowPoint[];
+  flow_breakdown: Array<{
+    name: string;
+    net: number;
+    ratio: number;
+  }>;
 }
 
 export interface SectorFlowOut {

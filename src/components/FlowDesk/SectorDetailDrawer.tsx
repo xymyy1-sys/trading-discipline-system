@@ -71,6 +71,18 @@ export default function SectorDetailDrawer({
           <MiniStat label="强度" value={`${detail?.strength ?? item.strength}/100`} />
         </div>
 
+        {((detail?.flow_breakdown?.length ? detail.flow_breakdown : item.flow_breakdown) ?? []).length > 0 && (
+          <div className="drawer-flow-breakdown">
+            {(detail?.flow_breakdown?.length ? detail.flow_breakdown : item.flow_breakdown).map(part => (
+              <span className={part.net >= 0 ? 'in' : 'out'} key={part.name}>
+                <b>{part.name}</b>
+                <strong>{part.net >= 0 ? '+' : ''}{part.net.toFixed(2)}亿</strong>
+                <em>{part.ratio >= 0 ? '+' : ''}{part.ratio.toFixed(2)}%</em>
+              </span>
+            ))}
+          </div>
+        )}
+
         <div className="taxonomy-strip">
           <span>原始板块：{detail?.raw_name ?? item.raw_name ?? item.name}</span>
           <span>归属主线：{detail?.mainline ?? item.mainline ?? item.theme_line ?? '--'}</span>

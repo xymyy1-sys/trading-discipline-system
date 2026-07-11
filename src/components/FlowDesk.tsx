@@ -50,6 +50,10 @@ export default function FlowDesk() {
         } else if (src.includes('akshare')) {
           note = 'AkShare'
         }
+        const hasOrderBreakdown = [...(data.inflow || []), ...(data.outflow || [])].some(item => item.flow_breakdown?.length)
+        if (hasOrderBreakdown) {
+          note += ' · 东方财富分层资金'
+        }
         if (src.includes('最近交易日')) {
           note += ' · 最近交易日'
         }
@@ -292,6 +296,7 @@ function holdingsToFlow(seesaw: MarketSeesaw | null): SectorFlow | null {
         item.flow_basis ? `曲线:${item.flow_basis}` : '',
       ].filter(Boolean),
       timeline,
+      flow_breakdown: [],
     }
   })
   return {

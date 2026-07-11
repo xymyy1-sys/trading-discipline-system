@@ -235,6 +235,12 @@ class SectorFlowPoint(BaseModel):
     value: float
 
 
+class SectorFlowBreakdownItem(BaseModel):
+    name: str
+    net: float
+    ratio: float = 0
+
+
 class SectorFlowItem(BaseModel):
     name: str
     display_name: str | None = None
@@ -251,6 +257,7 @@ class SectorFlowItem(BaseModel):
     strength: int
     leaders: list[str]
     timeline: list[SectorFlowPoint]
+    flow_breakdown: list[SectorFlowBreakdownItem] = Field(default_factory=list)
 
 
 class SectorFlowOut(BaseModel):
@@ -366,6 +373,7 @@ class SectorDetailOut(BaseModel):
     leaders: list[str] = Field(default_factory=list)
     constituents: list[SectorConstituentOut]
     limit_up_stocks: list[SectorConstituentOut]
+    flow_breakdown: list[SectorFlowBreakdownItem] = Field(default_factory=list)
     notes: list[str] = Field(default_factory=list)
 
 

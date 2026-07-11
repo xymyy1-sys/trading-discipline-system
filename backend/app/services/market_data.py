@@ -786,6 +786,15 @@ class MarketDataProvider:
                     strength=max(0, min(100, int(raw.get("strength") or 50))),
                     leaders=[str(l) for l in raw.get("leaders", []) if str(l).strip()][:4],
                     timeline=timeline,
+                    flow_breakdown=[
+                        {
+                            "name": str(part.get("name") or ""),
+                            "net": round(float(part.get("net") or 0), 2),
+                            "ratio": round(float(part.get("ratio") or 0), 2),
+                        }
+                        for part in raw.get("flow_breakdown", [])
+                        if str(part.get("name") or "").strip()
+                    ],
                 )
             )
 
@@ -903,6 +912,15 @@ class MarketDataProvider:
             leaders=[str(l) for l in target.get("leaders", []) if str(l).strip()][:6],
             constituents=constituents[:80],
             limit_up_stocks=limit_ups[:20],
+            flow_breakdown=[
+                {
+                    "name": str(part.get("name") or ""),
+                    "net": round(float(part.get("net") or 0), 2),
+                    "ratio": round(float(part.get("ratio") or 0), 2),
+                }
+                for part in target.get("flow_breakdown", [])
+                if str(part.get("name") or "").strip()
+            ],
             notes=notes or ["板块成分股已同步"],
         )
         _set_response_cache(cache_key, result)
@@ -1290,6 +1308,28 @@ class MarketDataProvider:
                 "change_pct": float(row.get("f3") or 0),
                 "net_inflow": round(float(row.get(net_key) or 0) / 1e8, 2),
                 "main_inflow": round(float(row.get(main_key) or 0) / 1e8, 2),
+                "flow_breakdown": [
+                    {
+                        "name": "超大单",
+                        "net": round(float(row.get("f66") or 0) / 1e8, 2),
+                        "ratio": round(float(row.get("f69") or 0), 2),
+                    },
+                    {
+                        "name": "大单",
+                        "net": round(float(row.get("f72") or 0) / 1e8, 2),
+                        "ratio": round(float(row.get("f75") or 0), 2),
+                    },
+                    {
+                        "name": "中单",
+                        "net": round(float(row.get("f78") or 0) / 1e8, 2),
+                        "ratio": round(float(row.get("f81") or 0), 2),
+                    },
+                    {
+                        "name": "小单",
+                        "net": round(float(row.get("f84") or 0) / 1e8, 2),
+                        "ratio": round(float(row.get("f87") or 0), 2),
+                    },
+                ],
                 "strength": max(0, min(100, int(
                     50 + float(row.get("f3") or 0) * 8 + float(row.get(net_key) or 0) / 2e7
                 ))),

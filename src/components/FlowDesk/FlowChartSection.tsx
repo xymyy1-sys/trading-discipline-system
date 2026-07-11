@@ -21,42 +21,39 @@ export default function FlowChartSection({
 
   const items = useMemo(() => {
     if (!flow) return []
-    const top = flow.inflow.slice(0, 14)
-    const bot = flow.outflow.slice(0, 18)
+    const top = flow.inflow.slice(0, 10)
+    const bot = flow.outflow.slice(0, 10)
     return [...top, ...bot]
   }, [flow])
 
+  const drawableItems = useMemo(() => (
+    items.filter(item => item.timeline.filter(p => p.time && p.time !== '当前').length >= 2)
+  ), [items])
+
   const xData = useMemo(() => {
-    if (!items.length) return ['09:30', '15:00']
+    if (!drawableItems.length) return ['09:30', '15:00']
     const all = new Set<string>()
-    items.forEach(it => it.timeline.forEach(p => all.add(p.time)))
+    drawableItems.forEach(it => it.timeline.forEach(p => {
+      if (p.time !== '当前') all.add(p.time)
+    }))
     return Array.from(all).sort((a, b) => timeOrder(a) - timeOrder(b))
-  }, [items])
+  }, [drawableItems])
 
   useEffect(() => {
-    if (!ref.current || !items.length) return
+    if (!ref.current || !drawableItems.length) return
     const chart = echarts.init(ref.current)
-    const inflowColors = ['#d92d20', '#e23b2e', '#f05a28', '#ff6b35', '#d62828', '#f77f00', '#c1121f', '#ef476f', '#ff8a3d', '#b91c1c', '#fb5607', '#d9480f', '#f94144', '#e76f51']
-    const outflowColors = ['#00875a', '#009a6c', '#00b894', '#2f9e44', '#43aa8b', '#2a9d8f', '#3a7d44', '#55a630', '#1b9e77', '#66a182', '#6abf69', '#588157', '#4d908e', '#52b788', '#40916c', '#6c757d', '#adb5bd', '#8d99ae']
+    const inflowColors = ['#d92d20', '#e23b2e', '#f05a28', '#ff6b35', '#c1121f', '#ef476f', '#ff8a3d', '#b91c1c', '#fb5607', '#e76f51']
+    const outflowColors = ['#00875a', '#009a6c', '#00b894', '#2f9e44', '#2a9d8f', '#3a7d44', '#55a630', '#1b9e77', '#588157', '#4d908e']
 
     chart.setOption({
       backgroundColor: 'transparent',
-      grid: { left: 56, right: 20, top: 12, bottom: 40 },
+      grid: { left: 58, right: 150, top: 18, bottom: 36 },
       tooltip: {
         trigger: 'axis',
         backgroundColor: '#ffffff',
         borderColor: '#d8dee6',
         textStyle: { color: '#1d2630', fontSize: 13 },
         valueFormatter: (v: unknown) => `${Number(v).toFixed(2)} 亿`,
-      },
-      legend: {
-        type: 'scroll',
-        bottom: 6,
-        left: 'center',
-        textStyle: { color: '#596574', fontSize: 11 },
-        pageTextStyle: { color: '#596574' },
-        itemWidth: 12,
-        itemHeight: 8,
       },
       xAxis: {
         type: 'category',
@@ -71,10 +68,11 @@ export default function FlowChartSection({
         nameTextStyle: { color: '#8a94a3', fontSize: 11 },
         axisLabel: { color: '#6b7280', fontSize: 11, formatter: '{value}' },
         splitLine: { lineStyle: { color: '#e7ebf0', type: 'dashed' } },
+        axisLine: { lineStyle: { color: '#d8dee6' } },
       },
-      series: items.map((item, i) => {
+      series: drawableItems.map((item, i) => {
         const isInflow = item.net_inflow >= 0
-        const colorIdx = isInflow ? i % inflowColors.length : (i - flow!.inflow.slice(0, 14).length) % outflowColors.length
+        const colorIdx = isInflow ? i % inflowColors.length : i % outflowColors.length
         const color = isInflow ? inflowColors[colorIdx] : outflowColors[colorIdx]
         const label = displayName(item)
         const isSelected = selected === label
@@ -82,27 +80,20 @@ export default function FlowChartSection({
           name: label,
           type: 'line',
           smooth: 0.4,
-          symbol: item.timeline.length <= 1 ? 'circle' : 'none',
-          symbolSize: item.timeline.length <= 1 ? 7 : 4,
+          symbol: 'none',
+          endLabel: {
+            show: true,
+            formatter: () => `${label} ${item.net_inflow >= 0 ? '+' : ''}${item.net_inflow.toFixed(1)}亿`,
+            color,
+            fontSize: 11,
+            fontWeight: 600,
+          },
+          labelLayout: { moveOverlap: 'shiftY' },
           emphasis: { focus: 'series' },
           lineStyle: {
-            width: isSelected ? 4 : Math.abs(item.net_inflow) > 8 ? 2.5 : 1.5,
+            width: isSelected ? 4 : Math.abs(item.net_inflow) > 8 ? 2.4 : 1.6,
             color,
             opacity: selected && !isSelected ? 0.25 : 0.9,
-          },
-          areaStyle: {
-            color: {
-              type: 'linear',
-              x: 0,
-              y: 0,
-              x2: 0,
-              y2: 1,
-              colorStops: [
-                { offset: 0, color: isInflow ? 'rgba(217,45,32,0.10)' : 'rgba(0,135,90,0.08)' },
-                { offset: 1, color: 'rgba(255,255,255,0)' },
-              ],
-            },
-            opacity: isSelected ? 0.2 : 0.05,
           },
           data: xData.map(t => {
             const pt = item.timeline.find(p => p.time === t)
@@ -117,7 +108,7 @@ export default function FlowChartSection({
     chart.on('click', (params: any) => {
       if (params.seriesName) {
         onSelect(params.seriesName === selected ? null : params.seriesName)
-        const item = items.find(it => displayName(it) === params.seriesName)
+        const item = drawableItems.find(it => displayName(it) === params.seriesName)
         if (item) onOpenDetail(item)
       }
     })
@@ -128,9 +119,22 @@ export default function FlowChartSection({
       window.removeEventListener('resize', resize)
       chart.dispose()
     }
-  }, [items, xData, selected, onSelect, onOpenDetail, flow])
+  }, [drawableItems, xData, selected, onSelect, onOpenDetail])
 
-  return <div className="chart-surface-large" ref={ref} aria-label="全天资金流向图" />
+  if (!items.length) {
+    return <div className="chart-surface-large chart-empty-state">暂无资金流数据</div>
+  }
+
+  if (!drawableItems.length) {
+    return (
+      <div className="chart-surface-large chart-empty-state">
+        <strong>当前只有快照数据</strong>
+        <span>主图不再绘制孤立点；请看右侧 TOP10 榜单和资金拆解，盘中多次刷新后自动形成连续曲线。</span>
+      </div>
+    )
+  }
+
+  return <div className="chart-surface-large" ref={ref} aria-label="主力行业资金流入流出 TOP10 曲线" />
 }
 
 function timeOrder(label: string) {
