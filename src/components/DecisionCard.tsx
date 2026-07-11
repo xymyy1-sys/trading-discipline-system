@@ -122,13 +122,32 @@ export default function DecisionCard() {
             </div>
 
             {card.execution_state && (
-              <div className="decision-section">
-                <b>持仓执行</b>
-                <p>{card.execution_state.recommended_action} · {card.execution_state.state} · {card.execution_state.volume_price_state}</p>
+              <div className="decision-section execution-conclusion">
+                <b>执行结论</b>
+                <p>{card.execution_state.recommended_action} · {card.execution_state.state}</p>
+                <div className="execution-status-row">
+                  <span>预期 {card.execution_state.expectation_state}</span>
+                  <span>量价 {card.execution_state.volume_price_state}</span>
+                  <span>板块 {card.execution_state.sector_state || '待确认'}</span>
+                </div>
                 <div className="execution-line-grid">
                   <div><b>结构止损</b><span>{card.execution_state.structure_stop_price.toFixed(2)}</span></div>
                   <div><b>硬止损</b><span>{card.execution_state.hard_stop_price.toFixed(2)}</span></div>
                   <div><b>利润保护</b><span>{card.execution_state.profit_protection_price ? card.execution_state.profit_protection_price.toFixed(2) : '--'}</span></div>
+                </div>
+                <div className="execution-rule-columns">
+                  <div>
+                    <b>禁止条件</b>
+                    <ul>
+                      {card.execution_state.invalid_conditions.slice(0, 3).map(item => <li key={item}>{item}</li>)}
+                    </ul>
+                  </div>
+                  <div>
+                    <b>修复条件</b>
+                    <ul>
+                      {card.execution_state.recovery_conditions.slice(0, 3).map(item => <li key={item}>{item}</li>)}
+                    </ul>
+                  </div>
                 </div>
               </div>
             )}

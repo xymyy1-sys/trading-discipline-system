@@ -359,7 +359,7 @@ def decision_card(db: Session, code: str) -> StockDecisionCardOut:
     stage = current_expectation_stage()
     expectation = build_expectation_snapshot(db, code, name=name, stage=stage, quote=quote, base_hint=base_hint)
     volume_price = build_volume_price_snapshot(db, code, name=name, stage=stage, quote=quote)
-    execution = build_position_execution_state(db, holding, quote=quote) if holding else None
+    execution = build_position_execution_state(db, holding, quote=quote, expectation=expectation, volume_price=volume_price) if holding else None
     t_eligibility = build_t_eligibility(db, holding) if holding else None
     events: list[IntradayEvidenceEventOut] = []
     rows = (

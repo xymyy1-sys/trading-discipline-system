@@ -2336,6 +2336,42 @@ h4 {
   overflow-wrap: anywhere;
 }
 
+.execution-conclusion {
+  border-color: rgba(83, 197, 170, 0.35);
+}
+
+.execution-status-row {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.execution-status-row span {
+  border: 1px solid var(--border-dim);
+  border-radius: 4px;
+  padding: 4px 8px;
+  color: var(--ink-muted);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.execution-rule-columns {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.execution-rule-columns div {
+  border: 1px solid var(--border-dim);
+  border-radius: 6px;
+  padding: 8px;
+  min-width: 0;
+}
+
+.execution-rule-columns ul {
+  margin: 6px 0 0;
+}
+
 .decision-section p,
 .decision-t-box p {
   margin: 0;
@@ -3315,6 +3351,9 @@ h4 {
   }
   .volume-price-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .execution-rule-columns {
+    grid-template-columns: 1fr;
   }
   .seesaw-alert-list {
     grid-template-columns: 1fr;
