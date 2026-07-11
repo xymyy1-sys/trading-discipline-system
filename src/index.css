@@ -9,10 +9,20 @@
   --ink-muted: #5e6978;
   --ink-dim: #8a94a3;
   
-  --up: #16834f;
-  --up-glow: rgba(22, 131, 79, 0.12);
-  --down: #c92a2a;
-  --down-glow: rgba(201, 42, 42, 0.12);
+  --cn-rise: #c92a2a;
+  --cn-rise-bg: #fff1f1;
+  --cn-rise-border: #e9a5a5;
+  --cn-fall: #16834f;
+  --cn-fall-bg: #eef9f2;
+  --cn-fall-border: #9bcba9;
+  --money-in: var(--cn-rise);
+  --money-out: var(--cn-fall);
+  --profit: var(--cn-rise);
+  --loss: var(--cn-fall);
+  --up: var(--cn-rise);
+  --up-glow: rgba(201, 42, 42, 0.12);
+  --down: var(--cn-fall);
+  --down-glow: rgba(22, 131, 79, 0.12);
   --warn: #9a6700;
   --warn-glow: rgba(154, 103, 0, 0.12);
   --info: #285f9f;
