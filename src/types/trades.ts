@@ -81,6 +81,26 @@ export interface FeedbackSummary {
   count: number;
 }
 
+export interface CalibrationMetric {
+  key: string;
+  label: string;
+  sample_count: number;
+  success_count: number;
+  fail_count: number;
+  success_rate: number;
+  average_value: number;
+  verdict: string;
+  evidence: string[];
+}
+
+export interface CalibrationSuggestion {
+  level: string;
+  target: string;
+  suggestion: string;
+  reason: string;
+  sample_count: number;
+}
+
 export interface ReviewCalibrationSummary {
   trade_count: number;
   review_count: number;
@@ -94,6 +114,8 @@ export interface ReviewCalibrationSummary {
   issues: CalibrationIssue[];
   recent_plan_deviations: PlanDeviation[];
   feedback_summary: FeedbackSummary[];
+  model_metrics: CalibrationMetric[];
+  calibration_suggestions: CalibrationSuggestion[];
   next_actions: string[];
 }
 

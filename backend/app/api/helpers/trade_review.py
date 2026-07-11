@@ -4,9 +4,20 @@ from datetime import datetime
 from typing import Any
 from sqlalchemy.orm import Session
 from app.core.database import SessionLocal
-from app.models.trading import ActionRecommendation, NextDayPlan, RecommendationFeedback, TradeLog, TradeReview
+from app.models.trading import (
+    ActionRecommendation,
+    ExpectationSnapshot,
+    NextDayPlan,
+    RecommendationFeedback,
+    TTradePlan,
+    TradeLog,
+    TradeReview,
+    VolumePriceSnapshot,
+)
 from app.schemas.trading import (
+    CalibrationMetricOut,
     CalibrationIssueOut,
+    CalibrationSuggestionOut,
     FeedbackSummaryOut,
     PlanDeviationOut,
     ReviewCalibrationSummaryOut,
@@ -87,6 +98,7 @@ def _review_calibration_summary(db: Session) -> ReviewCalibrationSummaryOut:
         if feedback_by_recommendation.get(item.id)
         and feedback_by_recommendation[item.id].status in {"忽略", "暂不执行"}
     )
+    model_metrics, calibration_suggestions = _model_calibration_metrics(db, plan_reviews, feedback, recommendations)
     issues: list[CalibrationIssueOut] = []
 
     if pending_review_count:
@@ -166,7 +178,197 @@ def _review_calibration_summary(db: Session) -> ReviewCalibrationSummaryOut:
         issues=issues,
         recent_plan_deviations=deviations,
         feedback_summary=[FeedbackSummaryOut(status=status, count=count) for status, count in feedback_counter.most_common()],
+        model_metrics=model_metrics,
+        calibration_suggestions=calibration_suggestions,
         next_actions=next_actions,
+    )
+
+
+def _model_calibration_metrics(
+    db: Session,
+    plan_reviews: list[NextDayPlan],
+    feedback: list[RecommendationFeedback],
+    recommendations: list[ActionRecommendation],
+) -> tuple[list[CalibrationMetricOut], list[CalibrationSuggestionOut]]:
+    expectations = (
+        db.query(ExpectationSnapshot)
+        .order_by(ExpectationSnapshot.created_at.desc())
+        .limit(200)
+        .all()
+    )
+    volume_snapshots = (
+        db.query(VolumePriceSnapshot)
+        .order_by(VolumePriceSnapshot.captured_at.desc())
+        .limit(200)
+        .all()
+    )
+    t_plans = db.query(TTradePlan).order_by(TTradePlan.updated_at.desc()).limit(200).all()
+
+    metrics: list[CalibrationMetricOut] = []
+    suggestions: list[CalibrationSuggestionOut] = []
+
+    expectation_samples = [item for item in expectations if item.expectation_result and item.expectation_result != "UNKNOWN"]
+    expectation_fail = sum(1 for item in expectation_samples if item.expectation_result in {"WEAKER", "SLIGHTLY_WEAKER"})
+    expectation_success = sum(1 for item in expectation_samples if item.expectation_result in {"MATCHED", "STRONGER"})
+    metrics.append(_metric(
+        key="expectation_hit",
+        label="阶段预期命中",
+        sample_count=len(expectation_samples),
+        success_count=expectation_success,
+        fail_count=expectation_fail,
+        evidence=[
+            f"弱于预期 {expectation_fail} 次",
+            f"符合/强于预期 {expectation_success} 次",
+        ],
+    ))
+    if len(expectation_samples) >= 5 and expectation_fail / len(expectation_samples) >= 0.45:
+        suggestions.append(CalibrationSuggestionOut(
+            level="高",
+            target="预期阈值",
+            suggestion="收紧强预期开盘和五分钟确认阈值，弱于预期时默认降一档仓位。",
+            reason="阶段预期样本中弱于预期比例偏高，说明当前预期设定可能过宽或确认过晚。",
+            sample_count=len(expectation_samples),
+        ))
+
+    weak_volume_patterns = ("跌破VWAP", "冲高回落", "放量下跌", "量价转弱", "缩量冲高")
+    volume_samples = [item for item in volume_snapshots if item.pattern]
+    weak_volume = [item for item in volume_samples if _contains_any(item.pattern, weak_volume_patterns)]
+    repaired_volume = [item for item in volume_samples if _contains_any(item.pattern, ("修复", "站上VWAP", "放量上涨"))]
+    metrics.append(_metric(
+        key="volume_price_risk",
+        label="量价风险识别",
+        sample_count=len(volume_samples),
+        success_count=len(weak_volume),
+        fail_count=len(repaired_volume),
+        evidence=[
+            f"风险形态 {len(weak_volume)} 次",
+            f"修复/强势形态 {len(repaired_volume)} 次",
+        ],
+        success_word="风险样本",
+    ))
+    if len(volume_samples) >= 8 and len(weak_volume) / len(volume_samples) >= 0.5:
+        suggestions.append(CalibrationSuggestionOut(
+            level="中",
+            target="量价引擎",
+            suggestion="把跌破 VWAP 后的补仓/做T限制继续前置，要求修复确认后再恢复动作。",
+            reason="近期量价风险形态占比偏高，执行端应优先防止越跌越补。",
+            sample_count=len(volume_samples),
+        ))
+
+    completed_t = [item for item in t_plans if item.status in {"done", "completed", "已完成"} or item.cost_reduction]
+    positive_t = [item for item in completed_t if item.cost_reduction > 0]
+    avg_cost_reduction = (
+        round(sum(item.cost_reduction for item in completed_t) / len(completed_t), 4)
+        if completed_t else 0
+    )
+    metrics.append(_metric(
+        key="t_trade_effect",
+        label="做T真实贡献",
+        sample_count=len(completed_t),
+        success_count=len(positive_t),
+        fail_count=max(0, len(completed_t) - len(positive_t)),
+        average_value=avg_cost_reduction,
+        evidence=[f"平均降本 {avg_cost_reduction:.4f}", f"正贡献 {len(positive_t)} 次"],
+    ))
+    if len(completed_t) >= 3 and len(positive_t) / len(completed_t) < 0.5:
+        suggestions.append(CalibrationSuggestionOut(
+            level="高",
+            target="做T策略",
+            suggestion="暂停扩大做T比例，只保留盈利趋势仓小比例正T。",
+            reason="已完成做T计划的正贡献比例不足，说明做T对账户净贡献不稳定。",
+            sample_count=len(completed_t),
+        ))
+
+    feedback_by_recommendation = {item.recommendation_id: item for item in feedback}
+    feedback_samples = [item for item in recommendations if item.id in feedback_by_recommendation]
+    executed = [
+        item for item in feedback_samples
+        if feedback_by_recommendation[item.id].status in {"已执行", "部分执行"}
+    ]
+    ignored = [
+        item for item in feedback_samples
+        if feedback_by_recommendation[item.id].status in {"忽略", "暂不执行"}
+    ]
+    metrics.append(_metric(
+        key="execution_adoption",
+        label="执行建议采纳",
+        sample_count=len(feedback_samples),
+        success_count=len(executed),
+        fail_count=len(ignored),
+        evidence=[f"已执行/部分执行 {len(executed)} 条", f"忽略/暂不执行 {len(ignored)} 条"],
+    ))
+    if len(feedback_samples) >= 5 and len(ignored) / len(feedback_samples) >= 0.4:
+        suggestions.append(CalibrationSuggestionOut(
+            level="中",
+            target="执行提醒",
+            suggestion="被忽略建议必须填写理由；连续忽略同类风险提醒时，在首页提高风险等级。",
+            reason="系统建议存在较高比例未执行，后续需要区分规则误报与主观覆盖纪律。",
+            sample_count=len(feedback_samples),
+        ))
+
+    severe_deviations = [
+        item for item in plan_reviews
+        if _contains_any(f"{item.review_expectation} {item.review_execution} {item.review_deviation}", ("严重", "未执行", "幻想", "破位", "补仓", "亏损"))
+    ]
+    metrics.append(_metric(
+        key="plan_execution_drift",
+        label="计划执行偏差",
+        sample_count=len(plan_reviews),
+        success_count=max(0, len(plan_reviews) - len(severe_deviations)),
+        fail_count=len(severe_deviations),
+        evidence=[f"严重偏差 {len(severe_deviations)} 张", f"已复盘计划 {len(plan_reviews)} 张"],
+    ))
+    if len(plan_reviews) >= 5 and len(severe_deviations) / len(plan_reviews) >= 0.35:
+        suggestions.append(CalibrationSuggestionOut(
+            level="高",
+            target="计划纪律",
+            suggestion="次日计划增加盘中强制检查点，弱于预期和破位不得等到收盘才处理。",
+            reason="计划复盘中的严重执行偏差占比偏高。",
+            sample_count=len(plan_reviews),
+        ))
+
+    if not suggestions:
+        suggestions.append(CalibrationSuggestionOut(
+            level="观察",
+            target="样本积累",
+            suggestion="继续积累预期、量价、做T和执行反馈样本，暂不自动调整参数。",
+            reason="当前样本量或偏差强度不足以支撑自动校准。",
+            sample_count=sum(item.sample_count for item in metrics),
+        ))
+
+    return metrics, suggestions
+
+
+def _metric(
+    *,
+    key: str,
+    label: str,
+    sample_count: int,
+    success_count: int,
+    fail_count: int,
+    evidence: list[str],
+    average_value: float = 0,
+    success_word: str = "通过",
+) -> CalibrationMetricOut:
+    success_rate = round(success_count / sample_count * 100, 1) if sample_count else 0
+    if sample_count < 3:
+        verdict = "样本不足"
+    elif success_rate >= 70:
+        verdict = f"{success_word}稳定"
+    elif success_rate >= 50:
+        verdict = "需要观察"
+    else:
+        verdict = "需要校准"
+    return CalibrationMetricOut(
+        key=key,
+        label=label,
+        sample_count=sample_count,
+        success_count=success_count,
+        fail_count=fail_count,
+        success_rate=success_rate,
+        average_value=average_value,
+        verdict=verdict,
+        evidence=evidence,
     )
 
 

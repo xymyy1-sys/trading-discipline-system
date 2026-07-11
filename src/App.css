@@ -4469,12 +4469,14 @@ h3 {
   gap: 7px;
 }
 
-.calibration-panel:last-child {
+.calibration-grid:not(.model-grid) .calibration-panel:last-child {
   grid-column: 1 / -1;
 }
 
 .calibration-issue,
-.plan-deviation {
+.plan-deviation,
+.model-metric,
+.calibration-suggestion {
   border: 1px solid #dfe5ec;
   background: #fbfcfd;
   padding: 10px;
@@ -4484,7 +4486,9 @@ h3 {
 }
 
 .calibration-issue > div,
-.plan-deviation > div {
+.plan-deviation > div,
+.model-metric > div,
+.calibration-suggestion > div {
   display: flex;
   justify-content: space-between;
   align-items: center;
@@ -4492,13 +4496,17 @@ h3 {
 }
 
 .calibration-issue b,
-.plan-deviation b {
+.plan-deviation b,
+.model-metric b,
+.calibration-suggestion b {
   color: var(--ink);
   font-size: 13px;
 }
 
 .calibration-issue span,
-.plan-deviation span {
+.plan-deviation span,
+.model-metric span,
+.calibration-suggestion span {
   border: 1px solid #dfe5ec;
   background: #fff;
   color: var(--ink-muted);
@@ -4508,14 +4516,16 @@ h3 {
 }
 
 .calibration-issue.level-高 span,
-.plan-deviation.severity-高 span {
+.plan-deviation.severity-高 span,
+.calibration-suggestion.level-高 span {
   color: var(--cn-fall);
   border-color: var(--cn-fall-border);
   background: var(--cn-fall-bg);
 }
 
 .calibration-issue.level-中 span,
-.plan-deviation.severity-中 span {
+.plan-deviation.severity-中 span,
+.calibration-suggestion.level-中 span {
   color: var(--warn);
   border-color: #efcf8a;
   background: #fff7e6;
@@ -4523,12 +4533,44 @@ h3 {
 
 .calibration-issue p,
 .plan-deviation p,
+.model-metric p,
+.calibration-suggestion p,
 .calibration-issue small,
-.plan-deviation small {
+.plan-deviation small,
+.model-metric small,
+.calibration-suggestion small {
   margin: 0;
   color: var(--ink-muted);
   line-height: 1.55;
   font-size: 12px;
+}
+
+.model-metric-list,
+.suggestion-list {
+  display: grid;
+  gap: 10px;
+}
+
+.model-metric strong {
+  color: var(--ink);
+  font-size: 24px;
+  font-variant-numeric: tabular-nums;
+}
+
+.evidence-inline {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.evidence-inline em {
+  border: 1px solid #dfe5ec;
+  background: #fff;
+  color: var(--ink-muted);
+  border-radius: 4px;
+  padding: 4px 7px;
+  font-size: 11px;
+  font-style: normal;
 }
 
 .feedback-summary {

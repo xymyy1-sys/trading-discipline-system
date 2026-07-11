@@ -478,6 +478,26 @@ class FeedbackSummaryOut(BaseModel):
     count: int
 
 
+class CalibrationMetricOut(BaseModel):
+    key: str
+    label: str
+    sample_count: int
+    success_count: int = 0
+    fail_count: int = 0
+    success_rate: float = 0
+    average_value: float = 0
+    verdict: str = "样本不足"
+    evidence: list[str] = Field(default_factory=list)
+
+
+class CalibrationSuggestionOut(BaseModel):
+    level: str
+    target: str
+    suggestion: str
+    reason: str
+    sample_count: int = 0
+
+
 class ReviewCalibrationSummaryOut(BaseModel):
     trade_count: int
     review_count: int
@@ -491,6 +511,8 @@ class ReviewCalibrationSummaryOut(BaseModel):
     issues: list[CalibrationIssueOut] = Field(default_factory=list)
     recent_plan_deviations: list[PlanDeviationOut] = Field(default_factory=list)
     feedback_summary: list[FeedbackSummaryOut] = Field(default_factory=list)
+    model_metrics: list[CalibrationMetricOut] = Field(default_factory=list)
+    calibration_suggestions: list[CalibrationSuggestionOut] = Field(default_factory=list)
     next_actions: list[str] = Field(default_factory=list)
 
 

@@ -16,7 +16,16 @@ def test_market_sector_flow(client):
 
 
 def test_review_calibration_summary(client, db_session):
-    from app.models.trading import NextDayPlan, TradeLog, TradeReview
+    from app.models.trading import (
+        ActionRecommendation,
+        ExpectationSnapshot,
+        NextDayPlan,
+        RecommendationFeedback,
+        TTradePlan,
+        TradeLog,
+        TradeReview,
+        VolumePriceSnapshot,
+    )
 
     trade = TradeLog(
         code="600010",
@@ -66,6 +75,50 @@ def test_review_calibration_summary(client, db_session):
         review_execution="未执行减仓",
         review_deviation="幻想回拉",
     ))
+    for index in range(5):
+        db_session.add(ExpectationSnapshot(
+            trade_date="2026-07-13",
+            code=f"60002{index}",
+            name=f"预期样本{index}",
+            stage="五分钟确认",
+            base_expectation="STRONG",
+            expectation_result="WEAKER" if index < 3 else "MATCHED",
+            expectation_gap_score=-30 if index < 3 else 5,
+        ))
+    for index in range(8):
+        db_session.add(VolumePriceSnapshot(
+            trade_date="2026-07-13",
+            code=f"60003{index}",
+            name=f"量价样本{index}",
+            stage="五分钟确认",
+            price=10,
+            vwap=10.2,
+            pattern="跌破VWAP" if index < 5 else "量价中性",
+        ))
+    for index in range(3):
+        db_session.add(TTradePlan(
+            holding_id=index + 1,
+            trade_date="2026-07-13",
+            code=f"60004{index}",
+            name=f"做T样本{index}",
+            status="done",
+            cost_reduction=0.02 if index == 0 else -0.01,
+        ))
+    recommendation = ActionRecommendation(
+        trade_date="2026-07-13",
+        code="600050",
+        name="执行样本",
+        level="WARN",
+        state="VWAP_BREAKDOWN",
+        action="减仓25%",
+    )
+    db_session.add(recommendation)
+    db_session.flush()
+    db_session.add(RecommendationFeedback(
+        recommendation_id=recommendation.id,
+        status="暂不执行",
+        reason="主观等待回拉",
+    ))
     db_session.commit()
 
     response = client.get("/api/review-calibration/summary")
@@ -77,3 +130,11 @@ def test_review_calibration_summary(client, db_session):
     assert data["plan_review_count"] == 1
     assert any(item["title"] == "纪律评分低于 60" for item in data["issues"])
     assert data["recent_plan_deviations"][0]["severity"] == "高"
+    assert {item["key"] for item in data["model_metrics"]} >= {
+        "expectation_hit",
+        "volume_price_risk",
+        "t_trade_effect",
+        "execution_adoption",
+        "plan_execution_drift",
+    }
+    assert any(item["target"] == "预期阈值" for item in data["calibration_suggestions"])

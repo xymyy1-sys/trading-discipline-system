@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { AlertTriangle, CheckCircle2, ClipboardCheck, RefreshCcw } from 'lucide-react'
+import { Activity, AlertTriangle, CheckCircle2, ClipboardCheck, RefreshCcw, SlidersHorizontal } from 'lucide-react'
 import { API_BASE } from '../api'
 import type { ReviewCalibrationSummary } from '../types'
 
@@ -54,6 +54,44 @@ export default function ReviewCalibration() {
         <Metric label="计划缺口" value={`${summary.missing_plan_review_count}`} tone={summary.missing_plan_review_count ? 'bad' : 'good'} />
         <Metric label="执行反馈" value={`${summary.execution_feedback_count}`} />
         <Metric label="忽略提醒" value={`${summary.ignored_recommendation_count}`} tone={summary.ignored_recommendation_count ? 'warn' : 'good'} />
+      </div>
+
+      <div className="calibration-grid model-grid">
+        <section className="panel calibration-panel">
+          <h3><Activity size={16} />模型有效性</h3>
+          <div className="model-metric-list">
+            {summary.model_metrics.map(item => (
+              <article className="model-metric" key={item.key}>
+                <div>
+                  <b>{item.label}</b>
+                  <span>{item.verdict}</span>
+                </div>
+                <strong>{item.sample_count ? `${item.success_rate.toFixed(1)}%` : '--'}</strong>
+                <p>样本 {item.sample_count} · 通过 {item.success_count} · 偏差 {item.fail_count}</p>
+                {!!item.average_value && <small>均值 {item.average_value.toFixed(4)}</small>}
+                <div className="evidence-inline">
+                  {item.evidence.map(evidence => <em key={evidence}>{evidence}</em>)}
+                </div>
+              </article>
+            ))}
+          </div>
+        </section>
+
+        <section className="panel calibration-panel">
+          <h3><SlidersHorizontal size={16} />参数建议</h3>
+          <div className="suggestion-list">
+            {summary.calibration_suggestions.map(item => (
+              <article className={`calibration-suggestion level-${item.level}`} key={`${item.target}-${item.suggestion}`}>
+                <div>
+                  <b>{item.target}</b>
+                  <span>{item.level}</span>
+                </div>
+                <p>{item.suggestion}</p>
+                <small>{item.reason} · 样本 {item.sample_count}</small>
+              </article>
+            ))}
+          </div>
+        </section>
       </div>
 
       <div className="calibration-grid">
