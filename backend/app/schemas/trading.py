@@ -844,6 +844,15 @@ class ClassificationBasis(BaseModel):
     weaker_than_sector: bool = False
 
 
+class AuctionStageCheck(BaseModel):
+    stage: str
+    status: str = "待确认"
+    trigger: str = ""
+    decision: str = ""
+    required_action: str = ""
+    evidence: list[str] = Field(default_factory=list)
+
+
 class AuctionPlan(BaseModel):
     board_level: str = ""
     industry: str = ""
@@ -874,6 +883,10 @@ class AuctionPlan(BaseModel):
     next_day_script: list[str] = Field(default_factory=list)
     sell_trigger_cards: list[str] = Field(default_factory=list)
     refreshed_at: str = ""
+    current_stage: str = ""
+    stage_decision: str = ""
+    action_ladder: list[str] = Field(default_factory=list)
+    stage_checks: list[AuctionStageCheck] = Field(default_factory=list)
 
 
 class NextDayPlanBase(BaseModel):

@@ -23,7 +23,8 @@ from app.api.helpers.plan_calc import (
     _default_next_day_plan,
     _sync_holding_plan,
     _limit_up_next_day_plan,
-    _refresh_plan_risk
+    _refresh_plan_risk,
+    refresh_limit_expectation_stage,
 )
 from app.api.helpers.seesaw import _sell_plan
 
@@ -146,6 +147,13 @@ def delete_next_day_plan(plan_id: int, db: Session = Depends(get_db)) -> dict[st
     db.delete(plan)
     db.commit()
     return {"status": "deleted"}
+
+@router.post("/next-day-plans/{plan_id}/stage-refresh", response_model=NextDayPlanOut)
+def refresh_next_day_plan_stage(plan_id: int, db: Session = Depends(get_db)) -> NextDayPlanOut:
+    plan = db.get(NextDayPlan, plan_id)
+    if plan is None:
+        raise HTTPException(status_code=404, detail="next day plan not found")
+    return refresh_limit_expectation_stage(plan, db)
 
 @router.post("/next-day-plans/{plan_id}/review", response_model=NextDayPlanOut)
 def review_next_day_plan(

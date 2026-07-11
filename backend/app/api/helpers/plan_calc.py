@@ -56,6 +56,18 @@ _FORBIDDEN_BY_CATEGORY = {
 def _contains_any(text: str, keywords: tuple[str, ...]) -> bool:
     return any(keyword and keyword in text for keyword in keywords)
 
+def _estimated_vwap(quote: dict[str, Any]) -> float:
+    for key in ("vwap", "avg_price", "average_price"):
+        value = _safe_float(quote.get(key))
+        if value:
+            return value
+    price = _safe_float(quote.get("price"))
+    open_price = _safe_float(quote.get("open"))
+    high = _safe_float(quote.get("high"))
+    low = _safe_float(quote.get("low"))
+    samples = [item for item in (open_price, high, low, price) if item]
+    return round(sum(samples) / len(samples), 2) if samples else 0.0
+
 def _next_trade_date() -> str:
     d = datetime.now() + timedelta(days=1)
     while d.weekday() >= 5:
@@ -162,6 +174,175 @@ def _sync_holding_plan(existing: NextDayPlan, fresh: NextDayPlan) -> None:
         if not str(getattr(existing, field) or "").strip():
             setattr(existing, field, getattr(fresh, field))
     _refresh_plan_risk(existing)
+
+
+def _current_stage_label() -> str:
+    now = datetime.now().time()
+    if now.hour < 9 or (now.hour == 9 and now.minute < 25):
+        return "盘后/盘前预期"
+    if now.hour == 9 and now.minute < 30:
+        return "竞价确认"
+    if now.hour == 9 and now.minute < 35:
+        return "开盘确认"
+    if now.hour < 10:
+        return "五分钟确认"
+    if now.hour < 11 or (now.hour == 11 and now.minute <= 30):
+        return "第一阶段确认"
+    if now.hour < 14 or (now.hour == 14 and now.minute < 30):
+        return "午盘/午后确认"
+    if now.hour < 15:
+        return "尾盘确认"
+    return "盘后校准"
+
+
+def _stage_status_from_expectation(result: str) -> tuple[str, str]:
+    if result in {"STRONGER", "SLIGHTLY_STRONGER"}:
+        return "通过", "预期强化，允许继续观察确认，不追最高点。"
+    if result == "MATCHED":
+        return "观察", "基本符合预期，必须继续等量价和板块确认。"
+    if result in {"WEAKER", "SLIGHTLY_WEAKER"}:
+        return "失败", "弱于预期，优先降风险，禁止补仓。"
+    return "待确认", "预期数据不足，不能给确定动作。"
+
+
+def _stage_status_from_volume(pattern: str) -> tuple[str, str]:
+    if "VWAP上方强势" in pattern or "放量上涨" in pattern:
+        return "通过", "量价承接有效，可按计划持有确认。"
+    if "冲高回落跌破VWAP" in pattern or "跌破VWAP" in pattern or "量价转弱" in pattern:
+        return "失败", "量价承接失效，反抽优先降风险。"
+    if "冲高回落" in pattern:
+        return "观察", "冲高回落但未完全证伪，等重新站回VWAP。"
+    return "观察", "量价暂未给出强确认。"
+
+
+def _build_stage_checks(
+    plan: NextDayPlan,
+    expectation: Any,
+    volume_price: Any,
+    quote: dict[str, Any],
+) -> list[dict[str, Any]]:
+    auction = _json_obj(plan.auction_plan)
+    expected_status, expected_action = _stage_status_from_expectation(str(getattr(expectation, "expectation_result", "") or ""))
+    volume_status, volume_action = _stage_status_from_volume(str(getattr(volume_price, "pattern", "") or ""))
+    price = _safe_float(quote.get("price")) or plan.current_price
+    high = _safe_float(quote.get("high"))
+    prev_close = _safe_float(quote.get("prev_close"))
+    open_price = _safe_float(quote.get("open"))
+    limit_price = _safe_float(auction.get("limit_up_price")) or _safe_float(plan.limit_up_price)
+    change_pct = _safe_float(quote.get("change_pct"))
+    open_pct = ((open_price - prev_close) / prev_close * 100) if open_price and prev_close else 0
+    touched_limit = bool(limit_price and high >= limit_price * 0.995)
+    near_limit = bool(limit_price and price >= limit_price * 0.985)
+    break_limit = bool(touched_limit and price < limit_price * 0.985)
+    return [
+        {
+            "stage": "盘后预期",
+            "status": "通过" if plan.holding_category in {"超预期", "强预期", "主线前排股"} else "观察",
+            "trigger": plan.holding_category,
+            "decision": auction.get("expectation_level") or plan.holding_category,
+            "required_action": "只记录预案，不把预期当买入指令。",
+            "evidence": [
+                plan.outperform_condition or "超预期剧本待补。",
+                plan.underperform_condition or "弱于预期剧本待补。",
+            ],
+        },
+        {
+            "stage": "竞价确认",
+            "status": expected_status if open_price else "待确认",
+            "trigger": f"开盘/竞价 {open_pct:+.2f}%",
+            "decision": str(getattr(expectation, "expectation_result", "") or "待确认"),
+            "required_action": expected_action,
+            "evidence": list(getattr(expectation, "evidence", []) or [])[:3],
+        },
+        {
+            "stage": "开盘确认",
+            "status": "通过" if price >= max(open_price, plan.confirm_price or 0) and price > 0 else "观察" if price > 0 else "待确认",
+            "trigger": f"现价 {price:.2f} / 确认位 {plan.confirm_price:.2f}",
+            "decision": "站上确认位" if price >= (plan.confirm_price or 0) and price > 0 else "未站稳确认位",
+            "required_action": "站稳确认位才继续持有；未站稳则只观察不加仓。",
+            "evidence": [str(getattr(volume_price, "data_source", "") or "行情源待确认")],
+        },
+        {
+            "stage": "五分钟量价确认",
+            "status": volume_status,
+            "trigger": str(getattr(volume_price, "pattern", "") or "量价待确认"),
+            "decision": str(getattr(volume_price, "pattern", "") or "量价待确认"),
+            "required_action": volume_action,
+            "evidence": list(getattr(volume_price, "evidence", []) or [])[:4],
+        },
+        {
+            "stage": "冲板确认",
+            "status": "通过" if near_limit and volume_status != "失败" else "观察",
+            "trigger": f"现价 {price:.2f} / 涨停 {limit_price:.2f}" if limit_price else "涨停价待确认",
+            "decision": "接近涨停且量价未证伪" if near_limit else "尚未进入冲板确认",
+            "required_action": "只在板块和量价同步确认时执行，不临盘扩大仓位。",
+            "evidence": [auction.get("board_strength") or "板块资金证据待补。"],
+        },
+        {
+            "stage": "炸板/回落处理",
+            "status": "失败" if break_limit else "观察",
+            "trigger": f"最高 {high:.2f} / 现价 {price:.2f} / 涨跌 {change_pct:+.2f}%",
+            "decision": "疑似炸板回落" if break_limit else "未触发炸板处理",
+            "required_action": auction.get("break_limit_action") or "炸板无承接时不补仓，反抽优先降风险。",
+            "evidence": list(auction.get("risk_notes") or [])[:4],
+        },
+    ]
+
+
+def refresh_limit_expectation_stage(plan: NextDayPlan, db: Session) -> NextDayPlanOut:
+    from app.api.helpers.decision import build_expectation_snapshot, quote_for_code
+    from app.api.helpers.volume_price import build_volume_price_snapshot
+
+    quote = quote_for_code(plan.code)
+    expectation = build_expectation_snapshot(
+        db,
+        plan.code,
+        name=plan.name,
+        stage=_current_stage_label(),
+        quote=quote,
+        base_hint=f"{plan.holding_category} {plan.outperform_condition} {plan.underperform_condition}",
+    )
+    volume_price = build_volume_price_snapshot(
+        db,
+        plan.code,
+        name=plan.name,
+        stage=_current_stage_label(),
+        quote=quote,
+    )
+    auction = _json_obj(plan.auction_plan)
+    checks = _build_stage_checks(plan, expectation, volume_price, quote)
+    failed = [item for item in checks if item["status"] == "失败"]
+    passed = [item for item in checks if item["status"] == "通过"]
+    if failed:
+        decision = f"{failed[-1]['stage']}失败：{failed[-1]['required_action']}"
+    elif len(passed) >= 3:
+        decision = "关键阶段通过，继续按计划确认，不追最高点。"
+    else:
+        decision = "仍处观察阶段，等待竞价/开盘/量价进一步确认。"
+    auction.update(
+        {
+            "current_stage": _current_stage_label(),
+            "stage_decision": decision,
+            "stage_checks": checks,
+            "action_ladder": [
+                "强预期：只在竞价、开盘、量价三项同步确认时执行。",
+                "符合预期：持有观察，不新增风险。",
+                "弱于预期：跌破确认位或VWAP失败，先降风险。",
+                "炸板/冲高回落：无强回封和板块助攻时，不补仓、不幻想。",
+            ],
+            "expectation_match": str(getattr(expectation, "expectation_result", "") or auction.get("expectation_match") or ""),
+            "volume_price_status": str(getattr(volume_price, "pattern", "") or auction.get("volume_price_status") or ""),
+            "operation_advice": decision,
+            "refreshed_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        }
+    )
+    plan.auction_plan = json.dumps(auction, ensure_ascii=False)
+    if failed and plan.holding_category not in {"弱于预期", "分歧转弱"}:
+        plan.holding_category = "分歧转弱"
+    _refresh_plan_risk(plan)
+    db.commit()
+    db.refresh(plan)
+    return _next_day_plan_out(plan, price_note=str(quote.get("note") or ""))
 
 def _limit_up_next_day_plan(
     payload: LimitUpPlanCreate,

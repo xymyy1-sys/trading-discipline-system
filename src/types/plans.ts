@@ -10,6 +10,15 @@ export interface ClassificationBasis {
   weaker_than_sector: boolean;
 }
 
+export interface AuctionStageCheck {
+  stage: string;
+  status: string;
+  trigger: string;
+  decision: string;
+  required_action: string;
+  evidence: string[];
+}
+
 export interface AuctionPlan {
   board_level: string;
   industry: string;
@@ -40,6 +49,10 @@ export interface AuctionPlan {
   next_day_script: string[];
   sell_trigger_cards: string[];
   refreshed_at: string;
+  current_stage: string;
+  stage_decision: string;
+  action_ladder: string[];
+  stage_checks: AuctionStageCheck[];
 }
 
 export interface NextDayPlan {

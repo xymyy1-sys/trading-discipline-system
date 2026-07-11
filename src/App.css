@@ -4287,6 +4287,123 @@ h3 {
   font-variant-numeric: tabular-nums;
 }
 
+.stage-decision-bar {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 12px;
+  align-items: center;
+  border: 1px solid #dfe5ec;
+  background: #f7f9fb;
+  padding: 12px;
+  border-radius: 4px;
+}
+
+.stage-decision-bar b {
+  color: var(--ink);
+  font-size: 14px;
+}
+
+.stage-decision-bar p {
+  margin: 4px 0 0;
+  color: var(--ink-muted);
+  line-height: 1.55;
+}
+
+.stage-decision-bar span {
+  color: var(--ink-dim);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.stage-check-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+  gap: 10px;
+}
+
+.stage-check {
+  border: 1px solid #dfe5ec;
+  background: #fbfcfd;
+  padding: 10px;
+  display: grid;
+  gap: 7px;
+  border-radius: 4px;
+  min-width: 0;
+}
+
+.stage-check > div {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.stage-check strong {
+  color: var(--ink);
+  font-size: 13px;
+}
+
+.stage-check span {
+  border: 1px solid #cbd5df;
+  background: #fff;
+  color: var(--ink-muted);
+  padding: 2px 7px;
+  font-size: 11px;
+  border-radius: 4px;
+}
+
+.stage-check.status-通过 span {
+  color: var(--cn-rise);
+  border-color: var(--cn-rise-border);
+  background: var(--cn-rise-bg);
+}
+
+.stage-check.status-失败 span {
+  color: var(--cn-fall);
+  border-color: var(--cn-fall-border);
+  background: var(--cn-fall-bg);
+}
+
+.stage-check.status-观察 span {
+  color: var(--warn);
+  border-color: #efcf8a;
+  background: #fff7e6;
+}
+
+.stage-check p,
+.stage-check li {
+  margin: 0;
+  color: var(--ink-muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.stage-check b {
+  color: var(--ink);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.stage-check ul {
+  margin: 0;
+  padding-left: 16px;
+}
+
+.action-ladder {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.action-ladder span {
+  border: 1px solid #dfe5ec;
+  color: var(--ink-muted);
+  background: #fff;
+  padding: 5px 8px;
+  border-radius: 4px;
+  font-size: 12px;
+}
+
 .sell-layout,
 .review-layout,
 .buycheck-layout,

@@ -115,6 +115,23 @@ export default function NextDayPlans() {
       })
   }
 
+  const refreshStage = () => {
+    if (!draft?.id) return
+    setLoading(true)
+    fetch(`${API_BASE}/api/next-day-plans/${draft.id}/stage-refresh`, { method: 'POST' })
+      .then(async r => {
+        if (!r.ok) throw new Error(await r.text())
+        return r.json()
+      })
+      .then((saved: Plan) => {
+        setPlans(prev => prev.map(item => item.id === saved.id ? saved : item))
+        setDraft(saved)
+        setStatusText(`已刷新阶段验收：${saved.auction_plan.current_stage || '当前阶段'}`)
+      })
+      .catch(() => setStatusText('阶段验收刷新失败'))
+      .finally(() => setLoading(false))
+  }
+
   const deletePlan = (plan: Plan) => {
     if (!window.confirm(`确认删除计划卡 ${plan.name}？`)) return
     setLoading(true)
@@ -202,6 +219,10 @@ export default function NextDayPlans() {
                 <button className="refresh-btn inline" type="button" onClick={savePlan}>
                   <Save size={14} />
                   保存
+                </button>
+                <button className="grade-btn" type="button" onClick={refreshStage} disabled={loading}>
+                  <RefreshCcw size={14} />
+                  刷新阶段验收
                 </button>
               </div>
 
@@ -304,6 +325,36 @@ export default function NextDayPlans() {
             {(draft.plan_type === 'limit_up_auction' || draft.auction_plan.board_strength || draft.auction_plan.limit_quality) && (
               <section className="panel auction-plan-panel">
                 <h3>打板预期分析</h3>
+                <div className="stage-decision-bar">
+                  <div>
+                    <b>{draft.auction_plan.current_stage || '阶段待确认'}</b>
+                    <p>{draft.auction_plan.stage_decision || draft.auction_plan.operation_advice || '点击刷新阶段验收，生成竞价/开盘/五分钟/冲板/炸板处理结论。'}</p>
+                  </div>
+                  <span>{draft.auction_plan.refreshed_at || '未刷新'}</span>
+                </div>
+                {!!draft.auction_plan.stage_checks?.length && (
+                  <div className="stage-check-grid">
+                    {draft.auction_plan.stage_checks.map(item => (
+                      <article className={`stage-check status-${item.status}`} key={item.stage}>
+                        <div>
+                          <strong>{item.stage}</strong>
+                          <span>{item.status}</span>
+                        </div>
+                        <p>{item.trigger}</p>
+                        <p>{item.decision}</p>
+                        <b>{item.required_action}</b>
+                        {!!item.evidence.length && (
+                          <ul>{item.evidence.slice(0, 3).map(evidence => <li key={evidence}>{evidence}</li>)}</ul>
+                        )}
+                      </article>
+                    ))}
+                  </div>
+                )}
+                {!!draft.auction_plan.action_ladder?.length && (
+                  <div className="action-ladder">
+                    {draft.auction_plan.action_ladder.map(item => <span key={item}>{item}</span>)}
+                  </div>
+                )}
                 <div className="auction-metrics">
                   <span>连板高度 <strong>{draft.auction_plan.board_level || '--'}</strong></span>
                   <span>明日涨停 <strong>{draft.limit_up_price.toFixed(2)}</strong></span>

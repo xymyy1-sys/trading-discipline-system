@@ -1,4 +1,5 @@
 from app.api.helpers.decision import build_expectation_snapshot, build_t_eligibility, create_t_plan
+from app.api.helpers.plan_calc import _default_next_day_plan, refresh_limit_expectation_stage
 from app.api.helpers.volume_price import build_volume_price_snapshot
 from app.models.trading import Holding
 
@@ -147,3 +148,99 @@ def test_expectation_create_and_update_routes(client, monkeypatch):
     assert payload["stage"] == "五分钟确认"
     assert payload["suggestion"] == "人工校准后先降风险。"
     assert payload["evidence"] == ["五分钟承接不足。"]
+
+
+def test_stage_refresh_writes_auction_checks(db_session, monkeypatch):
+    holding = Holding(
+        code="600008",
+        name="阶段验收",
+        quantity=1000,
+        cost_price=10,
+        current_price=10.6,
+        total_asset=100000,
+        position_type="打板仓 强预期",
+        next_discipline="按竞价开盘量价确认",
+    )
+    db_session.add(holding)
+    db_session.commit()
+    db_session.refresh(holding)
+    plan = _default_next_day_plan(
+        holding,
+        "2026-07-13",
+        100000,
+        {
+            "price": 9.8,
+            "change_pct": -2.0,
+            "open": 9.7,
+            "prev_close": 10.0,
+            "high": 10.9,
+            "low": 9.6,
+            "amount": 7.0,
+            "volume": 70_000_000,
+            "turnover": 6.2,
+            "note": "东方财富实时行情",
+        },
+    )
+    db_session.add(plan)
+    db_session.commit()
+    db_session.refresh(plan)
+    quote = {
+        "price": 9.8,
+        "change_pct": -2.0,
+        "open": 9.7,
+        "prev_close": 10.0,
+        "high": 10.9,
+        "low": 9.6,
+        "amount": 7.0,
+        "volume": 70_000_000,
+        "turnover": 6.2,
+        "note": "东方财富实时行情",
+    }
+
+    monkeypatch.setattr("app.api.helpers.decision.quote_for_code", lambda code: quote)
+
+    refreshed = refresh_limit_expectation_stage(plan, db_session)
+
+    assert refreshed.auction_plan.current_stage
+    assert refreshed.auction_plan.stage_decision
+    assert len(refreshed.auction_plan.stage_checks) == 6
+    assert any(item.stage == "五分钟量价确认" for item in refreshed.auction_plan.stage_checks)
+    assert refreshed.auction_plan.action_ladder
+
+
+def test_stage_refresh_route(client, monkeypatch):
+    quote = {
+        "price": 10.9,
+        "change_pct": 9.0,
+        "open": 10.3,
+        "prev_close": 10.0,
+        "high": 11.0,
+        "low": 10.2,
+        "amount": 9.0,
+        "volume": 90_000_000,
+        "turnover": 8.2,
+        "note": "东方财富实时行情",
+    }
+    monkeypatch.setattr("app.api.helpers.decision.quote_for_code", lambda code: quote)
+    created = client.post(
+        "/api/next-day-plans",
+        json={
+            "plan_date": "2026-07-13",
+            "plan_type": "limit_up_auction",
+            "code": "600009",
+            "name": "阶段路由",
+            "cost_price": 10,
+            "current_price": 10.9,
+            "holding_category": "强预期",
+            "confirm_price": 10.5,
+            "limit_up_price": 11,
+        },
+    )
+    assert created.status_code == 200
+
+    response = client.post(f"/api/next-day-plans/{created.json()['id']}/stage-refresh")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["auction_plan"]["stage_checks"]
+    assert payload["auction_plan"]["stage_decision"]
