@@ -30,7 +30,7 @@ export default function FlowChartSection({
     if (!items.length) return ['09:30', '15:00']
     const all = new Set<string>()
     items.forEach(it => it.timeline.forEach(p => all.add(p.time)))
-    return Array.from(all).sort()
+    return Array.from(all).sort((a, b) => timeOrder(a) - timeOrder(b))
   }, [items])
 
   useEffect(() => {
@@ -82,7 +82,8 @@ export default function FlowChartSection({
           name: label,
           type: 'line',
           smooth: 0.4,
-          symbol: 'none',
+          symbol: item.timeline.length <= 1 ? 'circle' : 'none',
+          symbolSize: item.timeline.length <= 1 ? 7 : 4,
           emphasis: { focus: 'series' },
           lineStyle: {
             width: isSelected ? 4 : Math.abs(item.net_inflow) > 8 ? 2.5 : 1.5,
@@ -130,4 +131,11 @@ export default function FlowChartSection({
   }, [items, xData, selected, onSelect, onOpenDetail, flow])
 
   return <div className="chart-surface-large" ref={ref} aria-label="全天资金流向图" />
+}
+
+function timeOrder(label: string) {
+  if (label === '当前') return 2400
+  const match = label.match(/^(\d{1,2}):(\d{2})$/)
+  if (!match) return Number.MAX_SAFE_INTEGER
+  return Number(match[1]) * 60 + Number(match[2])
 }

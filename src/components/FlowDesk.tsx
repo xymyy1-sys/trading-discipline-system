@@ -90,9 +90,16 @@ export default function FlowDesk() {
 
   const evidenceFlow = useMemo(() => holdingsToFlow(seesaw), [seesaw])
   const activeFlow = viewMode === 'holdings' ? evidenceFlow : flow
+  const categoryOptions = useMemo(() => buildCategoryOptions(activeFlow), [activeFlow])
   const filteredFlow = useMemo(() => filterFlowByCategory(activeFlow, category), [activeFlow, category])
   const strongest = filteredFlow?.inflow[0]
   const weakest = filteredFlow?.outflow[0]
+
+  useEffect(() => {
+    if (!categoryOptions.includes(category)) {
+      setCategory('全部')
+    }
+  }, [category, categoryOptions])
 
   return (
     <>
@@ -123,7 +130,7 @@ export default function FlowDesk() {
             ))}
           </div>}
           <div className="category-filter">
-            {['全部', '半导体链', 'AI算力链', '有色金属链', '商业航天', '机器人', '汽车链', '消费电子', '医药', '金融地产', '其他'].map(item => (
+            {categoryOptions.map(item => (
               <button className={category === item ? 'selected' : ''} key={item} onClick={() => setCategory(item)} type="button">
                 {item}
               </button>
@@ -225,12 +232,33 @@ function KV({ label, value, tone }: { label: string; value: string; tone?: 'up' 
 
 function filterFlowByCategory(flow: SectorFlow | null, category: string): SectorFlow | null {
   if (!flow || category === '全部') return flow
-  const pick = (item: SectorFlowItem) => (item.category || '其他') === category
+  const pick = (item: SectorFlowItem) => itemCategory(item) === category
   return {
     ...flow,
     inflow: flow.inflow.filter(pick),
     outflow: flow.outflow.filter(pick),
   }
+}
+
+function buildCategoryOptions(flow: SectorFlow | null) {
+  if (!flow) return ['全部']
+  const seen = new Map<string, number>()
+  const items = [...flow.inflow, ...flow.outflow]
+  items.forEach((item) => {
+    const key = itemCategory(item)
+    seen.set(key, (seen.get(key) ?? 0) + Math.max(1, Math.round(Math.abs(item.net_inflow))))
+  })
+  return [
+    '全部',
+    ...Array.from(seen.entries())
+      .sort((a, b) => b[1] - a[1])
+      .map(([name]) => name)
+      .slice(0, 12),
+  ]
+}
+
+function itemCategory(item: SectorFlowItem) {
+  return item.category || item.theme_line || item.mainline || item.raw_name || item.name || '其他'
 }
 
 function holdingsToFlow(seesaw: MarketSeesaw | null): SectorFlow | null {
@@ -242,13 +270,7 @@ function holdingsToFlow(seesaw: MarketSeesaw | null): SectorFlow | null {
     const rawConcepts = (item.stock_concepts || []).slice(0, 8)
 
     const realTl = item.theme_flow_timeline || []
-    const timeline = realTl.length >= 2
-      ? realTl.map(p => ({ time: p.time, value: p.value }))
-      : [
-          { time: '前值', value: Number((current - (item.sector_acceleration || 0)).toFixed(2)) },
-          { time: item.theme_flow_peak ? '高点' : '盘中', value: Number((item.theme_flow_peak || current).toFixed(2)) },
-          { time: '当前', value: Number(current.toFixed(2)) },
-        ]
+    const timeline = normalizeTimeline(realTl, current)
 
     return {
       name: display,
@@ -259,7 +281,7 @@ function holdingsToFlow(seesaw: MarketSeesaw | null): SectorFlow | null {
       theme_line: item.holding_theme,
       mainline: item.holding_theme,
       subline: [item.stock_industry, item.flow_basis].filter(Boolean).join(' / '),
-      category: mainCategory(item.holding_theme, item.theme_tags),
+      category: item.holding_theme || item.stock_industry || item.flow_basis || '持仓主线',
       change_pct: item.change_pct || 0,
       net_inflow: current,
       main_inflow: item.sector_main_inflow || current,
@@ -280,14 +302,18 @@ function holdingsToFlow(seesaw: MarketSeesaw | null): SectorFlow | null {
   }
 }
 
-function mainCategory(theme: string, tags: string[]) {
-  const text = `${theme} ${(tags || []).join(' ')}`
-  if (/半导体|芯片|集成电路/.test(text)) return '半导体链'
-  if (/AI|算力|服务器|云计算|液冷|东数西算/.test(text)) return 'AI算力链'
-  if (/航天|卫星|军工|北斗|低空/.test(text)) return '商业航天'
-  if (/机器人/.test(text)) return '机器人'
-  if (/医药|创新药|医疗/.test(text)) return '医药'
-  if (/新能源|光伏|锂电|储能/.test(text)) return '新能源'
-  if (/电子|消费电子|PCB|OLED/.test(text)) return '消费电子'
-  return '其他'
+function normalizeTimeline(points: Array<{ time: string; value: number }>, current: number) {
+  const cleaned = points
+    .filter(point => point.time)
+    .map(point => ({ time: point.time, value: Number(point.value.toFixed(2)) }))
+
+  if (!cleaned.length) {
+    return [{ time: '当前', value: Number(current.toFixed(2)) }]
+  }
+
+  const last = cleaned[cleaned.length - 1]
+  if (Math.abs(last.value - current) > 0.01) {
+    return [...cleaned, { time: '当前', value: Number(current.toFixed(2)) }]
+  }
+  return cleaned
 }

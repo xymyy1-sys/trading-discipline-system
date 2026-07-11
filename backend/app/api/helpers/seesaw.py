@@ -652,18 +652,7 @@ def _holding_theme_flow_profile(
     else:
         concept_summary = ""
     _tl = _aggregate_flow_timeline(selected)
-    if len(_tl) < 3 and sectors:
-        broader_timeline = _broader_industry_timeline(ranked_industry_flows, sectors, theme_profile)
-        if broader_timeline and len(broader_timeline) >= len(_tl):
-            _tl = broader_timeline
-    if not _tl and current != 0:
-        _tl = {datetime.now().strftime("%H:%M"): current}
-    timeline_points = [
-        {"time": t, "value": round(v, 2)}
-        for t, v in sorted(_tl.items()) if v or v == 0
-    ]
-    if not timeline_points and current:
-        timeline_points = [{"time": datetime.now().strftime("%H:%M"), "value": round(current, 2)}]
+    timeline_points = _timeline_points_with_current(_tl, current)
 
     return {
         "primary_flow": primary_flow,
@@ -683,6 +672,28 @@ def _holding_theme_flow_profile(
         "concept_main": concept_main,
         "timeline_points": timeline_points,
     }
+
+def _timeline_points_with_current(timeline: dict[str, float], current: float) -> list[dict[str, Any]]:
+    def _sort_key(item: tuple[str, float]) -> int:
+        label = item[0]
+        match = re.match(r"^(\d{1,2}):(\d{2})$", label)
+        if match:
+            return int(match.group(1)) * 60 + int(match.group(2))
+        return 2400 if label == "当前" else 9999
+
+    points = [
+        {"time": t, "value": round(v, 2)}
+        for t, v in sorted(timeline.items(), key=_sort_key)
+        if t and (v or v == 0)
+    ]
+    final = round(float(current or 0), 2)
+    if not points:
+        return [{"time": "当前", "value": final}]
+    if abs(float(points[-1]["value"]) - final) > 0.01:
+        points.append({"time": "当前", "value": final})
+    else:
+        points[-1]["value"] = final
+    return points
 
 def _cached_holding_theme_flow_profile(holding: Holding) -> dict[str, Any]:
     industry_flows = []

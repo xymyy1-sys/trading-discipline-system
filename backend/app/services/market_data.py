@@ -74,6 +74,24 @@ def _synthetic_timeline_points(label_times: list[str], final_value: float) -> li
     pts[-1].value = round(final_value, 2)
     return pts
 
+def _current_timeline_point(final_value: float) -> list[SectorFlowPoint]:
+    return [SectorFlowPoint(time="当前", value=round(float(final_value or 0), 2))]
+
+def _sanitize_flow_timeline(points: list[SectorFlowPoint], final_value: float) -> list[SectorFlowPoint]:
+    cleaned = [
+        SectorFlowPoint(time=str(point.time), value=round(float(point.value or 0), 2))
+        for point in points
+        if str(point.time or "").strip()
+    ]
+    final = round(float(final_value or 0), 2)
+    if not cleaned:
+        return _current_timeline_point(final)
+    if abs(cleaned[-1].value - final) > 0.01:
+        cleaned.append(SectorFlowPoint(time="当前", value=final))
+    else:
+        cleaned[-1].value = final
+    return cleaned
+
 class MarketDataProvider:
     def __init__(self) -> None:
         self.random = Random(20260704)
@@ -735,19 +753,21 @@ class MarketDataProvider:
                 try:
                     timeline = self._fetch_sina_sector_intraday_flow(str(raw.get("board_code")))
                 except Exception:
-                    timeline = _synthetic_timeline_points(label_times, net)
+                    timeline = _current_timeline_point(net)
             elif has_real_curve:
                 timeline: list[SectorFlowPoint] = []
                 for snap in snaps:
                     snap_time = str(snap.get("time") or "")
-                    snap_val = 0.0
+                    snap_val: float | None = None
                     for snap_item in snap.get("items", []):
                         if str(snap_item.get("name")) == name:
                             snap_val = float(snap_item.get("net_inflow") or 0)
                             break
-                    timeline.append(SectorFlowPoint(time=snap_time, value=round(snap_val, 2)))
+                    if snap_val is not None:
+                        timeline.append(SectorFlowPoint(time=snap_time, value=round(snap_val, 2)))
             else:
-                timeline = _synthetic_timeline_points(label_times, net)
+                timeline = _current_timeline_point(net)
+            timeline = _sanitize_flow_timeline(timeline, net)
 
             items.append(
                 SectorFlowItem(
@@ -770,6 +790,11 @@ class MarketDataProvider:
             )
 
         ordered = sorted(items, key=lambda x: x.net_inflow, reverse=True)
+        inflow_items = [item for item in ordered if item.net_inflow > 0]
+        outflow_items = sorted(
+            [item for item in ordered if item.net_inflow < 0],
+            key=lambda x: x.net_inflow,
+        )
         base_source = source
         if has_real_curve:
             base_source = f"{source}+snapshots:{len(snaps)}"
@@ -782,8 +807,8 @@ class MarketDataProvider:
         result = SectorFlowOut(
             source=base_source,
             updated_at=now,
-            inflow=ordered[:20],
-            outflow=list(reversed(ordered[-20:])),
+            inflow=inflow_items[:20],
+            outflow=outflow_items[:20],
         )
         _set_response_cache(response_cache_key, result)
         return result
