@@ -170,3 +170,105 @@ class NextDayPlan(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc)
     )
+
+
+class PositionExecutionState(Base):
+    __tablename__ = "position_execution_states"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    holding_id: Mapped[int] = mapped_column(Integer, index=True)
+    code: Mapped[str] = mapped_column(String(16), index=True)
+    name: Mapped[str] = mapped_column(String(64), index=True)
+    trade_date: Mapped[str] = mapped_column(String(16), index=True)
+    state: Mapped[str] = mapped_column(String(48), default="NORMAL_HOLD")
+    expectation_state: Mapped[str] = mapped_column(String(48), default="MATCHED")
+    volume_price_state: Mapped[str] = mapped_column(String(64), default="")
+    sector_state: Mapped[str] = mapped_column(String(64), default="")
+    current_quantity: Mapped[int] = mapped_column(Integer, default=0)
+    sellable_quantity: Mapped[int] = mapped_column(Integer, default=0)
+    today_buy_quantity: Mapped[int] = mapped_column(Integer, default=0)
+    current_position_ratio: Mapped[float] = mapped_column(Float, default=0)
+    recommended_position_ratio: Mapped[float] = mapped_column(Float, default=0)
+    recommended_action: Mapped[str] = mapped_column(String(64), default="继续持有")
+    recommended_reduce_ratio: Mapped[float] = mapped_column(Float, default=0)
+    structure_stop_price: Mapped[float] = mapped_column(Float, default=0)
+    hard_stop_price: Mapped[float] = mapped_column(Float, default=0)
+    trailing_stop_price: Mapped[float] = mapped_column(Float, default=0)
+    profit_protection_price: Mapped[float] = mapped_column(Float, default=0)
+    t_eligible: Mapped[bool] = mapped_column(Boolean, default=False)
+    t_type: Mapped[str] = mapped_column(String(24), default="NO_T")
+    evidence_json: Mapped[str] = mapped_column(Text, default="[]")
+    counter_evidence_json: Mapped[str] = mapped_column(Text, default="[]")
+    invalid_conditions_json: Mapped[str] = mapped_column(Text, default="[]")
+    recovery_conditions_json: Mapped[str] = mapped_column(Text, default="[]")
+    data_quality: Mapped[str] = mapped_column(String(32), default="manual")
+    data_time: Mapped[str] = mapped_column(String(64), default="")
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc)
+    )
+
+
+class ProfitProtectionSnapshot(Base):
+    __tablename__ = "profit_protection_snapshots"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    holding_id: Mapped[int] = mapped_column(Integer, index=True)
+    code: Mapped[str] = mapped_column(String(16), index=True)
+    captured_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc), index=True)
+    current_profit_pct: Mapped[float] = mapped_column(Float, default=0)
+    maximum_profit_pct: Mapped[float] = mapped_column(Float, default=0)
+    profit_drawdown_pct: Mapped[float] = mapped_column(Float, default=0)
+    maximum_price: Mapped[float] = mapped_column(Float, default=0)
+    protection_level: Mapped[str] = mapped_column(String(32), default="NONE")
+    protection_floor: Mapped[float] = mapped_column(Float, default=0)
+    triggered: Mapped[bool] = mapped_column(Boolean, default=False)
+    recommended_action: Mapped[str] = mapped_column(String(64), default="继续持有")
+
+
+class IntradayEvidenceEvent(Base):
+    __tablename__ = "intraday_evidence_events"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    trade_date: Mapped[str] = mapped_column(String(16), index=True)
+    captured_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc), index=True)
+    scope: Mapped[str] = mapped_column(String(24), default="stock")
+    target_code: Mapped[str] = mapped_column(String(16), index=True)
+    target_name: Mapped[str] = mapped_column(String(64), default="")
+    event_type: Mapped[str] = mapped_column(String(48), index=True)
+    severity: Mapped[str] = mapped_column(String(24), default="info")
+    value: Mapped[float] = mapped_column(Float, default=0)
+    previous_value: Mapped[float] = mapped_column(Float, default=0)
+    evidence_json: Mapped[str] = mapped_column(Text, default="[]")
+    recommendation_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
+
+
+class ActionRecommendation(Base):
+    __tablename__ = "action_recommendations"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    trade_date: Mapped[str] = mapped_column(String(16), index=True)
+    holding_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
+    code: Mapped[str] = mapped_column(String(16), index=True)
+    name: Mapped[str] = mapped_column(String(64), default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc), index=True)
+    level: Mapped[str] = mapped_column(String(24), default="INFO")
+    state: Mapped[str] = mapped_column(String(48), default="")
+    action: Mapped[str] = mapped_column(String(64), default="")
+    recommended_ratio: Mapped[float] = mapped_column(Float, default=0)
+    trigger_events_json: Mapped[str] = mapped_column(Text, default="[]")
+    evidence_json: Mapped[str] = mapped_column(Text, default="[]")
+    counter_evidence_json: Mapped[str] = mapped_column(Text, default="[]")
+    invalid_conditions_json: Mapped[str] = mapped_column(Text, default="[]")
+    recovery_conditions_json: Mapped[str] = mapped_column(Text, default="[]")
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    acknowledged_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+
+class RecommendationFeedback(Base):
+    __tablename__ = "recommendation_feedback"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    recommendation_id: Mapped[int] = mapped_column(Integer, index=True)
+    status: Mapped[str] = mapped_column(String(24), default="暂不执行")
+    reason: Mapped[str] = mapped_column(Text, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc))

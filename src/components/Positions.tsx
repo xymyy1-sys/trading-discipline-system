@@ -1,16 +1,19 @@
 import { useEffect, useRef, useState } from 'react'
-import { Pencil, Plus, RefreshCcw, Save, Trash2, X } from 'lucide-react'
+import { CheckCircle2, Pencil, Plus, RefreshCcw, Save, ShieldAlert, Trash2, X } from 'lucide-react'
 import { API_BASE } from '../api'
 
 import type {
   HoldingOut as Holding,
   SectorRotationItem as RotationItem,
   MarketSeesaw as SeesawMonitor,
+  PositionExecutionState,
 } from '../types'
 
 export default function Positions() {
   const [holdings, setHoldings] = useState<Holding[]>([])
   const [seesaw, setSeesaw] = useState<SeesawMonitor | null>(null)
+  const [executionStates, setExecutionStates] = useState<PositionExecutionState[]>([])
+  const [feedbackMessage, setFeedbackMessage] = useState('')
   const [accountAsset, setAccountAsset] = useState('')
   const [assetSaving, setAssetSaving] = useState(false)
   const [assetMessage, setAssetMessage] = useState('')
@@ -36,6 +39,13 @@ export default function Positions() {
       .catch(() => {})
   }
 
+  const fetchExecutionStates = (force = false) => {
+    fetch(`${API_BASE}/api/holdings/execution-states${force ? '?force_refresh=true' : ''}`)
+      .then(r => r.json())
+      .then((data: PositionExecutionState[]) => setExecutionStates(data))
+      .catch(() => setExecutionStates([]))
+  }
+
   const fetchHoldings = () => {
     if (refreshingRef.current) return
     refreshingRef.current = true
@@ -44,7 +54,10 @@ export default function Positions() {
     fetch(`${API_BASE}/api/holdings`)
       .then(r => r.json())
       .then((data: Holding[]) => applyHoldings(data))
-      .then(() => fetchSeesaw())
+      .then(() => {
+        fetchSeesaw()
+        fetchExecutionStates()
+      })
       .catch(() => setRefreshMessage('行情刷新失败，暂用已有价格'))
       .finally(() => {
         refreshingRef.current = false
@@ -65,6 +78,7 @@ export default function Positions() {
       .then((data: { holdings: Holding[]; success_count: number; fallback_count: number; notes: string[] }) => {
         applyHoldings(data.holdings, `刷新完成：实时 ${data.success_count} 只，缓存/手工 ${data.fallback_count} 只`)
         fetchSeesaw(true)
+        fetchExecutionStates(true)
         if (data.notes.length) setRefreshMessage(prev => `${prev}；${data.notes.slice(0, 2).join('；')}`)
       })
       .catch(() => setRefreshMessage('行情刷新失败，暂用已有价格'))
@@ -100,9 +114,11 @@ export default function Positions() {
     fetchAccountAsset()
     refreshQuotes()
     fetchSeesaw()
+    fetchExecutionStates()
     const timer = window.setInterval(() => {
       refreshQuotes()
       fetchSeesaw()
+      fetchExecutionStates()
     }, 30000)
     return () => window.clearInterval(timer)
   }, [])
@@ -114,6 +130,8 @@ export default function Positions() {
   const cashAvailable = savedTotalAsset ? savedTotalAsset - totalMarketValue : 0
   const totalPositionRatio = savedTotalAsset ? totalMarketValue / savedTotalAsset : 0
   const highRiskAlerts = (seesaw?.holding_alerts ?? []).filter(item => ['高', '中高', '中'].includes(item.risk_level))
+  const executionByCode = new Map(executionStates.map(item => [item.code, item]))
+  const urgentExecutions = executionStates.filter(item => ['EXIT_REQUIRED', 'REDUCE_REQUIRED', 'PROFIT_PROTECTION', 'EXPECTATION_INVALIDATED'].includes(item.state))
   const money = (value: number) => `${value >= 0 ? '+' : ''}${value.toLocaleString(undefined, { maximumFractionDigits: 2 })} 元`
 
   const resetForm = () => {
@@ -198,6 +216,29 @@ export default function Positions() {
     if (level === '中') return '#b7791f'
     return 'var(--text-muted)'
   }
+  const actionColor = (state: string) => {
+    if (['EXIT_REQUIRED', 'EXPECTATION_INVALIDATED'].includes(state)) return 'var(--down)'
+    if (state === 'REDUCE_REQUIRED') return 'var(--warn)'
+    if (state === 'PROFIT_PROTECTION') return 'var(--info)'
+    if (state === 'PROFIT_EXPANSION') return 'var(--up)'
+    return 'var(--ink-muted)'
+  }
+  const sendFeedback = (state: PositionExecutionState, status: string) => {
+    const recommendationId = state.recommendation?.id
+    if (!recommendationId) return
+    setFeedbackMessage('')
+    fetch(`${API_BASE}/api/recommendations/${recommendationId}/execution-feedback`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ status, reason: status === '暂不执行' ? '盘中继续观察，等待反抽确认。' : '' }),
+    })
+      .then(async r => {
+        if (!r.ok) throw new Error(await r.text())
+        return r.json()
+      })
+      .then(() => setFeedbackMessage(`${state.name} 已记录：${status}`))
+      .catch(() => setFeedbackMessage('执行反馈记录失败'))
+  }
 
   return (
     <div className="pos-layout">
@@ -226,6 +267,7 @@ export default function Positions() {
         </div>
       </header>
       {refreshMessage && <p className="refresh-note">{refreshMessage}</p>}
+      {feedbackMessage && <p className="refresh-note">{feedbackMessage}</p>}
 
       <section className="panel account-asset-panel">
         <div>
@@ -397,6 +439,49 @@ export default function Positions() {
         </section>
       )}
 
+      {executionStates.length > 0 && (
+        <section className="panel execution-panel">
+          <div className="selected-theme-head">
+            <div>
+              <strong>持仓执行状态机</strong>
+              <span>按利润保护、VWAP、结构止损、板块证据生成动作；缺失数据会标明降级，不用 0 冒充。</span>
+            </div>
+          </div>
+          <div className="execution-card-grid">
+            {(urgentExecutions.length ? urgentExecutions : executionStates).slice(0, 6).map(item => (
+              <article className="execution-card" key={`${item.code}-${item.updated_at}`}>
+                <div className="execution-card-head">
+                  <div>
+                    <strong>{item.name}</strong>
+                    <small>{item.code} · {item.volume_price_state} · {item.data_quality}</small>
+                  </div>
+                  <span style={{ color: actionColor(item.state) }}>{item.recommended_action}</span>
+                </div>
+                <div className="execution-line-grid">
+                  <div><b>最大浮盈</b><span>{item.profit_snapshot ? `${item.profit_snapshot.maximum_profit_pct.toFixed(2)}%` : '--'}</span></div>
+                  <div><b>利润回撤</b><span>{item.profit_snapshot ? `${item.profit_snapshot.profit_drawdown_pct.toFixed(2)}pct` : '--'}</span></div>
+                  <div><b>结构止损</b><span>{item.structure_stop_price ? item.structure_stop_price.toFixed(2) : '--'}</span></div>
+                  <div><b>利润保护</b><span>{item.profit_protection_price ? item.profit_protection_price.toFixed(2) : '--'}</span></div>
+                  <div><b>建议仓位</b><span>{(item.recommended_position_ratio * 100).toFixed(1)}%</span></div>
+                  <div><b>做T</b><span>{item.t_eligible ? item.t_type : '禁止'}</span></div>
+                </div>
+                <div className="execution-evidence">
+                  {(item.evidence.length ? item.evidence : ['暂无强触发证据，按原计划观察。']).slice(0, 3).map(line => <p key={line}>{line}</p>)}
+                </div>
+                <div className="execution-feedback">
+                  {['已执行', '部分执行', '暂不执行', '忽略'].map(status => (
+                    <button key={status} type="button" onClick={() => sendFeedback(item, status)}>
+                      {status === '已执行' ? <CheckCircle2 size={14} /> : <ShieldAlert size={14} />}
+                      {status}
+                    </button>
+                  ))}
+                </div>
+              </article>
+            ))}
+          </div>
+        </section>
+      )}
+
       {holdings.length === 0 ? (
         <div className="panel"><p className="plain-text">暂无持仓，点击"添加持仓"录入。</p></div>
       ) : (
@@ -405,7 +490,7 @@ export default function Positions() {
             <thead>
               <tr>
                   <th>代码</th><th>名称</th><th>数量</th><th>成本</th><th>现价</th><th>市值</th>
-                <th className="num">盈亏金额</th><th className="num">浮盈%</th><th className="num">今日盈亏</th><th className="num">今日盈亏%</th><th>资金跷跷板</th><th className="num">仓位%</th><th className="num">止损价</th><th className="num">利润保护</th>
+                  <th className="num">盈亏金额</th><th className="num">浮盈%</th><th className="num">今日盈亏</th><th className="num">今日盈亏%</th><th>资金跷跷板</th><th>执行状态</th><th className="num">仓位%</th><th className="num">止损价</th><th className="num">利润保护</th>
                 <th>仓位类型</th><th>下一步</th><th>操作</th>
               </tr>
             </thead>
@@ -414,6 +499,7 @@ export default function Positions() {
                 <tr key={h.id}>
                   {(() => {
                     const alert = seesawByCode.get(h.code)
+                    const execution = executionByCode.get(h.code)
                     return (
                       <>
                   <td className="mono">{h.code}</td>
@@ -457,6 +543,23 @@ export default function Positions() {
                           <span>触发：{alert.trigger_action || alert.stock_weakening_trigger[0] || alert.sector_ebb_trigger[0] || '继续观察'}</span>
                         </div>
                         <small>个股高点回撤 {alert.pullback_from_high_pct.toFixed(2)}% · 主线主力 {alert.sector_main_inflow.toFixed(2)} 亿</small>
+                      </div>
+                    ) : '--'}
+                  </td>
+                  <td className="execution-cell">
+                    {execution ? (
+                      <div className="execution-cell-box">
+                        <div className="execution-cell-head">
+                          <b style={{ color: actionColor(execution.state) }}>{execution.recommended_action}</b>
+                          <span>{execution.state}</span>
+                        </div>
+                        <div className="execution-cell-lines">
+                          <span>最大浮盈 {execution.profit_snapshot?.maximum_profit_pct.toFixed(2) ?? '--'}%</span>
+                          <span>回撤 {execution.profit_snapshot?.profit_drawdown_pct.toFixed(2) ?? '--'}pct</span>
+                          <span>结构 {execution.structure_stop_price.toFixed(2)} / 硬止损 {execution.hard_stop_price.toFixed(2)}</span>
+                          <span>{execution.t_eligible ? `允许${execution.t_type}` : '禁止做T'}</span>
+                        </div>
+                        <p>{execution.evidence[0] || '按原计划观察。'}</p>
                       </div>
                     ) : '--'}
                   </td>

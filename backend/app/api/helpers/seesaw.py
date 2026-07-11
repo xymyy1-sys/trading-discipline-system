@@ -78,6 +78,17 @@ _THEME_RULES: list[dict[str, Any]] = [
 ]
 
 def _market_seesaw_monitor(holdings: list[Holding], force_refresh: bool = False) -> MarketSeesawOut:
+    if not holdings:
+        return MarketSeesawOut(
+            source="empty",
+            updated_at=datetime.now(),
+            market_mode="暂无持仓",
+            summary="暂无持仓可监控。",
+            inflow_targets=[],
+            outflow_targets=[],
+            holding_alerts=[],
+            notes=["暂无持仓，跳过板块资金外部抓取。"],
+        )
     notes: list[str] = []
     industry_flows: list[Any] = []
     concept_flows: list[Any] = []

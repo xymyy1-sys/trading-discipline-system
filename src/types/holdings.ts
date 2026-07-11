@@ -108,3 +108,89 @@ export interface AccountAsset {
   total_asset: number;
   updated_at?: string;
 }
+
+export interface IntradayEvidenceEvent {
+  id: number | null;
+  captured_at: string;
+  scope: string;
+  target_code: string;
+  target_name: string;
+  event_type: string;
+  severity: string;
+  value: number;
+  previous_value: number;
+  evidence: string[];
+}
+
+export interface ActionRecommendation {
+  id: number | null;
+  level: string;
+  state: string;
+  action: string;
+  recommended_ratio: number;
+  evidence: string[];
+  counter_evidence: string[];
+  invalid_conditions: string[];
+  recovery_conditions: string[];
+  created_at: string;
+  expires_at: string | null;
+  acknowledged_at: string | null;
+}
+
+export interface ProfitProtectionSnapshot {
+  id: number | null;
+  holding_id: number;
+  code: string;
+  captured_at: string;
+  current_profit_pct: number;
+  maximum_profit_pct: number;
+  profit_drawdown_pct: number;
+  maximum_price: number;
+  protection_level: string;
+  protection_floor: number;
+  triggered: boolean;
+  recommended_action: string;
+}
+
+export interface PositionExecutionState {
+  id: number | null;
+  holding_id: number;
+  code: string;
+  name: string;
+  trade_date: string;
+  state: string;
+  expectation_state: string;
+  volume_price_state: string;
+  sector_state: string;
+  current_quantity: number;
+  sellable_quantity: number;
+  today_buy_quantity: number;
+  current_position_ratio: number;
+  recommended_position_ratio: number;
+  recommended_action: string;
+  recommended_reduce_ratio: number;
+  structure_stop_price: number;
+  hard_stop_price: number;
+  trailing_stop_price: number;
+  profit_protection_price: number;
+  t_eligible: boolean;
+  t_type: string;
+  evidence: string[];
+  counter_evidence: string[];
+  invalid_conditions: string[];
+  recovery_conditions: string[];
+  events: IntradayEvidenceEvent[];
+  recommendation: ActionRecommendation | null;
+  profit_snapshot: ProfitProtectionSnapshot | null;
+  data_quality: string;
+  data_time: string;
+  updated_at: string;
+}
+
+export interface RecommendationFeedback {
+  id: number;
+  recommendation_id: number;
+  status: string;
+  reason: string;
+  created_at: string;
+}

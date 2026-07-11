@@ -10,7 +10,10 @@ from app.schemas.trading import (
     HoldingRefreshOut,
     HoldingSyncOut,
     AccountAssetIn,
-    AccountAssetOut
+    AccountAssetOut,
+    PositionExecutionStateOut,
+    RecommendationFeedbackIn,
+    RecommendationFeedbackOut
 )
 from app.api.helpers.holdings_calc import (
     _account_state,
@@ -20,6 +23,9 @@ from app.api.helpers.holdings_calc import (
     _rebuild_holdings_from_trades,
     _holding_account_summary
 )
+from app.api.helpers.execution import build_execution_states, build_position_execution_state
+from app.api.helpers.quotes import _latest_a_share_quotes, _quote_lookup_code
+from app.models.trading import ActionRecommendation, RecommendationFeedback
 
 router = APIRouter()
 
@@ -98,6 +104,48 @@ def refresh_holdings(db: Session = Depends(get_db)) -> HoldingRefreshOut:
         notes=notes,
         **_holding_account_summary(outputs, account_total_asset),
     )
+
+@router.get("/holdings/execution-states", response_model=list[PositionExecutionStateOut])
+def list_holding_execution_states(
+    force_refresh: bool = False,
+    db: Session = Depends(get_db),
+) -> list[PositionExecutionStateOut]:
+    holdings = db.query(Holding).order_by(Holding.updated_at.desc()).all()
+    return build_execution_states(db, holdings, force_refresh=force_refresh)
+
+@router.get("/holdings/{holding_id}/execution-state", response_model=PositionExecutionStateOut)
+def get_holding_execution_state(
+    holding_id: int,
+    db: Session = Depends(get_db),
+) -> PositionExecutionStateOut:
+    holding = db.get(Holding, holding_id)
+    if holding is None:
+        raise HTTPException(status_code=404, detail="holding not found")
+    try:
+        quotes = _latest_a_share_quotes([holding.code])
+    except Exception:
+        quotes = {}
+    quote = quotes.get(_quote_lookup_code(holding.code, quotes), {})
+    return build_position_execution_state(db, holding, quote=quote)
+
+@router.post("/recommendations/{recommendation_id}/execution-feedback", response_model=RecommendationFeedbackOut)
+def create_recommendation_feedback(
+    recommendation_id: int,
+    payload: RecommendationFeedbackIn,
+    db: Session = Depends(get_db),
+) -> RecommendationFeedbackOut:
+    recommendation = db.get(ActionRecommendation, recommendation_id)
+    if recommendation is None:
+        raise HTTPException(status_code=404, detail="recommendation not found")
+    feedback = RecommendationFeedback(
+        recommendation_id=recommendation_id,
+        status=payload.status,
+        reason=payload.reason,
+    )
+    db.add(feedback)
+    db.commit()
+    db.refresh(feedback)
+    return feedback
 
 @router.post("/holdings/sync-from-trades", response_model=HoldingSyncOut)
 def sync_holdings_from_trades(db: Session = Depends(get_db)) -> HoldingSyncOut:

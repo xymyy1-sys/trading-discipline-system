@@ -94,6 +94,112 @@ class AccountAssetOut(BaseModel):
     updated_at: datetime | None = None
 
 
+class IntradayEvidenceEventOut(BaseModel):
+    id: int | None = None
+    captured_at: datetime
+    scope: str
+    target_code: str
+    target_name: str = ""
+    event_type: str
+    severity: str
+    value: float = 0
+    previous_value: float = 0
+    evidence: list[str] = Field(default_factory=list)
+
+    class Config:
+        from_attributes = True
+
+
+class ActionRecommendationOut(BaseModel):
+    id: int | None = None
+    level: str
+    state: str
+    action: str
+    recommended_ratio: float = 0
+    evidence: list[str] = Field(default_factory=list)
+    counter_evidence: list[str] = Field(default_factory=list)
+    invalid_conditions: list[str] = Field(default_factory=list)
+    recovery_conditions: list[str] = Field(default_factory=list)
+    created_at: datetime
+    expires_at: datetime | None = None
+    acknowledged_at: datetime | None = None
+
+    class Config:
+        from_attributes = True
+
+
+class ProfitProtectionSnapshotOut(BaseModel):
+    id: int | None = None
+    holding_id: int
+    code: str
+    captured_at: datetime
+    current_profit_pct: float = 0
+    maximum_profit_pct: float = 0
+    profit_drawdown_pct: float = 0
+    maximum_price: float = 0
+    protection_level: str = "NONE"
+    protection_floor: float = 0
+    triggered: bool = False
+    recommended_action: str = "继续持有"
+
+    class Config:
+        from_attributes = True
+
+
+class PositionExecutionStateOut(BaseModel):
+    id: int | None = None
+    holding_id: int
+    code: str
+    name: str
+    trade_date: str
+    state: str
+    expectation_state: str
+    volume_price_state: str
+    sector_state: str
+    current_quantity: int
+    sellable_quantity: int
+    today_buy_quantity: int = 0
+    current_position_ratio: float = 0
+    recommended_position_ratio: float = 0
+    recommended_action: str
+    recommended_reduce_ratio: float = 0
+    structure_stop_price: float = 0
+    hard_stop_price: float = 0
+    trailing_stop_price: float = 0
+    profit_protection_price: float = 0
+    t_eligible: bool = False
+    t_type: str = "NO_T"
+    evidence: list[str] = Field(default_factory=list)
+    counter_evidence: list[str] = Field(default_factory=list)
+    invalid_conditions: list[str] = Field(default_factory=list)
+    recovery_conditions: list[str] = Field(default_factory=list)
+    events: list[IntradayEvidenceEventOut] = Field(default_factory=list)
+    recommendation: ActionRecommendationOut | None = None
+    profit_snapshot: ProfitProtectionSnapshotOut | None = None
+    data_quality: str = "manual"
+    data_time: str = ""
+    updated_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class RecommendationFeedbackIn(BaseModel):
+    status: str
+    reason: str = ""
+
+
+class RecommendationFeedbackOut(BaseModel):
+    id: int
+    recommendation_id: int
+    status: str
+    reason: str
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
 class TradeLogCreate(BaseModel):
     code: str
     name: str
