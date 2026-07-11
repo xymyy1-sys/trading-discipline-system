@@ -194,3 +194,85 @@ export interface RecommendationFeedback {
   reason: string;
   created_at: string;
 }
+
+export interface ExpectationSnapshot {
+  id: number | null;
+  trade_date: string;
+  code: string;
+  name: string;
+  stage: string;
+  base_expectation: string;
+  expected_open_low: number;
+  expected_open_high: number;
+  outperform_threshold: number;
+  underperform_threshold: number;
+  severe_underperform_threshold: number;
+  actual_open_pct: number;
+  actual_change_pct: number;
+  expectation_gap_score: number;
+  expectation_result: string;
+  state_transition: string;
+  confidence: number;
+  evidence: string[];
+  counter_evidence: string[];
+  suggestion: string;
+  created_at: string;
+}
+
+export interface TEligibility {
+  holding_id: number;
+  code: string;
+  name: string;
+  t_type: string;
+  eligible: boolean;
+  sellable_quantity: number;
+  suggested_quantity: number;
+  suggested_sell_price: number;
+  buyback_price_low: number;
+  buyback_price_high: number;
+  buyback_conditions: string[];
+  forbidden_reasons: string[];
+  evidence: string[];
+  current_action: string;
+}
+
+export interface TTradePlan {
+  id: number | null;
+  holding_id: number;
+  trade_date: string;
+  code: string;
+  name: string;
+  t_type: string;
+  planned_sell_price: number;
+  planned_sell_quantity: number;
+  buyback_price_low: number;
+  buyback_price_high: number;
+  buyback_conditions: string[];
+  cancel_conditions: string[];
+  status: string;
+  actual_sell_price: number;
+  actual_buyback_price: number;
+  actual_quantity: number;
+  cost_reduction: number;
+  evidence: string[];
+  created_at: string;
+  updated_at: string;
+}
+
+export interface StockDecisionCard {
+  code: string;
+  name: string;
+  industry: string;
+  concepts: string[];
+  current_price: number;
+  change_pct: number;
+  expectation: ExpectationSnapshot;
+  execution_state: PositionExecutionState | null;
+  timeline: IntradayEvidenceEvent[];
+  allowed_actions: string[];
+  forbidden_actions: string[];
+  t_eligibility: TEligibility | null;
+  evidence: string[];
+  counter_evidence: string[];
+  data_quality: string;
+}

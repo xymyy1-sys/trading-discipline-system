@@ -8,6 +8,7 @@ import {
   Flame,
   Gauge,
   NotebookPen,
+  ScanLine,
   ListChecks,
   Newspaper,
   ShieldAlert,
@@ -26,6 +27,7 @@ const IntelDesk = lazy(() => import('./components/IntelDesk'))
 const LimitUpLadder = lazy(() => import('./components/LimitUpLadder'))
 const MarketEnv = lazy(() => import('./components/MarketEnv'))
 const Positions = lazy(() => import('./components/Positions'))
+const DecisionCard = lazy(() => import('./components/DecisionCard'))
 const NextDayPlans = lazy(() => import('./components/NextDayPlans'))
 const TradeLog = lazy(() => import('./components/TradeLog'))
 const BuyCheck = lazy(() => import('./components/BuyCheck'))
@@ -40,6 +42,7 @@ const navItems = [
   ['信息差', Newspaper, '/信息差'],
   ['市场环境', Activity, '/市场环境'],
   ['持仓快照', WalletCards, '/持仓快照'],
+  ['个股决策卡', ScanLine, '/个股决策卡'],
   ['次日计划卡', NotebookPen, '/次日计划卡'],
   ['交易日志', ListChecks, '/交易日志'],
   ['买入检查', ClipboardCheck, '/买入检查'],
@@ -154,6 +157,7 @@ export default function App() {
             <Route path="/信息差" element={<IntelDesk />} />
             <Route path="/市场环境" element={<MarketEnv />} />
             <Route path="/持仓快照" element={<Positions />} />
+            <Route path="/个股决策卡" element={<DecisionCard />} />
             <Route path="/次日计划卡" element={<NextDayPlans />} />
             <Route path="/交易日志" element={<TradeLog />} />
             <Route path="/买入检查" element={<BuyCheck />} />

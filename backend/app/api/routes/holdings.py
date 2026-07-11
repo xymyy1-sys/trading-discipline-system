@@ -13,7 +13,11 @@ from app.schemas.trading import (
     AccountAssetOut,
     PositionExecutionStateOut,
     RecommendationFeedbackIn,
-    RecommendationFeedbackOut
+    RecommendationFeedbackOut,
+    TEligibilityOut,
+    TTradePlanIn,
+    TTradePlanOut,
+    TTradePlanUpdate
 )
 from app.api.helpers.holdings_calc import (
     _account_state,
@@ -25,7 +29,8 @@ from app.api.helpers.holdings_calc import (
 )
 from app.api.helpers.execution import build_execution_states, build_position_execution_state
 from app.api.helpers.quotes import _latest_a_share_quotes, _quote_lookup_code
-from app.models.trading import ActionRecommendation, RecommendationFeedback
+from app.api.helpers.decision import build_t_eligibility, create_t_plan, update_t_plan
+from app.models.trading import ActionRecommendation, RecommendationFeedback, TTradePlan
 
 router = APIRouter()
 
@@ -146,6 +151,39 @@ def create_recommendation_feedback(
     db.commit()
     db.refresh(feedback)
     return feedback
+
+@router.get("/holdings/{holding_id}/t-eligibility", response_model=TEligibilityOut)
+def get_holding_t_eligibility(
+    holding_id: int,
+    db: Session = Depends(get_db),
+) -> TEligibilityOut:
+    holding = db.get(Holding, holding_id)
+    if holding is None:
+        raise HTTPException(status_code=404, detail="holding not found")
+    return build_t_eligibility(db, holding)
+
+@router.post("/holdings/{holding_id}/t-plan", response_model=TTradePlanOut)
+def create_holding_t_plan(
+    holding_id: int,
+    payload: TTradePlanIn,
+    db: Session = Depends(get_db),
+) -> TTradePlanOut:
+    holding = db.get(Holding, holding_id)
+    if holding is None:
+        raise HTTPException(status_code=404, detail="holding not found")
+    return create_t_plan(db, holding, payload)
+
+@router.put("/holdings/{holding_id}/t-plan/{plan_id}", response_model=TTradePlanOut)
+def update_holding_t_plan(
+    holding_id: int,
+    plan_id: int,
+    payload: TTradePlanUpdate,
+    db: Session = Depends(get_db),
+) -> TTradePlanOut:
+    plan = db.get(TTradePlan, plan_id)
+    if plan is None or plan.holding_id != holding_id:
+        raise HTTPException(status_code=404, detail="t plan not found")
+    return update_t_plan(db, plan, payload)
 
 @router.post("/holdings/sync-from-trades", response_model=HoldingSyncOut)
 def sync_holdings_from_trades(db: Session = Depends(get_db)) -> HoldingSyncOut:

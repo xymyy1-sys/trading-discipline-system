@@ -272,3 +272,56 @@ class RecommendationFeedback(Base):
     status: Mapped[str] = mapped_column(String(24), default="暂不执行")
     reason: Mapped[str] = mapped_column(Text, default="")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc))
+
+
+class ExpectationSnapshot(Base):
+    __tablename__ = "expectation_snapshots"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    trade_date: Mapped[str] = mapped_column(String(16), index=True)
+    code: Mapped[str] = mapped_column(String(16), index=True)
+    name: Mapped[str] = mapped_column(String(64), default="")
+    stage: Mapped[str] = mapped_column(String(32), index=True)
+    base_expectation: Mapped[str] = mapped_column(String(32), default="UNKNOWN")
+    expected_open_low: Mapped[float] = mapped_column(Float, default=0)
+    expected_open_high: Mapped[float] = mapped_column(Float, default=0)
+    outperform_threshold: Mapped[float] = mapped_column(Float, default=0)
+    underperform_threshold: Mapped[float] = mapped_column(Float, default=0)
+    severe_underperform_threshold: Mapped[float] = mapped_column(Float, default=0)
+    actual_open_pct: Mapped[float] = mapped_column(Float, default=0)
+    actual_change_pct: Mapped[float] = mapped_column(Float, default=0)
+    expectation_gap_score: Mapped[int] = mapped_column(Integer, default=0)
+    expectation_result: Mapped[str] = mapped_column(String(32), default="MATCHED")
+    state_transition: Mapped[str] = mapped_column(String(48), default="MATCHED")
+    confidence: Mapped[float] = mapped_column(Float, default=0)
+    evidence_json: Mapped[str] = mapped_column(Text, default="[]")
+    counter_evidence_json: Mapped[str] = mapped_column(Text, default="[]")
+    suggestion: Mapped[str] = mapped_column(Text, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc), index=True)
+
+
+class TTradePlan(Base):
+    __tablename__ = "t_trade_plans"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    holding_id: Mapped[int] = mapped_column(Integer, index=True)
+    trade_date: Mapped[str] = mapped_column(String(16), index=True)
+    code: Mapped[str] = mapped_column(String(16), index=True)
+    name: Mapped[str] = mapped_column(String(64), default="")
+    t_type: Mapped[str] = mapped_column(String(24), default="NO_T")
+    planned_sell_price: Mapped[float] = mapped_column(Float, default=0)
+    planned_sell_quantity: Mapped[int] = mapped_column(Integer, default=0)
+    buyback_price_low: Mapped[float] = mapped_column(Float, default=0)
+    buyback_price_high: Mapped[float] = mapped_column(Float, default=0)
+    buyback_conditions_json: Mapped[str] = mapped_column(Text, default="[]")
+    cancel_conditions_json: Mapped[str] = mapped_column(Text, default="[]")
+    status: Mapped[str] = mapped_column(String(32), default="planned")
+    actual_sell_price: Mapped[float] = mapped_column(Float, default=0)
+    actual_buyback_price: Mapped[float] = mapped_column(Float, default=0)
+    actual_quantity: Mapped[int] = mapped_column(Integer, default=0)
+    cost_reduction: Mapped[float] = mapped_column(Float, default=0)
+    evidence_json: Mapped[str] = mapped_column(Text, default="[]")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc))
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc)
+    )

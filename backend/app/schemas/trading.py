@@ -200,6 +200,111 @@ class RecommendationFeedbackOut(BaseModel):
         from_attributes = True
 
 
+class ExpectationSnapshotOut(BaseModel):
+    id: int | None = None
+    trade_date: str
+    code: str
+    name: str = ""
+    stage: str
+    base_expectation: str
+    expected_open_low: float = 0
+    expected_open_high: float = 0
+    outperform_threshold: float = 0
+    underperform_threshold: float = 0
+    severe_underperform_threshold: float = 0
+    actual_open_pct: float = 0
+    actual_change_pct: float = 0
+    expectation_gap_score: int = 0
+    expectation_result: str = "MATCHED"
+    state_transition: str = "MATCHED"
+    confidence: float = 0
+    evidence: list[str] = Field(default_factory=list)
+    counter_evidence: list[str] = Field(default_factory=list)
+    suggestion: str = ""
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class TTradePlanIn(BaseModel):
+    t_type: str = "POSITIVE_T"
+    planned_sell_price: float = 0
+    planned_sell_quantity: int = 0
+    buyback_price_low: float = 0
+    buyback_price_high: float = 0
+    buyback_conditions: list[str] = Field(default_factory=list)
+    cancel_conditions: list[str] = Field(default_factory=list)
+
+
+class TTradePlanUpdate(BaseModel):
+    status: str | None = None
+    actual_sell_price: float | None = None
+    actual_buyback_price: float | None = None
+    actual_quantity: int | None = None
+
+
+class TTradePlanOut(BaseModel):
+    id: int | None = None
+    holding_id: int
+    trade_date: str
+    code: str
+    name: str
+    t_type: str
+    planned_sell_price: float = 0
+    planned_sell_quantity: int = 0
+    buyback_price_low: float = 0
+    buyback_price_high: float = 0
+    buyback_conditions: list[str] = Field(default_factory=list)
+    cancel_conditions: list[str] = Field(default_factory=list)
+    status: str = "planned"
+    actual_sell_price: float = 0
+    actual_buyback_price: float = 0
+    actual_quantity: int = 0
+    cost_reduction: float = 0
+    evidence: list[str] = Field(default_factory=list)
+    created_at: datetime
+    updated_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class TEligibilityOut(BaseModel):
+    holding_id: int
+    code: str
+    name: str
+    t_type: str
+    eligible: bool
+    sellable_quantity: int = 0
+    suggested_quantity: int = 0
+    suggested_sell_price: float = 0
+    buyback_price_low: float = 0
+    buyback_price_high: float = 0
+    buyback_conditions: list[str] = Field(default_factory=list)
+    forbidden_reasons: list[str] = Field(default_factory=list)
+    evidence: list[str] = Field(default_factory=list)
+    current_action: str = ""
+
+
+class StockDecisionCardOut(BaseModel):
+    code: str
+    name: str
+    industry: str = ""
+    concepts: list[str] = Field(default_factory=list)
+    current_price: float = 0
+    change_pct: float = 0
+    expectation: ExpectationSnapshotOut
+    execution_state: PositionExecutionStateOut | None = None
+    timeline: list[IntradayEvidenceEventOut] = Field(default_factory=list)
+    allowed_actions: list[str] = Field(default_factory=list)
+    forbidden_actions: list[str] = Field(default_factory=list)
+    t_eligibility: TEligibilityOut | None = None
+    evidence: list[str] = Field(default_factory=list)
+    counter_evidence: list[str] = Field(default_factory=list)
+    data_quality: str = "manual"
+
+
 class TradeLogCreate(BaseModel):
     code: str
     name: str

@@ -7,6 +7,7 @@ import type {
   SectorRotationItem as RotationItem,
   MarketSeesaw as SeesawMonitor,
   PositionExecutionState,
+  TTradePlan,
 } from '../types'
 
 export default function Positions() {
@@ -14,6 +15,7 @@ export default function Positions() {
   const [seesaw, setSeesaw] = useState<SeesawMonitor | null>(null)
   const [executionStates, setExecutionStates] = useState<PositionExecutionState[]>([])
   const [feedbackMessage, setFeedbackMessage] = useState('')
+  const [tPlanMessage, setTPlanMessage] = useState('')
   const [accountAsset, setAccountAsset] = useState('')
   const [assetSaving, setAssetSaving] = useState(false)
   const [assetMessage, setAssetMessage] = useState('')
@@ -239,6 +241,32 @@ export default function Positions() {
       .then(() => setFeedbackMessage(`${state.name} 已记录：${status}`))
       .catch(() => setFeedbackMessage('执行反馈记录失败'))
   }
+  const createTPlan = (state: PositionExecutionState) => {
+    setTPlanMessage('')
+    fetch(`${API_BASE}/api/holdings/${state.holding_id}/t-plan`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        t_type: state.t_eligible ? 'POSITIVE_T' : 'NO_T',
+        planned_sell_price: 0,
+        planned_sell_quantity: 0,
+        buyback_price_low: 0,
+        buyback_price_high: 0,
+        buyback_conditions: [],
+        cancel_conditions: [],
+      }),
+    })
+      .then(async r => {
+        if (!r.ok) throw new Error(await r.text())
+        return r.json()
+      })
+      .then((plan: TTradePlan) => {
+        setTPlanMessage(plan.status === 'forbidden'
+          ? `${state.name} 当前禁止做T：${plan.evidence[0] || '交易逻辑不成立'}`
+          : `${state.name} 已生成${plan.t_type}计划：卖出 ${plan.planned_sell_quantity} 股，接回 ${plan.buyback_price_low.toFixed(2)}-${plan.buyback_price_high.toFixed(2)}`)
+      })
+      .catch(() => setTPlanMessage('做T计划生成失败'))
+  }
 
   return (
     <div className="pos-layout">
@@ -268,6 +296,7 @@ export default function Positions() {
       </header>
       {refreshMessage && <p className="refresh-note">{refreshMessage}</p>}
       {feedbackMessage && <p className="refresh-note">{feedbackMessage}</p>}
+      {tPlanMessage && <p className="refresh-note">{tPlanMessage}</p>}
 
       <section className="panel account-asset-panel">
         <div>
@@ -469,6 +498,10 @@ export default function Positions() {
                   {(item.evidence.length ? item.evidence : ['暂无强触发证据，按原计划观察。']).slice(0, 3).map(line => <p key={line}>{line}</p>)}
                 </div>
                 <div className="execution-feedback">
+                  <button type="button" onClick={() => createTPlan(item)}>
+                    <RefreshCcw size={14} />
+                    生成做T计划
+                  </button>
                   {['已执行', '部分执行', '暂不执行', '忽略'].map(status => (
                     <button key={status} type="button" onClick={() => sendFeedback(item, status)}>
                       {status === '已执行' ? <CheckCircle2 size={14} /> : <ShieldAlert size={14} />}
