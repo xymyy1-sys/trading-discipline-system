@@ -1,13 +1,7 @@
 import { useEffect, useState } from 'react'
 import { API_BASE } from '../api'
 
-type GradeData = {
-  grade: string
-  total_position_limit: string
-  single_position_limit: string
-  reasons: string[]
-  risk_warnings: string[]
-}
+import type { MarketGrade as GradeData } from '../types'
 
 const gradeInfo: Record<string, { label: string; color: string; desc: string }> = {
   A: { label: 'A 档 · 进攻', color: 'var(--up)', desc: '主线清晰，龙头强势，赚钱效应好' },

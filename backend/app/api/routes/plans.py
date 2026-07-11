@@ -1,0 +1,183 @@
+import json
+from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy.orm import Session
+from app.core.database import get_db
+from app.models.trading import Holding, NextDayPlan, ExitCard
+from app.schemas.trading import (
+    NextDayPlanOut,
+    NextDayPlanCreate,
+    LimitUpPlanCreate,
+    NextDayPlanUpdate,
+    NextDayPlanReview,
+    ExitCardOut,
+    ExitCardCreate,
+    SellPlanOut
+)
+from app.api.helpers.quotes import _latest_quote_for_holding, _json_obj
+from app.api.helpers.holdings_calc import _account_total_asset, _refresh_holding_prices
+from app.api.helpers.plan_calc import (
+    _next_trade_date,
+    _refresh_existing_holding_plans,
+    _next_day_plan_out,
+    _plan_from_payload,
+    _default_next_day_plan,
+    _sync_holding_plan,
+    _limit_up_next_day_plan,
+    _refresh_plan_risk
+)
+from app.api.helpers.seesaw import _sell_plan
+
+router = APIRouter()
+
+@router.get("/next-day-plans", response_model=list[NextDayPlanOut])
+def list_next_day_plans(
+    plan_date: str | None = None,
+    refresh: bool = False,
+    db: Session = Depends(get_db),
+) -> list[NextDayPlanOut]:
+    plan_date = plan_date or _next_trade_date()
+    query = db.query(NextDayPlan)
+    query = query.filter(NextDayPlan.plan_date == plan_date)
+    plans = query.order_by(NextDayPlan.risk_priority.asc(), NextDayPlan.updated_at.desc()).all()
+    price_notes = _refresh_existing_holding_plans(plans, db) if refresh else {}
+    return [_next_day_plan_out(item, price_note=price_notes.get(item.code, "")) for item in plans]
+
+@router.post("/next-day-plans", response_model=NextDayPlanOut)
+def create_next_day_plan(
+    payload: NextDayPlanCreate,
+    db: Session = Depends(get_db),
+) -> NextDayPlanOut:
+    plan = _plan_from_payload(payload)
+    db.add(plan)
+    db.commit()
+    db.refresh(plan)
+    return _next_day_plan_out(plan)
+
+@router.post("/next-day-plans/generate", response_model=list[NextDayPlanOut])
+def generate_next_day_plans(db: Session = Depends(get_db)) -> list[NextDayPlanOut]:
+    plan_date = _next_trade_date()
+    holdings = db.query(Holding).order_by(Holding.updated_at.desc()).all()
+    account_total_asset = _account_total_asset(db)
+    price_notes = _refresh_holding_prices(holdings, db)
+    plans: list[NextDayPlan] = []
+    seen_keys: set[tuple[str, str, str]] = set()
+    for holding in holdings:
+        key = (plan_date, holding.code, "holding")
+        existing_plans = (
+            db.query(NextDayPlan)
+            .filter(
+                NextDayPlan.plan_date == plan_date,
+                NextDayPlan.code == holding.code,
+                NextDayPlan.plan_type == "holding",
+            )
+            .order_by(NextDayPlan.updated_at.desc())
+            .all()
+        )
+        existing = existing_plans[0] if existing_plans else None
+        for duplicate in existing_plans[1:]:
+            db.delete(duplicate)
+        quote = _latest_quote_for_holding(holding)
+        plan = _default_next_day_plan(holding, plan_date, account_total_asset, quote)
+        if existing:
+            _sync_holding_plan(existing, plan)
+            plans.append(existing)
+        elif key not in seen_keys:
+            db.add(plan)
+            plans.append(plan)
+        seen_keys.add(key)
+    db.commit()
+    for plan in plans:
+        db.refresh(plan)
+    return [
+        _next_day_plan_out(item, price_note=price_notes.get(item.code, ""))
+        for item in sorted(plans, key=lambda item: item.risk_priority)
+    ]
+
+@router.post("/next-day-plans/from-limit-up", response_model=NextDayPlanOut)
+def create_limit_up_plan(
+    payload: LimitUpPlanCreate,
+    db: Session = Depends(get_db),
+) -> NextDayPlanOut:
+    plan_date = _next_trade_date()
+    existing = (
+        db.query(NextDayPlan)
+        .filter(
+            NextDayPlan.plan_date == plan_date,
+            NextDayPlan.code == payload.code,
+            NextDayPlan.plan_type == "limit_up_auction",
+        )
+        .first()
+    )
+    plan = _limit_up_next_day_plan(payload, plan_date, existing)
+    if existing is None:
+        db.add(plan)
+    db.commit()
+    db.refresh(plan)
+    return _next_day_plan_out(plan)
+
+@router.put("/next-day-plans/{plan_id}", response_model=NextDayPlanOut)
+def update_next_day_plan(
+    plan_id: int,
+    payload: NextDayPlanUpdate,
+    db: Session = Depends(get_db),
+) -> NextDayPlanOut:
+    plan = db.get(NextDayPlan, plan_id)
+    if plan is None:
+        raise HTTPException(status_code=404, detail="next day plan not found")
+    data = payload.model_dump(exclude_unset=True)
+    if "classification_basis" in data and data["classification_basis"] is not None:
+        plan.classification_basis = json.dumps(data.pop("classification_basis"), ensure_ascii=False)
+    if "auction_plan" in data and data["auction_plan"] is not None:
+        plan.auction_plan = json.dumps(data.pop("auction_plan"), ensure_ascii=False)
+    if "forbidden_actions" in data and data["forbidden_actions"] is not None:
+        plan.forbidden_actions = json.dumps(data.pop("forbidden_actions"), ensure_ascii=False)
+    for key, value in data.items():
+        setattr(plan, key, value)
+    _refresh_plan_risk(plan)
+    db.commit()
+    db.refresh(plan)
+    return _next_day_plan_out(plan)
+
+@router.delete("/next-day-plans/{plan_id}")
+def delete_next_day_plan(plan_id: int, db: Session = Depends(get_db)) -> dict[str, str]:
+    plan = db.get(NextDayPlan, plan_id)
+    if plan is None:
+        raise HTTPException(status_code=404, detail="next day plan not found")
+    db.delete(plan)
+    db.commit()
+    return {"status": "deleted"}
+
+@router.post("/next-day-plans/{plan_id}/review", response_model=NextDayPlanOut)
+def review_next_day_plan(
+    plan_id: int,
+    payload: NextDayPlanReview,
+    db: Session = Depends(get_db),
+) -> NextDayPlanOut:
+    plan = db.get(NextDayPlan, plan_id)
+    if plan is None:
+        raise HTTPException(status_code=404, detail="next day plan not found")
+    plan.review_expectation = payload.review_expectation
+    plan.review_execution = payload.review_execution
+    plan.review_deviation = payload.review_deviation
+    _refresh_plan_risk(plan)
+    db.commit()
+    db.refresh(plan)
+    return _next_day_plan_out(plan)
+
+@router.post("/exit-cards", response_model=ExitCardOut)
+def create_exit_card(payload: ExitCardCreate, db: Session = Depends(get_db)) -> ExitCardOut:
+    card = ExitCard(**payload.model_dump())
+    db.add(card)
+    db.commit()
+    db.refresh(card)
+    return card
+
+@router.get("/exit-cards", response_model=list[ExitCardOut])
+def list_exit_cards(db: Session = Depends(get_db)) -> list[ExitCardOut]:
+    cards = db.query(ExitCard).order_by(ExitCard.created_at.desc()).limit(50).all()
+    return cards
+
+@router.get("/sell-plans", response_model=list[SellPlanOut])
+def sell_plans(db: Session = Depends(get_db)) -> list[SellPlanOut]:
+    holdings = db.query(Holding).order_by(Holding.updated_at.desc()).all()
+    return [_sell_plan(item) for item in holdings]

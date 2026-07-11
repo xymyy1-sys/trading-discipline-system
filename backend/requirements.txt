@@ -4,3 +4,7 @@ sqlalchemy==2.0.45
 pydantic-settings==2.12.0
 pandas==2.3.3
 akshare==1.17.87
+alembic==1.13.1
+slowapi==0.1.9
+pytest==8.1.1
+httpx==0.27.0

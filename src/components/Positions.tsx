@@ -2,92 +2,11 @@ import { useEffect, useRef, useState } from 'react'
 import { Pencil, Plus, RefreshCcw, Save, Trash2, X } from 'lucide-react'
 import { API_BASE } from '../api'
 
-type Holding = {
-  id: number
-  code: string
-  name: string
-  quantity: number
-  cost_price: number
-  current_price: number
-  total_asset: number
-  market_value: number
-  profit_amount: number
-  profit_ratio: number
-  today_profit_amount: number
-  today_profit_ratio: number
-  position_ratio: number
-  stop_loss_price: number
-  profit_guard_price: number | null
-  price_source: string
-  price_note: string
-  prev_close: number
-  change_pct: number
-  amount: number
-  turnover: number
-  open_price: number
-  high_price: number
-  low_price: number
-  position_type: string
-  next_discipline: string
-  updated_at: string
-}
-
-type SeesawItem = {
-  code: string
-  name: string
-  sector: string
-  holding_theme: string
-  theme_tags: string[]
-  stock_industry: string
-  stock_concepts: string[]
-  theme_source: string
-  flow_basis: string
-  primary_industry_sector: string
-  concept_flow_sectors: string[]
-  concept_flow_summary: string
-  matched_flow_sector: string
-  theme_flow_sectors: string[]
-  theme_flow_summary: string
-  theme_flow_current: number
-  theme_flow_peak: number
-  theme_flow_pullback: number
-  theme_flow_pullback_pct: number
-  external_inflow_target: string
-  risk_level: string
-  signal: string
-  advice: string
-  pullback_from_high_pct: number
-  below_vwap: boolean
-  sector_rank: number
-  sector_net_inflow: number
-  sector_main_inflow: number
-  sector_acceleration: number
-  profit_protection_state: string
-  trigger_action: string
-  sector_ebb_trigger: string[]
-  stock_weakening_trigger: string[]
-  profit_drawdown_trigger: string[]
-  buyback_trigger: string[]
-  evidence: string[]
-}
-
-type RotationItem = {
-  name: string
-  rank: number
-  net_inflow: number
-  main_inflow: number
-  acceleration: number
-  limit_up_count: number
-  evidence: string
-}
-
-type SeesawMonitor = {
-  market_mode: string
-  summary: string
-  inflow_targets: RotationItem[]
-  outflow_targets: RotationItem[]
-  holding_alerts: SeesawItem[]
-}
+import type {
+  HoldingOut as Holding,
+  SectorRotationItem as RotationItem,
+  MarketSeesaw as SeesawMonitor,
+} from '../types'
 
 export default function Positions() {
   const [holdings, setHoldings] = useState<Holding[]>([])

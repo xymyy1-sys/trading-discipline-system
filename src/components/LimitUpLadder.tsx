@@ -1,64 +1,31 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import { Flame, NotebookPen, RefreshCcw, Search, Trophy } from 'lucide-react'
+import { CalendarClock, Flame, NotebookPen, RefreshCcw, Search, Trophy } from 'lucide-react'
 import { API_BASE } from '../api'
 import { cachedJson } from '../apiCache'
 
-type LimitUpStock = {
-  code: string
-  name: string
-  price: number
-  change_pct: number
-  amount: number
-  turnover: number
-  sealed_amount: number
-  first_limit_time: string
-  last_limit_time: string
-  break_count: number
-  consecutive_limit_days: number
-  industry: string
-  concepts: string[]
-  expectation: string
-}
-
-type LimitUpGroup = {
-  level: number
-  label: string
-  stocks: LimitUpStock[]
-}
-
-type LimitUpCluster = {
-  name: string
-  count: number
-  highest_level: number
-  stocks: string[]
-  expectation: string
-}
-
-type LimitUpLadderData = {
-  source: string
-  trade_date: string
-  updated_at: string
-  groups: LimitUpGroup[]
-  clusters: LimitUpCluster[]
-  summary: string[]
-  notes: string[]
-}
+import type {
+  LimitUpStock,
+  LimitUpLadder as LimitUpLadderData,
+} from '../types'
 
 export default function LimitUpLadder() {
   const [data, setData] = useState<LimitUpLadderData | null>(null)
   const [loading, setLoading] = useState(true)
+  const [error, setError] = useState('')
   const [creatingCode, setCreatingCode] = useState<string | null>(null)
   const [activeConcept, setActiveConcept] = useState<string | null>(null)
   const [query, setQuery] = useState('')
 
   const loadData = useCallback((force = false) => {
     setLoading(true)
+    setError('')
     cachedJson<LimitUpLadderData>(
       'limit-up-ladder',
       `${API_BASE}/api/market/limit-up-ladder${force ? '?force_refresh=true' : ''}`,
       force,
     )
       .then(({ data }) => setData(data))
+      .catch(() => setError('涨停天梯暂不可用，请确认后端服务和行情源'))
       .finally(() => setLoading(false))
   }, [])
 
@@ -83,6 +50,7 @@ export default function LimitUpLadder() {
   const highest = data?.groups[0]?.level ?? 0
   const total = data?.groups.reduce((sum, group) => sum + group.stocks.length, 0) ?? 0
   const topCluster = data?.clusters[0]
+  const isRecentTradeDay = !!data?.notes.some(note => note.includes('非交易日') || note.includes('最近交易日'))
 
   const createAuctionPlan = (stock: LimitUpStock, level: number) => {
     setCreatingCode(stock.code)
@@ -99,32 +67,38 @@ export default function LimitUpLadder() {
   }
 
   return (
-    <section className="ladder-page">
-      <div className="ladder-hero panel">
-        <div>
+    <section className="ladder-page trading-desk-page">
+      <div className="ladder-command">
+        <div className="desk-heading">
           <span className="eyebrow">Limit Up Ladder</span>
-          <h2>涨停板天梯图</h2>
-          <p>按连板高度观察市场情绪，再用同板块/同概念聚类判断明日主线延续和补涨方向。</p>
+          <h2>涨停天梯</h2>
+          <p>按连板高度、封单质量、题材聚类观察市场情绪，优先服务次日打板预案。</p>
         </div>
         <div className="ladder-actions">
           <button className="refresh-btn inline" type="button" onClick={() => loadData(true)} disabled={loading}>
             <RefreshCcw size={14} />
             {loading ? '同步中' : '刷新'}
           </button>
-          <span className="source-tag">{data ? `${data.trade_date} · ${sourceLabel(data.source)}` : '等待同步'}</span>
+          <span className={`trade-day-pill ${isRecentTradeDay ? 'stale' : ''}`}>
+            <CalendarClock size={14} />
+            {data ? `${data.trade_date} · ${sourceLabel(data.source)}` : error || '等待同步'}
+          </span>
         </div>
       </div>
 
       <div className="ladder-summary">
         <SummaryCard label="涨停家数" value={`${total}只`} icon={<Flame size={17} />} />
         <SummaryCard label="最高连板" value={highest ? `${highest}板` : '--'} icon={<Trophy size={17} />} />
-        <SummaryCard label="最强聚类" value={topCluster ? `${topCluster.name} · ${topCluster.count}只` : '--'} />
+        <SummaryCard label="最强聚类" value={topCluster ? topCluster.name : '--'} />
         <SummaryCard label="题材聚类" value={`${data?.clusters.length ?? 0}条`} />
       </div>
 
       <div className="ladder-layout">
         <aside className="panel ladder-clusters">
-          <h3>同板块 / 同概念</h3>
+          <div className="panel-title-line">
+            <h3>题材聚类</h3>
+            <span>{activeConcept ?? '全部'}</span>
+          </div>
           <button
             className={`concept-row ${activeConcept === null ? 'active' : ''}`}
             type="button"
@@ -133,7 +107,7 @@ export default function LimitUpLadder() {
             <strong>全部涨停</strong>
             <span>{total}只</span>
           </button>
-          {(data?.clusters ?? []).map(cluster => (
+          {(data?.clusters ?? []).slice(0, 18).map(cluster => (
             <button
               className={`concept-row ${activeConcept === cluster.name ? 'active' : ''}`}
               key={cluster.name}
@@ -141,18 +115,19 @@ export default function LimitUpLadder() {
               onClick={() => setActiveConcept(cluster.name)}
             >
               <strong>{cluster.name}</strong>
-              <span>{cluster.count}只 · 最高{cluster.highest_level}板</span>
+              <span>{cluster.count}只 / 最高{cluster.highest_level}板</span>
               <small>{cluster.expectation}</small>
             </button>
           ))}
         </aside>
 
         <div className="ladder-main">
-          <div className="ladder-toolbar">
+          <div className="ladder-toolbar panel">
             <label className="search-box">
               <Search size={15} />
               <input value={query} onChange={e => setQuery(e.target.value)} placeholder="搜索股票 / 板块 / 概念" />
             </label>
+            <span>{loading ? '同步中' : `${filteredGroups.reduce((sum, group) => sum + group.stocks.length, 0)} 只匹配`}</span>
           </div>
 
           <div className="ladder-groups">
@@ -179,12 +154,12 @@ export default function LimitUpLadder() {
                         <span>炸板 <em>{stock.break_count}次</em></span>
                       </div>
                       <div className="limit-card-tags">
-                        {[stock.industry, ...stock.concepts].filter(Boolean).slice(0, 3).map(tag => (
+                        {[stock.industry, ...stock.concepts].filter(Boolean).slice(0, 4).map(tag => (
                           <button type="button" key={tag} onClick={() => setActiveConcept(tag)}>{tag}</button>
                         ))}
                       </div>
                       <p>{stock.expectation}</p>
-                      <small>{stock.first_limit_time || '--'} 首封 · {stock.last_limit_time || '--'} 末封</small>
+                      <small>{stock.first_limit_time || '--'} 首封 / {stock.last_limit_time || '--'} 末封</small>
                       <button
                         className="limit-plan-btn"
                         type="button"
@@ -199,7 +174,7 @@ export default function LimitUpLadder() {
                 </div>
               </section>
             ))}
-            {!loading && filteredGroups.length === 0 && <div className="empty-msg">暂无匹配的涨停股</div>}
+            {!loading && filteredGroups.length === 0 && <div className="empty-msg">{error || '暂无匹配的涨停股'}</div>}
           </div>
         </div>
       </div>
@@ -208,7 +183,7 @@ export default function LimitUpLadder() {
         <article className="panel">
           <h3>明日预期支撑</h3>
           <div className="rule-list">
-            {(data?.summary ?? ['等待涨停池同步']).map(item => <span key={item}>{item}</span>)}
+            {(data?.summary ?? [error || '等待涨停池同步']).map(item => <span key={item}>{item}</span>)}
           </div>
         </article>
         <article className="panel">

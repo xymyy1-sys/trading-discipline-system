@@ -2,52 +2,11 @@ import { Fragment, useEffect, useState } from 'react'
 import { Pencil, Plus, Trash2, X } from 'lucide-react'
 import { API_BASE } from '../api'
 
-type Trade = {
-  id: number
-  code: string
-  name: string
-  traded_at: string
-  side: string
-  price: number
-  quantity: number
-  amount: number
-  total_asset: number
-  position_ratio: number
-  cost_price: number
-  stop_loss_price: number
-  reason: string
-  mode: string
-  compliant: boolean
-  human_tags: string[]
-  review?: TradeReview | null
-}
-
-type TradeReview = {
-  id: number
-  trade_id: number
-  verdict: string
-  status: string
-  discipline_score: number
-  summary: string
-  stock_context: string
-  sector_context: string
-  market_context: string
-  error_message: string
-  mistakes: string[]
-  avoid_actions: string[]
-  weakness_tags: string[]
-  created_at: string
-}
-
-type GrowthProfile = {
-  trade_count: number
-  review_count: number
-  dominant_weaknesses: string[]
-  frequent_mistakes: string[]
-  current_focus: string
-  improvement_actions: string[]
-  recent_scores: number[]
-}
+import type {
+  TradeLogOut as Trade,
+  TradeReview,
+  GrowthProfile,
+} from '../types'
 
 const humanTagOptions = ['贪婪', '恐惧', '幻想', '侥幸', '死扛', '冲动追高', '不甘心', '扳本', '卖飞后悔']
 

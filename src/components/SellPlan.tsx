@@ -2,20 +2,10 @@ import { useEffect, useState } from 'react'
 import { ShieldAlert, RefreshCw } from 'lucide-react'
 import { API_BASE } from '../api'
 
-type SellPlan = {
-  code: string
-  name: string
-  first_trim_price: number
-  second_exit_price: number
-  failure_price: number
-  sell_ratios: string[]
-  allow_buyback: boolean
-  buyback_condition: string
-  condition_orders: string[]
-}
+import type { SellPlan as SellPlanType } from '../types'
 
 export default function SellPlan() {
-  const [plans, setPlans] = useState<SellPlan[]>([])
+  const [plans, setPlans] = useState<SellPlanType[]>([])
 
   const fetchPlans = () => {
     fetch(`${API_BASE}/api/sell-plans`)

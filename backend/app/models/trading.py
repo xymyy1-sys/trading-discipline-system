@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, timezone
 
 from sqlalchemy import Boolean, DateTime, Float, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
@@ -18,9 +18,9 @@ class Holding(Base):
     total_asset: Mapped[float] = mapped_column(Float)
     position_type: Mapped[str] = mapped_column(String(32), default="盈利趋势仓")
     next_discipline: Mapped[str] = mapped_column(String(255), default="")
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc))
     updated_at: Mapped[datetime] = mapped_column(
-        DateTime, default=datetime.utcnow, onupdate=datetime.utcnow
+        DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc)
     )
 
 
@@ -36,9 +36,9 @@ class HoldingSyncBaseline(Base):
     total_asset: Mapped[float] = mapped_column(Float, default=0)
     position_type: Mapped[str] = mapped_column(String(32), default="交易同步基线仓")
     next_discipline: Mapped[str] = mapped_column(String(255), default="")
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc))
     updated_at: Mapped[datetime] = mapped_column(
-        DateTime, default=datetime.utcnow, onupdate=datetime.utcnow
+        DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc)
     )
 
 
@@ -48,7 +48,7 @@ class AccountState(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, default=1)
     total_asset: Mapped[float] = mapped_column(Float, default=0)
     updated_at: Mapped[datetime] = mapped_column(
-        DateTime, default=datetime.utcnow, onupdate=datetime.utcnow
+        DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc)
     )
 
 
@@ -58,7 +58,7 @@ class TradeLog(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
     code: Mapped[str] = mapped_column(String(16), index=True)
     name: Mapped[str] = mapped_column(String(64), index=True)
-    traded_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    traded_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc))
     side: Mapped[str] = mapped_column(String(16))
     price: Mapped[float] = mapped_column(Float)
     quantity: Mapped[int] = mapped_column(Integer)
@@ -91,7 +91,7 @@ class TradeReview(Base):
     mistakes: Mapped[str] = mapped_column(Text, default="[]")
     avoid_actions: Mapped[str] = mapped_column(Text, default="[]")
     weakness_tags: Mapped[str] = mapped_column(Text, default="[]")
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc))
 
 
 class ExitCard(Base):
@@ -109,14 +109,14 @@ class ExitCard(Base):
     underperform_action: Mapped[str] = mapped_column(Text)
     allow_buyback: Mapped[bool] = mapped_column(Boolean, default=False)
     buyback_limit_ratio: Mapped[float] = mapped_column(Float, default=0)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc))
 
 
 class MarketSnapshot(Base):
     __tablename__ = "market_snapshots"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
-    captured_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    captured_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc))
     grade: Mapped[str] = mapped_column(String(8), default="B")
     turnover_score: Mapped[int] = mapped_column(Integer, default=0)
     limit_up_count: Mapped[int] = mapped_column(Integer, default=0)
@@ -166,7 +166,7 @@ class NextDayPlan(Base):
     review_expectation: Mapped[str] = mapped_column(String(32), default="")
     review_execution: Mapped[str] = mapped_column(Text, default="")
     review_deviation: Mapped[str] = mapped_column(Text, default="")
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc))
     updated_at: Mapped[datetime] = mapped_column(
-        DateTime, default=datetime.utcnow, onupdate=datetime.utcnow
+        DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc)
     )

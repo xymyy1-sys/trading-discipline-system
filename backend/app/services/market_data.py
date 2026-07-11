@@ -1,15 +1,10 @@
 import html
 import re
-import threading
-import time
 import uuid
 from collections import defaultdict
 from datetime import datetime, timedelta
 from random import Random
 from typing import Any
-
-import pandas as pd
-import requests
 
 from app.schemas.trading import (
     InformationDifferentialOut,
@@ -27,285 +22,32 @@ from app.schemas.trading import (
     ThemeRadarOut,
     ThemeStockRole,
 )
+import requests
 
-_SNAPSHOT_LOCK = threading.Lock()
-_flow_snapshots: dict[str, list[dict[str, Any]]] = defaultdict(list)
-_snapshot_seq = 0
-
-_CACHE_LOCK = threading.Lock()
-_last_good_flow_cache: dict[str, tuple[list[dict[str, Any]], str, str]] = {}
-_response_cache: dict[str, tuple[float, Any]] = {}
-_CACHE_TTL_SECONDS = 300
-
-_MAINLINE_DEFS: list[dict[str, Any]] = [
-    {
-        "name": "机器人 / 物理AI",
-        "keywords": ("机器人", "减速器", "工业母机", "机器视觉", "伺服", "传感器", "机械", "自动化", "人形机器人", "智能机器"),
-    },
-    {
-        "name": "PCB / 玻璃基板",
-        "keywords": ("PCB", "印制电路", "覆铜板", "玻璃基板", "电子元件", "电子化学品", "封装基板"),
-    },
-    {
-        "name": "CPO / 光模块",
-        "keywords": ("CPO", "光模块", "光通信", "通信设备", "光器件", "高速铜缆", "液冷服务器"),
-    },
-    {
-        "name": "创新药",
-        "keywords": ("创新药", "化学制药", "生物制品", "生物制药", "医药", "CRO", "CXO", "医疗服务", "合成生物"),
-    },
-    {
-        "name": "电网设备 / 电力",
-        "keywords": ("电网", "智能电网", "电力", "电力设备", "发电设备", "电器行业", "风电", "光伏", "特高压", "虚拟电厂", "储能", "绿色电力"),
-    },
-    {
-        "name": "MLCC / 被动元件",
-        "keywords": ("MLCC", "被动元件", "电容", "电感", "陶瓷电容", "电子器件"),
-    },
-    {
-        "name": "存储芯片",
-        "keywords": ("存储芯片", "存储器", "DRAM", "HBM", "半导体", "芯片", "集成电路"),
-    },
-    {
-        "name": "玻璃玻纤",
-        "keywords": ("玻璃玻纤", "玻纤", "玻璃纤维", "建筑材料", "玻璃"),
-    },
-    {
-        "name": "商业航天",
-        "keywords": ("商业航天", "卫星", "航天", "军工电子", "国防军工", "军民融合", "航空装备", "飞机制造", "低空经济", "无人机"),
-    },
-    {
-        "name": "能源金属 / 小金属",
-        "keywords": ("能源金属", "小金属", "锂", "钴", "镍", "钨", "钼", "稀土", "有色金属", "金属新材料"),
-    },
-    {
-        "name": "贵金属 / 黄金",
-        "keywords": ("贵金属", "黄金", "白银", "珠宝首饰", "金银", "黄金概念"),
-    },
-    {
-        "name": "汽车链 / 智能驾驶",
-        "keywords": ("汽车", "汽车零部件", "汽车整车", "智能驾驶", "无人驾驶", "汽车电子", "特斯拉"),
-    },
-    {
-        "name": "AI应用 / 算力",
-        "keywords": ("人工智能", "AI", "算力", "软件开发", "数据中心", "传媒", "游戏", "数据要素"),
-    },
-]
-_KNOWN_MAINLINE_NAMES = {str(item["name"]) for item in _MAINLINE_DEFS}
-
-_BROAD_STYLE_LABELS = (
-    "专精特新", "融资融券", "预盈预增", "机构重仓", "国企改革", "央企改革",
-    "深股通", "沪股通", "MSCI", "富时罗素", "标准普尔", "创业板综",
-    "中证", "上证", "证金持股", "社保重仓", "QFII", "转债标的",
-    "业绩预升", "本月解禁", "券商重仓", "重组概念", "昨日涨停",
-    "华为概念", "苹果概念", "小米概念", "恒大概念", "黄河三角",
-    "超大盘", "资产注入", "基金重仓", "参股金融",
-    "分拆上市", "高校背景", "含H股", "含B股", "业绩预降", "业绩预亏",
-    "保险重仓", "金融参股",
+from app.services.cache import (
+    _get_response_cache,
+    _set_response_cache,
+    _cache_good_flow,
+    _get_cached_flow,
+    _record_snapshot,
+    _get_snapshots,
+)
+from app.services.mainline_classifier import (
+    _MAINLINE_DEFS,
+    _KNOWN_MAINLINE_NAMES,
+    _BROAD_STYLE_LABELS,
+    _SECTOR_TAXONOMY,
+    _classify_sector_taxonomy,
 )
 
-_SECTOR_TAXONOMY: list[dict[str, Any]] = [
-    {
-        "category": "半导体链",
-        "mainline": "半导体",
-        "subline": "集成电路封测",
-        "keywords": ("集成电路封测", "封测", "芯片封测"),
-    },
-    {
-        "category": "半导体链",
-        "mainline": "半导体",
-        "subline": "先进封装",
-        "keywords": ("先进封装", "Chiplet", "芯粒", "HBM", "封装基板"),
-    },
-    {
-        "category": "半导体链",
-        "mainline": "半导体",
-        "subline": "碳化硅",
-        "keywords": ("碳化硅", "第三代半导体", "氮化镓", "SiC", "GaN"),
-    },
-    {
-        "category": "半导体链",
-        "mainline": "半导体",
-        "subline": "存储芯片",
-        "keywords": ("存储芯片", "存储器", "DRAM", "NAND"),
-    },
-    {
-        "category": "半导体链",
-        "mainline": "半导体",
-        "subline": "半导体",
-        "keywords": ("半导体", "芯片", "集成电路", "光刻机", "光刻胶", "EDA", "晶圆", "电子化学品", "华为海思"),
-    },
-    {
-        "category": "AI算力链",
-        "mainline": "CPO / 光模块",
-        "subline": "CPO概念",
-        "keywords": ("CPO", "共封装光学"),
-    },
-    {
-        "category": "AI算力链",
-        "mainline": "CPO / 光模块",
-        "subline": "光模块",
-        "keywords": ("光模块", "光通信", "光器件", "通信设备"),
-    },
-    {
-        "category": "AI算力链",
-        "mainline": "AI应用 / 算力",
-        "subline": "算力",
-        "keywords": ("算力", "液冷服务器", "数据中心", "服务器", "人工智能", "AI"),
-    },
-    {
-        "category": "消费电子",
-        "mainline": "消费电子",
-        "subline": "光学光电子",
-        "keywords": ("光学光电子", "消费电子", "电子元件", "面板", "OLED", "MiniLED", "MicroLED", "触摸屏"),
-    },
-    {
-        "category": "有色金属链",
-        "mainline": "有色金属",
-        "subline": "贵金属 / 黄金",
-        "keywords": ("贵金属", "黄金", "白银", "珠宝首饰", "金银"),
-    },
-    {
-        "category": "有色金属链",
-        "mainline": "有色金属",
-        "subline": "能源金属",
-        "keywords": ("能源金属", "锂", "钴", "镍"),
-    },
-    {
-        "category": "有色金属链",
-        "mainline": "有色金属",
-        "subline": "小金属",
-        "keywords": ("小金属", "稀土", "钨", "钼", "铟", "锑", "金属新材料"),
-    },
-    {
-        "category": "有色金属链",
-        "mainline": "有色金属",
-        "subline": "有色金属",
-        "keywords": ("有色金属", "铜", "铝", "铅", "锌"),
-    },
-    {
-        "category": "商业航天",
-        "mainline": "商业航天",
-        "subline": "商业航天",
-        "keywords": ("商业航天", "卫星", "航天", "军工电子", "国防军工", "航空装备", "低空经济", "无人机"),
-    },
-    {
-        "category": "机器人",
-        "mainline": "机器人 / 物理AI",
-        "subline": "机器人",
-        "keywords": ("机器人", "智能机器", "人形机器人", "减速器", "伺服", "机器视觉", "工业母机", "自动化", "3D打印"),
-    },
-    {
-        "category": "汽车链",
-        "mainline": "汽车链 / 智能驾驶",
-        "subline": "新能源汽车",
-        "keywords": ("汽车", "新能源汽车", "汽车零部件", "汽车整车", "智能驾驶", "无人驾驶", "特斯拉"),
-    },
-    {
-        "category": "医药",
-        "mainline": "创新药",
-        "subline": "创新药",
-        "keywords": ("创新药", "化学制药", "生物制品", "CRO", "CXO", "医药", "医疗服务", "合成生物"),
-    },
-    {
-        "category": "金融地产",
-        "mainline": "金融地产",
-        "subline": "房地产",
-        "keywords": ("房地产", "物业管理", "租售同权"),
-    },
-    {
-        "category": "金融地产",
-        "mainline": "金融地产",
-        "subline": "金融",
-        "keywords": ("证券", "银行", "保险", "多元金融", "互联金融"),
-    },
-]
-
-
 def _last_trading_day() -> str:
-    """Return the most recent trading weekday in YYYY-MM-DD.
-
-    Does not handle exchange holidays — only skips Saturday / Sunday.
-    """
     d = datetime.now()
     while d.weekday() >= 5:
         d -= timedelta(days=1)
     return d.strftime("%Y-%m-%d")
 
-
 def _is_trading_day() -> bool:
     return datetime.now().weekday() < 5
-
-
-def _classify_sector_taxonomy(raw: dict[str, Any]) -> dict[str, str]:
-    raw_name = str(raw.get("name") or "未知板块").strip() or "未知板块"
-    text = raw_name.upper()
-    for item in _SECTOR_TAXONOMY:
-        for keyword in item["keywords"]:
-            if str(keyword).upper() in text:
-                return {
-                    "display_name": raw_name,
-                    "raw_name": raw_name,
-                    "mainline": str(item["mainline"]),
-                    "subline": str(item["subline"]),
-                    "category": str(item["category"]),
-                }
-    return {
-        "display_name": raw_name,
-        "raw_name": raw_name,
-        "mainline": raw_name,
-        "subline": raw_name,
-        "category": "其他",
-    }
-
-
-def _cache_good_flow(key: str, raw_items: list[dict[str, Any]], source: str) -> None:
-    with _CACHE_LOCK:
-        _last_good_flow_cache[key] = (raw_items, source, datetime.now().strftime("%Y-%m-%d"))
-
-
-def _get_cached_flow(key: str) -> tuple[list[dict[str, Any]], str, str] | None:
-    with _CACHE_LOCK:
-        return _last_good_flow_cache.get(key)
-
-
-def _get_response_cache(key: str) -> Any | None:
-    now = time.time()
-    with _CACHE_LOCK:
-        cached = _response_cache.get(key)
-        if not cached:
-            return None
-        expires_at, value = cached
-        if expires_at <= now:
-            _response_cache.pop(key, None)
-            return None
-        return value
-
-
-def _set_response_cache(key: str, value: Any) -> None:
-    with _CACHE_LOCK:
-        _response_cache[key] = (time.time() + _CACHE_TTL_SECONDS, value)
-
-
-def _record_snapshot(flow_type: str, raw_items: list[dict[str, Any]]) -> None:
-    global _snapshot_seq
-    now = datetime.now()
-    with _SNAPSHOT_LOCK:
-        key = f"{now.strftime('%Y-%m-%d')}:{flow_type}"
-        _snapshot_seq += 1
-        _flow_snapshots[key].append(
-            {"time": now.strftime("%H:%M:%S"), "seq": _snapshot_seq, "items": raw_items}
-        )
-        if len(_flow_snapshots[key]) > 120:
-            _flow_snapshots[key] = _flow_snapshots[key][-120:]
-
-
-def _get_snapshots(flow_type: str) -> list[dict[str, Any]]:
-    today = datetime.now().strftime("%Y-%m-%d")
-    key = f"{today}:{flow_type}"
-    with _SNAPSHOT_LOCK:
-        return list(_flow_snapshots.get(key, []))
-
 
 def _is_trading_time() -> bool:
     now = datetime.now()
@@ -313,7 +55,6 @@ def _is_trading_time() -> bool:
         return False
     t = now.hour * 60 + now.minute
     return 555 <= t <= 905
-
 
 def _synthetic_timeline_points(label_times: list[str], final_value: float) -> list[SectorFlowPoint]:
     if abs(final_value) < 0.01:
@@ -333,12 +74,9 @@ def _synthetic_timeline_points(label_times: list[str], final_value: float) -> li
     pts[-1].value = round(final_value, 2)
     return pts
 
-
 class MarketDataProvider:
     def __init__(self) -> None:
         self.random = Random(20260704)
-
-    # ── theme radar ──────────────────────────────────────────────────────
 
     def theme_radar(self, force_refresh: bool = False) -> ThemeRadarOut:
         cache_key = "theme-radar"
@@ -924,8 +662,6 @@ class MarketDataProvider:
             for row in rows
         ]
 
-    # ── sector flow ──────────────────────────────────────────────────────
-
     def sector_flow(
         self,
         flow_type: str = "行业资金流",
@@ -954,7 +690,7 @@ class MarketDataProvider:
                 _cache_good_flow(cache_key, raw_items, "akshare/eastmoney")
             except Exception:
                 try:
-                    raw_items = self._fetch_sina_sector_flow_raw(flow_type=flow_type, period=period)
+                    raw_items = self._fetch_sina_sector_flow_raw(flow_type=flow_type, period="今日")
                     source = "sina"
                     _cache_good_flow(cache_key, raw_items, "sina")
                 except Exception:
@@ -1158,6 +894,8 @@ class MarketDataProvider:
         notes: list[str] = []
         source = "akshare/eastmoney"
         raw_items: list[dict[str, Any]] = []
+        if not _is_trading_day() and trade_date is None:
+            notes.append(f"非交易日，展示最近交易日 {target_date} 的涨停池")
         try:
             raw_items = self._fetch_limit_up_pool_raw(target_date)
         except Exception as exc:
@@ -1257,13 +995,74 @@ class MarketDataProvider:
         return rows
 
     def _fetch_limit_up_pool_raw(self, trade_date: str) -> list[dict[str, Any]]:
+        date_text = trade_date.replace("-", "")
+        try:
+            rows = self._fetch_direct_limit_up_pool_raw(date_text)
+            if rows:
+                return rows
+        except Exception:
+            pass
+
         import akshare as ak
-        frame = ak.stock_zt_pool_em(date=trade_date.replace("-", ""))
+        frame = ak.stock_zt_pool_em(date=date_text)
         if frame.empty:
             raise ValueError("empty limit-up pool")
         results: list[dict[str, Any]] = []
         for _, row in frame.iterrows():
             results.append({str(k): row.get(k) for k in frame.columns})
+        return results
+
+    def _fetch_direct_limit_up_pool_raw(self, date_text: str) -> list[dict[str, Any]]:
+        resp = requests.get(
+            "https://push2ex.eastmoney.com/getTopicZTPool",
+            params={
+                "ut": "7eea3edcaed734bea9cbfc24409ed989",
+                "dpt": "wz.ztzt",
+                "Pageindex": 0,
+                "pagesize": 10000,
+                "sort": "fbt:asc",
+                "date": date_text,
+                "_": int(datetime.now().timestamp() * 1000),
+            },
+            headers={
+                "User-Agent": "Mozilla/5.0",
+                "Referer": "https://quote.eastmoney.com/ztb/detail",
+            },
+            timeout=6,
+        )
+        resp.raise_for_status()
+        payload = resp.json()
+        pool = (payload.get("data") or {}).get("pool") or []
+        if not pool:
+            raise ValueError("empty direct limit-up pool")
+
+        def format_time(value: Any) -> str:
+            text = str(value or "").zfill(6)
+            if len(text) < 6:
+                return ""
+            return f"{text[:2]}:{text[2:4]}:{text[4:6]}"
+
+        results: list[dict[str, Any]] = []
+        for row in pool:
+            if not isinstance(row, dict):
+                continue
+            zttj = row.get("zttj") if isinstance(row.get("zttj"), dict) else {}
+            level = int(row.get("lbc") or zttj.get("ct") or zttj.get("days") or 1)
+            results.append({
+                "代码": str(row.get("c") or ""),
+                "名称": str(row.get("n") or ""),
+                "最新价": round(float(row.get("p") or 0) / 1000, 3),
+                "涨跌幅": float(row.get("zdp") or 0),
+                "成交额": float(row.get("amount") or 0),
+                "换手率": float(row.get("hs") or 0),
+                "封板资金": float(row.get("fund") or 0),
+                "首次封板时间": format_time(row.get("fbt")),
+                "最后封板时间": format_time(row.get("lbt")),
+                "炸板次数": int(row.get("zbc") or 0),
+                "连板数": level,
+                "连续涨停天数": level,
+                "所属行业": str(row.get("hybk") or ""),
+            })
         return results
 
     def _build_limit_up_stock(self, raw: dict[str, Any]) -> LimitUpStockOut:
@@ -1530,8 +1329,6 @@ class MarketDataProvider:
                 "leaders": ["龙头候选", "容量核心", "前排强势"],
             })
         return items
-
-    # ── information differential ─────────────────────────────────────────
 
     def information_differential(self, date: str | None = None) -> InformationDifferentialOut:
         if date:

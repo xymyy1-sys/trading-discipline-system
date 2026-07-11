@@ -1,7 +1,8 @@
+/// <reference types="vitest" />
 import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
 
-export default defineConfig({
+const config = {
   plugins: [react()],
   server: {
     host: '0.0.0.0',
@@ -13,4 +14,11 @@ export default defineConfig({
       },
     },
   },
-})
+  test: {
+    globals: true,
+    environment: 'jsdom',
+    setupFiles: './src/test/setup.ts',
+  },
+}
+
+export default defineConfig(config as Parameters<typeof defineConfig>[0])

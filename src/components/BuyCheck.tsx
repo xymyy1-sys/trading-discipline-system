@@ -2,13 +2,7 @@ import { useState } from 'react'
 import { CheckCircle2, XCircle, AlertTriangle, ArrowRight } from 'lucide-react'
 import { API_BASE } from '../api'
 
-type CheckResult = {
-  decision: string
-  score: number
-  allowed_position_ratio: number
-  warnings: string[]
-  required_actions: string[]
-}
+import type { PreTradeCheckOut as CheckResult } from '../types'
 
 const roles = ['龙一', '龙二', '明确前排强势股', '高辨识度容量核心', '补涨股', '后排跟风股', '杂毛/无主线股']
 

@@ -1,0 +1,17 @@
+{
+  "name": "交易纪律系统",
+  "short_name": "TDS",
+  "description": "A股短线/超短线交易纪律管理与盘中跷跷板证据雷达",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#060913",
+  "theme_color": "#0c142e",
+  "orientation": "any",
+  "icons": [
+    {
+      "src": "favicon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml"
+    }
+  ]
+}

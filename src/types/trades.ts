@@ -1,0 +1,80 @@
+export interface TradeLog {
+  id?: number;
+  code: string;
+  name: string;
+  traded_at?: string;
+  side: string;
+  price: number;
+  quantity: number;
+  amount?: number;
+  total_asset: number;
+  position_ratio?: number;
+  cost_price: number;
+  stop_loss_price?: number;
+  reason: string;
+  mode: string;
+  compliant: boolean;
+  human_tags: string[];
+  review?: TradeReview | null;
+}
+
+export interface TradeLogOut extends TradeLog {
+  id: number;
+  traded_at: string;
+  amount: number;
+  position_ratio: number;
+  stop_loss_price: number;
+  review?: TradeReview | null;
+}
+
+export interface TradeReview {
+  id: number;
+  trade_id: number;
+  code: string;
+  name: string;
+  verdict: string;
+  status: string;
+  discipline_score: number;
+  summary: string;
+  stock_context: string;
+  sector_context: string;
+  market_context: string;
+  error_message: string;
+  mistakes: string[];
+  avoid_actions: string[];
+  weakness_tags: string[];
+  created_at: string;
+}
+
+export interface GrowthProfile {
+  trade_count: number;
+  review_count: number;
+  dominant_weaknesses: string[];
+  frequent_mistakes: string[];
+  current_focus: string;
+  improvement_actions: string[];
+  recent_scores: number[];
+}
+
+export interface PreTradeCheckIn {
+  code: string;
+  name: string;
+  market_grade: string;
+  position_ratio: number;
+  target_role: string;
+  is_mainline: boolean;
+  has_sector_response: boolean;
+  has_volume_price_confirm: boolean;
+  buy_point: string;
+  stop_loss_price: number;
+  current_price: number;
+  mode: string;
+}
+
+export interface PreTradeCheckOut {
+  decision: string;
+  score: number;
+  allowed_position_ratio: number;
+  warnings: string[];
+  required_actions: string[];
+}
