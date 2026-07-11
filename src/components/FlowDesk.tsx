@@ -374,6 +374,7 @@ function KV({ label, value, tone }: { label: string; value: string; tone?: 'up' 
 function sourceLabel(source: string, notes: string[]) {
   if (source.includes('diagnostic')) return '诊断数据'
   if (source.includes('sina')) return '新浪资金流兜底'
+  if (source.includes('eastmoney-fflow')) return '东方财富板块资金 · 分时'
   if (source.includes('snapshots')) {
     const n = source.split('snapshots:')[1]?.split('|')[0] || '?'
     return `东方财富 · ${n} 个快照`

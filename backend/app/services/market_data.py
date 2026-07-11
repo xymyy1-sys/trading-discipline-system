@@ -769,11 +769,29 @@ class MarketDataProvider:
             if len(theme_like) >= 20:
                 visible_raw_items = theme_like
         raw_ordered = sorted(visible_raw_items, key=_net_of, reverse=True)
+        chart_codes = {
+            str(raw.get("board_code") or "")
+            for raw in raw_ordered[:10]
+            if str(raw.get("board_code") or "").strip()
+        }
+        chart_codes.update(
+            str(raw.get("board_code") or "")
+            for raw in sorted([raw for raw in raw_ordered if _net_of(raw) < 0], key=_net_of)[:10]
+            if str(raw.get("board_code") or "").strip()
+        )
+        has_eastmoney_intraday_curve = False
         for idx, raw in enumerate(raw_ordered, start=1):
             name = str(raw.get("name") or "未知板块")
             taxonomy = _classify_sector_taxonomy(raw)
             net = _net_of(raw)
-            if raw.get("provider") == "sina" and raw.get("board_code") and idx <= 8:
+            board_code = str(raw.get("board_code") or "")
+            if raw.get("provider") == "eastmoney" and period == "今日" and board_code in chart_codes:
+                try:
+                    timeline = self._fetch_eastmoney_board_intraday_flow(board_code)
+                    has_eastmoney_intraday_curve = len([point for point in timeline if point.time != "当前"]) >= 2
+                except Exception:
+                    timeline = _current_timeline_point(net)
+            elif raw.get("provider") == "sina" and raw.get("board_code") and idx <= 8:
                 try:
                     timeline = self._fetch_sina_sector_intraday_flow(str(raw.get("board_code")))
                 except Exception:
@@ -829,7 +847,9 @@ class MarketDataProvider:
             key=lambda x: x.net_inflow,
         )
         base_source = source
-        if has_real_curve:
+        if has_eastmoney_intraday_curve:
+            base_source = f"{source}+eastmoney-fflow"
+        elif has_real_curve:
             base_source = f"{source}+snapshots:{len(snaps)}"
         elif len(snaps) > 0:
             base_source = f"{source}+estimates"
@@ -1629,16 +1649,16 @@ class MarketDataProvider:
     def _fetch_direct_eastmoney_sector_flow_raw(
         self, flow_type: str, period: str
     ) -> list[dict[str, Any]]:
-        sector_type_map = {"行业资金流": "2", "概念资金流": "3", "地域资金流": "1"}
+        sector_type_map = {"行业资金流": "m:90 s:4", "概念资金流": "m:90 t:3", "地域资金流": "m:90 t:1"}
         indicator_map = {
-            "今日": ("f62", "1", "f62", "f66", "f204",
-                     "f12,f14,f2,f3,f62,f184,f66,f69,f72,f75,f78,f81,f84,f87,f204,f205,f124,f100,f102,f104"),
-            "5日": ("f164", "5", "f164", "f165", "f257",
-                     "f12,f14,f2,f109,f164,f165,f166,f167,f168,f169,f170,f171,f172,f173,f257,f258,f124"),
-            "10日": ("f174", "10", "f174", "f175", "f260",
-                     "f12,f14,f2,f160,f174,f175,f176,f177,f178,f179,f180,f181,f182,f183,f260,f261,f124"),
+            "今日": ("f62", "1", "f62", "f66", "f204", "f3",
+                     "f12,f14,f2,f3,f62,f184,f66,f69,f72,f75,f78,f81,f84,f87,f204,f205,f124,f1,f13"),
+            "5日": ("f164", "5", "f164", "f166", "f257", "f109",
+                     "f12,f14,f2,f109,f164,f165,f166,f167,f168,f169,f170,f171,f172,f173,f257,f258,f124,f1,f13"),
+            "10日": ("f174", "10", "f174", "f176", "f260", "f160",
+                     "f12,f14,f2,f160,f174,f175,f176,f177,f178,f179,f180,f181,f182,f183,f260,f261,f124,f1,f13"),
         }
-        fid, stat, net_key, main_key, leader_key, fields = indicator_map.get(
+        fid, stat, net_key, main_key, leader_key, change_key, fields = indicator_map.get(
             period, indicator_map["今日"]
         )
         params = {
@@ -1646,34 +1666,44 @@ class MarketDataProvider:
             "pz": "100",
             "po": "1",
             "np": "1",
-            "ut": "b2884a393a59ad64002292a3e90d46a5",
+            "ut": "8dec03ba335b81bf4ebdf7b29ec27d15",
             "fltt": "2",
             "invt": "2",
-            "fid0": fid,
-            "fs": f"m:90 t:{sector_type_map.get(flow_type, '2')}",
+            "fid": fid,
+            "fs": sector_type_map.get(flow_type, "m:90 s:4"),
             "stat": stat,
             "fields": fields,
-            "rt": "52975239",
         }
         headers = {
             "User-Agent": "Mozilla/5.0",
             "Referer": "https://data.eastmoney.com/bkzj/hy.html",
             "Accept": "application/json,text/plain,*/*",
         }
-        resp = requests.get(
-            "https://push2.eastmoney.com/api/qt/clist/get",
-            params=params,
-            headers=headers,
-            timeout=4,
-        )
-        resp.raise_for_status()
-        rows = resp.json()["data"]["diff"]
+        rows = None
+        last_exc: Exception | None = None
+        for host in ("https://push2.eastmoney.com", "https://push2delay.eastmoney.com"):
+            try:
+                resp = requests.get(
+                    f"{host}/api/qt/clist/get",
+                    params=params,
+                    headers=headers,
+                    timeout=6,
+                )
+                resp.raise_for_status()
+                rows = resp.json()["data"]["diff"]
+                if rows:
+                    break
+            except Exception as exc:
+                last_exc = exc
+        if not rows and last_exc:
+            raise last_exc
         if not rows:
             raise ValueError("empty eastmoney sector flow")
         return [
             {
                 "name": str(row.get("f14", "未知板块")),
                 "board_code": str(row.get("f12") or ""),
+                "provider": "eastmoney",
                 "change_pct": float(row.get("f3") or 0),
                 "net_inflow": round(float(row.get(net_key) or 0) / 1e8, 2),
                 "main_inflow": round(float(row.get(main_key) or 0) / 1e8, 2),
@@ -1700,17 +1730,64 @@ class MarketDataProvider:
                     },
                 ],
                 "strength": max(0, min(100, int(
-                    50 + float(row.get("f3") or 0) * 8 + float(row.get(net_key) or 0) / 2e7
+                    50 + float(row.get(change_key) or 0) * 8 + float(row.get(net_key) or 0) / 2e7
                 ))),
                 "leaders": [str(row.get(leader_key) or "待识别")],
-                "change_pct_5": float(row.get("f109") or 0),
+                "change_pct_5": float(row.get("f109") or row.get("f160") or 0),
                 "net_5d": round(float(row.get("f164") or row.get("f174") or 0) / 1e8, 2),
-                "limit_up_count": int(row.get("f100") or 0),
-                "stock_count": int(row.get("f104") or 0),
-                "avg_change": float(row.get("f102") or 0),
+                "limit_up_count": _safe_int(row.get("f100")),
+                "stock_count": _safe_int(row.get("f104")),
+                "avg_change": _safe_float(row.get("f102")),
             }
             for row in rows
         ]
+
+    def _fetch_eastmoney_board_intraday_flow(self, board_code: str) -> list[SectorFlowPoint]:
+        if not board_code:
+            raise ValueError("missing eastmoney board code")
+        params = {
+            "lmt": "0",
+            "klt": "1",
+            "fields1": "f1,f2,f3,f7",
+            "fields2": "f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61,f62,f63,f64,f65",
+            "ut": "b2884a393a59ad64002292a3e90d46a5",
+            "secid": f"90.{board_code}",
+        }
+        headers = {
+            "User-Agent": "Mozilla/5.0",
+            "Referer": "https://data.eastmoney.com/bkzj/",
+            "Accept": "application/json,text/plain,*/*",
+        }
+        rows = None
+        last_exc: Exception | None = None
+        for host in ("https://push2.eastmoney.com", "https://push2delay.eastmoney.com"):
+            try:
+                resp = requests.get(
+                    f"{host}/api/qt/stock/fflow/kline/get",
+                    params=params,
+                    headers=headers,
+                    timeout=6,
+                )
+                resp.raise_for_status()
+                rows = resp.json().get("data", {}).get("klines") or []
+                if rows:
+                    break
+            except Exception as exc:
+                last_exc = exc
+        if not rows and last_exc:
+            raise last_exc
+        points: list[SectorFlowPoint] = []
+        for row in rows or []:
+            parts = str(row).split(",")
+            if len(parts) < 2:
+                continue
+            time_label = parts[0][-5:]
+            if not re.match(r"^\d{2}:\d{2}$", time_label):
+                continue
+            points.append(SectorFlowPoint(time=time_label, value=round(_safe_float(parts[1]) / 1e8, 2)))
+        if not points:
+            raise ValueError("empty eastmoney board intraday flow")
+        return points
 
     def _fetch_akshare_sector_flow_raw(
         self, flow_type: str, period: str
