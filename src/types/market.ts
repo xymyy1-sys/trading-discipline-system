@@ -118,6 +118,62 @@ export interface SectorFlowOut {
 
 export type SectorFlow = SectorFlowOut;
 
+export interface BoardFlowPanel extends SectorFlowOut {
+  board_type: string;
+  period: string;
+  notes: string[];
+}
+
+export interface HotThemeItem {
+  name: string;
+  board_code: string | null;
+  period: string;
+  rank: number;
+  change_pct: number;
+  net_inflow: number;
+  main_inflow: number;
+  source: string;
+  reason: string;
+  leaders: string[];
+}
+
+export interface HotThemesOut {
+  source: string;
+  updated_at: string;
+  items: HotThemeItem[];
+  notes: string[];
+}
+
+export interface DarkTradeItem {
+  code: string;
+  name: string;
+  market: string;
+  board_type: string;
+  rank: number;
+  latest: number;
+  change_pct: number;
+  dark_amount: number;
+  lit_amount: number;
+  main_net_inflow_with_dark: number;
+  dark_activity: number;
+  inflow_stock_ratio: number;
+  inflow_count: number;
+  stock_count: number;
+  leading_stock: string;
+  leading_stock_code: string;
+  industry: string;
+  concept: string;
+}
+
+export interface DarkTradeOut {
+  source: string;
+  trade_date: string;
+  updated_at: string;
+  scope: string;
+  items: DarkTradeItem[];
+  notes: string[];
+}
+
 export interface LimitUpStock {
   code: string;
   name: string;

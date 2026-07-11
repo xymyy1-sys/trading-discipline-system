@@ -3,6 +3,9 @@ from sqlalchemy.orm import Session
 from app.core.database import get_db
 from app.models.trading import Holding
 from app.schemas.trading import (
+    BoardFlowPanelOut,
+    DarkTradeOut,
+    HotThemesOut,
     SectorFlowOut,
     SectorDetailOut,
     LimitUpLadderOut,
@@ -29,6 +32,42 @@ def sector_flow(
     return market_provider.sector_flow(
         flow_type=flow_type,
         period=period,
+        force_refresh=force_refresh,
+    )
+
+@router.get("/market/board-flow-panel", response_model=BoardFlowPanelOut)
+@limiter.limit("30/minute")
+def board_flow_panel(
+    request: Request,
+    board_type: str = "行业",
+    period: str = "今日",
+    force_refresh: bool = False,
+) -> BoardFlowPanelOut:
+    return market_provider.board_flow_panel(
+        board_type=board_type,
+        period=period,
+        force_refresh=force_refresh,
+    )
+
+@router.get("/market/hot-themes", response_model=HotThemesOut)
+@limiter.limit("20/minute")
+def hot_themes(
+    request: Request,
+    force_refresh: bool = False,
+) -> HotThemesOut:
+    return market_provider.hot_themes(force_refresh=force_refresh)
+
+@router.get("/market/dark-trade", response_model=DarkTradeOut)
+@limiter.limit("20/minute")
+def dark_trade(
+    request: Request,
+    scope: str = "个股",
+    trade_date: str | None = None,
+    force_refresh: bool = False,
+) -> DarkTradeOut:
+    return market_provider.dark_trade(
+        scope=scope,
+        trade_date=trade_date,
         force_refresh=force_refresh,
     )
 

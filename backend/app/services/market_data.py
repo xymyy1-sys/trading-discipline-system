@@ -7,6 +7,11 @@ from random import Random
 from typing import Any
 
 from app.schemas.trading import (
+    BoardFlowPanelOut,
+    DarkTradeItem,
+    DarkTradeOut,
+    HotThemeItem,
+    HotThemesOut,
     InformationDifferentialOut,
     InformationItem,
     LimitUpClusterOut,
@@ -55,6 +60,25 @@ def _is_trading_time() -> bool:
         return False
     t = now.hour * 60 + now.minute
     return 555 <= t <= 905
+
+def _safe_float(value: Any, default: float = 0.0) -> float:
+    if value is None or value == "":
+        return default
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+def _safe_int(value: Any, default: int = 0) -> int:
+    if value is None or value == "":
+        return default
+    try:
+        return int(float(value))
+    except (TypeError, ValueError):
+        return default
+
+def _money_yuan_to_yi(value: Any) -> float:
+    return round(_safe_float(value) / 1e8, 2)
 
 def _synthetic_timeline_points(label_times: list[str], final_value: float) -> list[SectorFlowPoint]:
     if abs(final_value) < 0.01:
@@ -822,6 +846,144 @@ class MarketDataProvider:
         _set_response_cache(response_cache_key, result)
         return result
 
+    def board_flow_panel(
+        self,
+        board_type: str = "行业",
+        period: str = "今日",
+        force_refresh: bool = False,
+    ) -> BoardFlowPanelOut:
+        normalized = self._normalize_board_type(board_type)
+        flow_type = self._board_type_to_flow_type(normalized)
+        cache_key = f"board-flow-panel|{normalized}|{period}"
+        if not force_refresh:
+            cached = _get_response_cache(cache_key)
+            if cached is not None:
+                return cached
+
+        notes: list[str] = []
+        flow = self.sector_flow(
+            flow_type=flow_type,
+            period=period,
+            force_refresh=force_refresh,
+        )
+        source = flow.source
+        if normalized in {"风格", "港股"}:
+            notes.append(f"东方财富公开板块资金接口未稳定提供{normalized}资金榜，当前按{flow_type.replace('资金流', '')}资金口径展示")
+        if "sina" in source:
+            notes.append("东方财富 push2 当前不可用，已回落到新浪资金流；分层资金可能缺失")
+        if "diagnostic" in source:
+            notes.append("外部资金流不可用，当前为诊断数据")
+        if not any(item.timeline and len([p for p in item.timeline if p.time != "当前"]) >= 2 for item in flow.inflow + flow.outflow):
+            notes.append("当前只有资金快照，主图不会绘制伪曲线；盘中多次刷新后可形成连续曲线")
+
+        result = BoardFlowPanelOut(
+            source=source,
+            updated_at=flow.updated_at,
+            board_type=normalized,
+            period=period,
+            inflow=flow.inflow[:20],
+            outflow=flow.outflow[:20],
+            notes=notes or ["东方财富板块资金流已同步"],
+        )
+        _set_response_cache(cache_key, result)
+        return result
+
+    def hot_themes(self, force_refresh: bool = False) -> HotThemesOut:
+        cache_key = "hot-themes"
+        if not force_refresh:
+            cached = _get_response_cache(cache_key)
+            if cached is not None:
+                return cached
+
+        notes: list[str] = []
+        items: list[HotThemeItem] = []
+        try:
+            hot_rows = self._fetch_eastmoney_hot_market_raw()
+            items = self._build_hot_theme_items(hot_rows)
+            if items and not any(abs(item.net_inflow) > 0.01 or abs(item.main_inflow) > 0.01 for item in items):
+                notes.append("热点题材涨幅榜可用，但东方财富板块资金补充当前不可用")
+        except Exception as exc:
+            notes.append(f"东方财富市场热点页暂不可用: {exc.__class__.__name__}")
+            radar = self.theme_radar(force_refresh=force_refresh)
+            for item in radar.themes[:30]:
+                items.append(HotThemeItem(
+                    name=item.name,
+                    board_code=item.board_code,
+                    period="今日",
+                    rank=item.rank,
+                    change_pct=item.change_pct,
+                    net_inflow=item.net_inflow,
+                    main_inflow=item.main_inflow,
+                    source=radar.source,
+                    reason=item.stage_reason,
+                    leaders=item.leader_names,
+                ))
+
+        if not items:
+            fallback = self._fallback_sector_flow_raw()
+            items = [
+                HotThemeItem(
+                    name=str(row.get("name") or "未知题材"),
+                    board_code=str(row.get("board_code") or "") or None,
+                    period="今日",
+                    rank=idx,
+                    change_pct=round(float(row.get("change_pct") or 0), 2),
+                    net_inflow=round(float(row.get("net_inflow") or 0), 2),
+                    main_inflow=round(float(row.get("main_inflow") or 0), 2),
+                    source="diagnostic-fallback",
+                    reason="外部热点接口不可用，使用诊断样例",
+                    leaders=[str(x) for x in row.get("leaders", []) if str(x).strip()],
+                )
+                for idx, row in enumerate(fallback[:12], start=1)
+            ]
+            notes.append("热点题材外部源不可用，显示诊断样例")
+
+        result = HotThemesOut(
+            source="eastmoney-hotmarket" if not notes else "eastmoney-hotmarket+fallback",
+            updated_at=datetime.utcnow(),
+            items=items[:45],
+            notes=notes or ["东方财富市场热点榜已同步；资金字段按板块资金榜补充"],
+        )
+        _set_response_cache(cache_key, result)
+        return result
+
+    def dark_trade(
+        self,
+        scope: str = "个股",
+        trade_date: str | None = None,
+        force_refresh: bool = False,
+    ) -> DarkTradeOut:
+        normalized = self._normalize_dark_scope(scope)
+        date_text = (trade_date or _last_trading_day()).replace("-", "")
+        cache_key = f"dark-trade|{normalized}|{date_text}"
+        if not force_refresh:
+            cached = _get_response_cache(cache_key)
+            if cached is not None:
+                return cached
+
+        notes = [
+            "东方财富暗盘资金为算法统计口径，A股无官方交易所暗盘；用于观察潜在资金行为，不等同真实暗盘成交",
+        ]
+        try:
+            rows, remote_date = self._fetch_eastmoney_dark_trade_raw(normalized, date_text)
+            items = [self._build_dark_trade_item(row, normalized) for row in rows]
+        except Exception as exc:
+            notes.append(f"东方财富暗盘资金接口暂不可用: {exc.__class__.__name__}")
+            rows = []
+            remote_date = date_text
+            items = []
+
+        result = DarkTradeOut(
+            source="eastmoney-darktrade" if items else "eastmoney-darktrade-unavailable",
+            trade_date=str(remote_date or date_text),
+            updated_at=datetime.utcnow(),
+            scope=normalized,
+            items=items[:60],
+            notes=notes,
+        )
+        _set_response_cache(cache_key, result)
+        return result
+
     def sector_detail(
         self,
         name: str,
@@ -1256,6 +1418,213 @@ class MarketDataProvider:
                 })
                 seq += 1
         return rows
+
+    def _normalize_board_type(self, board_type: str) -> str:
+        text = str(board_type or "").strip()
+        mapping = {
+            "行业资金流": "行业",
+            "概念资金流": "概念",
+            "地域资金流": "地域",
+            "地区": "地域",
+            "地域": "地域",
+            "行业": "行业",
+            "概念": "概念",
+            "风格": "风格",
+            "港股": "港股",
+        }
+        return mapping.get(text, "行业")
+
+    def _board_type_to_flow_type(self, board_type: str) -> str:
+        mapping = {
+            "行业": "行业资金流",
+            "概念": "概念资金流",
+            "地域": "地域资金流",
+            "风格": "概念资金流",
+            "港股": "行业资金流",
+        }
+        return mapping.get(board_type, "行业资金流")
+
+    def _normalize_dark_scope(self, scope: str) -> str:
+        text = str(scope or "").strip()
+        if text in {"行业", "行业板块", "板块"}:
+            return "行业"
+        if text in {"概念", "概念板块", "题材"}:
+            return "概念"
+        return "个股"
+
+    def _fetch_eastmoney_hot_market_raw(self) -> list[dict[str, Any]]:
+        all_rows: list[dict[str, Any]] = []
+        for period, rank_type, field in [
+            ("今日", "40001", "prcPcnt_dr"),
+            ("5日", "40002", "prcPcnt_5r"),
+            ("20日", "40003", "prcPcnt_20r"),
+        ]:
+            params = {
+                "type": "spo_rank_hot",
+                "plat": "2",
+                "ver": "web20",
+                "utToken": "",
+                "ctToken": "",
+                "rankType": rank_type,
+                "recIdx": 1,
+                "recCnt": 15,
+            }
+            resp = requests.get(
+                "https://simqry2.eastmoney.com/qry_tzzh_v2",
+                params=params,
+                headers={
+                    "User-Agent": "Mozilla/5.0",
+                    "Referer": "https://group.eastmoney.com/HotMarket.html",
+                    "Accept": "application/json,text/plain,*/*",
+                },
+                timeout=6,
+            )
+            resp.raise_for_status()
+            data = self._decode_eastmoney_json_payload(resp.text)
+            rows = data.get("data") or []
+            for rank, row in enumerate(rows, start=1):
+                if not isinstance(row, dict):
+                    continue
+                all_rows.append({
+                    "period": period,
+                    "rank": rank,
+                    "name": str(row.get("plateName") or ""),
+                    "board_code": str(row.get("plateCode") or ""),
+                    "change_pct": round(_safe_float(row.get(field)), 2),
+                })
+        if not all_rows:
+            raise ValueError("empty eastmoney hot market")
+        return all_rows
+
+    def _decode_eastmoney_json_payload(self, text: str) -> dict[str, Any]:
+        raw = text.strip()
+        if raw.startswith("{"):
+            return requests.models.complexjson.loads(raw)
+        match = re.search(r"\((\{.*\})\)\s*;?$", raw, re.S)
+        if not match:
+            raise ValueError("invalid eastmoney jsonp")
+        return requests.models.complexjson.loads(match.group(1))
+
+    def _build_hot_theme_items(self, rows: list[dict[str, Any]]) -> list[HotThemeItem]:
+        flow_lookup: dict[str, dict[str, Any]] = {}
+        try:
+            for row in self._fetch_direct_eastmoney_sector_flow_raw("概念资金流", "今日"):
+                for key in [str(row.get("name") or ""), str(row.get("board_code") or "")]:
+                    if key:
+                        flow_lookup[key] = row
+        except Exception:
+            pass
+        try:
+            for row in self._fetch_direct_eastmoney_sector_flow_raw("行业资金流", "今日"):
+                for key in [str(row.get("name") or ""), str(row.get("board_code") or "")]:
+                    if key and key not in flow_lookup:
+                        flow_lookup[key] = row
+        except Exception:
+            pass
+
+        items: list[HotThemeItem] = []
+        for row in rows:
+            name = str(row.get("name") or "").strip()
+            if not name:
+                continue
+            board_code = str(row.get("board_code") or "").strip()
+            flow = flow_lookup.get(board_code) or flow_lookup.get(name) or {}
+            leaders = [str(x) for x in flow.get("leaders", []) if str(x).strip()]
+            items.append(HotThemeItem(
+                name=name,
+                board_code=board_code or None,
+                period=str(row.get("period") or "今日"),
+                rank=_safe_int(row.get("rank"), 0),
+                change_pct=round(_safe_float(row.get("change_pct")), 2),
+                net_inflow=round(_safe_float(flow.get("net_inflow")), 2),
+                main_inflow=round(_safe_float(flow.get("main_inflow")), 2),
+                source="eastmoney-hotmarket",
+                reason=f"{row.get('period') or '今日'}热点涨幅榜第{row.get('rank') or '-'}名",
+                leaders=leaders[:4],
+            ))
+        return items
+
+    def _fetch_eastmoney_dark_trade_raw(
+        self,
+        scope: str,
+        date_text: str,
+    ) -> tuple[list[dict[str, Any]], str]:
+        if scope == "行业":
+            market = "90"
+            datetype = "2"
+        elif scope == "概念":
+            market = "90"
+            datetype = "3"
+        else:
+            market = ""
+            datetype = ""
+        params = {
+            "version": 100,
+            "cver": 100,
+            "date": date_text,
+            "StartPage": 1,
+            "NumPerPage": 80,
+            "sortflag": 6,
+            "desc": 1,
+            "market": market,
+            "datetype": datetype,
+        }
+        resp = requests.get(
+            "https://quotederivates.eastmoney.com/datacenter/darktrade",
+            params=params,
+            headers={
+                "User-Agent": "Mozilla/5.0",
+                "Referer": "https://emrnweb.eastmoney.com/graymarket/home?appfenxiang=1",
+                "Accept": "application/json,text/plain,*/*",
+                "gtoken": "",
+                "rnProjectId": "emrn.GrayMarketRank",
+            },
+            timeout=8,
+        )
+        resp.raise_for_status()
+        payload = resp.json()
+        if int(payload.get("errid") or 0) != 0:
+            raise ValueError(str(payload.get("errmsg") or "darktrade error"))
+        rows = payload.get("data") or []
+        if not rows:
+            raise ValueError("empty dark trade")
+        return rows, str(payload.get("1") or date_text)
+
+    def _build_dark_trade_item(self, row: dict[str, Any], scope: str) -> DarkTradeItem:
+        market_raw = str(row.get("3") or "")
+        market = ""
+        if scope == "个股":
+            market = "沪市" if market_raw == "1" else "深市"
+        elif market_raw == "90":
+            market = "板块"
+        code = str(row.get("4") or "")
+        name = str(row.get("16") or row.get("4") or "")
+        latest_raw = _safe_float(row.get("13"))
+        latest = latest_raw / 1000 if scope == "个股" and latest_raw > 1000 else latest_raw
+        industry = str(row.get("17") or "")
+        concept = str(row.get("18") or "")
+        if scope != "个股":
+            name = str(row.get("16") or name)
+        return DarkTradeItem(
+            code=code,
+            name=name,
+            market=market,
+            board_type=scope,
+            rank=_safe_int(row.get("21")),
+            latest=round(latest, 3),
+            change_pct=round(_safe_float(row.get("14")) * 100, 2),
+            dark_amount=_money_yuan_to_yi(row.get("6")),
+            lit_amount=_money_yuan_to_yi(row.get("7")),
+            main_net_inflow_with_dark=_money_yuan_to_yi(row.get("8")),
+            dark_activity=round(_safe_float(row.get("11")) * 100, 2),
+            inflow_stock_ratio=round(_safe_float(row.get("12")) * 100, 2),
+            inflow_count=_safe_int(row.get("10")),
+            stock_count=_safe_int(row.get("9")),
+            leading_stock=str(row.get("15") or ""),
+            leading_stock_code=str(row.get("20") or ""),
+            industry=industry,
+            concept=concept,
+        )
 
     def _fetch_direct_eastmoney_sector_flow_raw(
         self, flow_type: str, period: str

@@ -267,6 +267,66 @@ class SectorFlowOut(BaseModel):
     outflow: list[SectorFlowItem]
 
 
+class BoardFlowPanelOut(BaseModel):
+    source: str
+    updated_at: datetime
+    board_type: str
+    period: str
+    inflow: list[SectorFlowItem]
+    outflow: list[SectorFlowItem]
+    notes: list[str] = Field(default_factory=list)
+
+
+class HotThemeItem(BaseModel):
+    name: str
+    board_code: str | None = None
+    period: str
+    rank: int
+    change_pct: float = 0
+    net_inflow: float = 0
+    main_inflow: float = 0
+    source: str = ""
+    reason: str = ""
+    leaders: list[str] = Field(default_factory=list)
+
+
+class HotThemesOut(BaseModel):
+    source: str
+    updated_at: datetime
+    items: list[HotThemeItem]
+    notes: list[str] = Field(default_factory=list)
+
+
+class DarkTradeItem(BaseModel):
+    code: str
+    name: str
+    market: str = ""
+    board_type: str = ""
+    rank: int = 0
+    latest: float = 0
+    change_pct: float = 0
+    dark_amount: float = 0
+    lit_amount: float = 0
+    main_net_inflow_with_dark: float = 0
+    dark_activity: float = 0
+    inflow_stock_ratio: float = 0
+    inflow_count: int = 0
+    stock_count: int = 0
+    leading_stock: str = ""
+    leading_stock_code: str = ""
+    industry: str = ""
+    concept: str = ""
+
+
+class DarkTradeOut(BaseModel):
+    source: str
+    trade_date: str
+    updated_at: datetime
+    scope: str
+    items: list[DarkTradeItem]
+    notes: list[str] = Field(default_factory=list)
+
+
 class SectorRotationItem(BaseModel):
     name: str
     rank: int
