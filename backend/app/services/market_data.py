@@ -1679,19 +1679,31 @@ class MarketDataProvider:
             "Referer": "https://data.eastmoney.com/bkzj/hy.html",
             "Accept": "application/json,text/plain,*/*",
         }
-        rows = None
+        rows: list[dict[str, Any]] | None = None
         last_exc: Exception | None = None
         for host in ("https://push2.eastmoney.com", "https://push2delay.eastmoney.com"):
             try:
-                resp = requests.get(
-                    f"{host}/api/qt/clist/get",
-                    params=params,
-                    headers=headers,
-                    timeout=6,
-                )
-                resp.raise_for_status()
-                rows = resp.json()["data"]["diff"]
-                if rows:
+                fetched: list[dict[str, Any]] = []
+                total = 0
+                for page in range(1, 11):
+                    page_params = {**params, "pn": str(page)}
+                    resp = requests.get(
+                        f"{host}/api/qt/clist/get",
+                        params=page_params,
+                        headers=headers,
+                        timeout=6,
+                    )
+                    resp.raise_for_status()
+                    data = resp.json().get("data") or {}
+                    page_rows = data.get("diff") or []
+                    if not page_rows:
+                        break
+                    fetched.extend(page_rows)
+                    total = _safe_int(data.get("total"), len(fetched))
+                    if total and len(fetched) >= total:
+                        break
+                if fetched:
+                    rows = fetched[:total] if total else fetched
                     break
             except Exception as exc:
                 last_exc = exc

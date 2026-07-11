@@ -81,6 +81,61 @@ def test_eastmoney_sector_flow_keeps_order_size_breakdown(monkeypatch):
     assert flow.inflow[0].flow_breakdown[1].net == -8.49
 
 
+def test_eastmoney_sector_flow_fetches_all_pages(monkeypatch):
+    provider = MarketDataProvider()
+
+    class FakeResponse:
+        def __init__(self, payload):
+            self.payload = payload
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return self.payload
+
+    def fake_get(_url, params=None, **_kwargs):
+        page = int((params or {}).get("pn") or 1)
+        if page == 1:
+            rows = [
+                {
+                    "f12": f"BK{i:04d}",
+                    "f14": f"板块{i}",
+                    "f3": 1,
+                    "f62": 1_000_000_000,
+                    "f66": 600_000_000,
+                    "f72": 400_000_000,
+                    "f78": -500_000_000,
+                    "f84": -500_000_000,
+                    "f204": "领涨股",
+                }
+                for i in range(100)
+            ]
+        else:
+            rows = [
+                {
+                    "f12": "BK1036",
+                    "f14": "半导体",
+                    "f3": -5.38,
+                    "f62": -24_878_000_000,
+                    "f66": -12_000_000_000,
+                    "f72": -12_878_000_000,
+                    "f78": 10_000_000_000,
+                    "f84": 14_878_000_000,
+                    "f204": "N托伦斯",
+                }
+            ]
+        return FakeResponse({"data": {"total": 101, "diff": rows}})
+
+    monkeypatch.setattr("app.services.market_data.requests.get", fake_get)
+
+    rows = provider._fetch_direct_eastmoney_sector_flow_raw("行业资金流", "今日")
+
+    assert len(rows) == 101
+    assert rows[-1]["name"] == "半导体"
+    assert rows[-1]["net_inflow"] == -248.78
+
+
 def test_dark_trade_maps_eastmoney_fields_to_yi(monkeypatch):
     provider = MarketDataProvider()
 
