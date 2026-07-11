@@ -453,6 +453,47 @@ class GrowthProfileOut(BaseModel):
     recent_scores: list[int]
 
 
+class CalibrationIssueOut(BaseModel):
+    level: str
+    title: str
+    detail: str
+    action: str
+    code: str = ""
+    name: str = ""
+
+
+class PlanDeviationOut(BaseModel):
+    plan_id: int
+    code: str
+    name: str
+    plan_date: str
+    expectation: str = ""
+    execution: str = ""
+    deviation: str = ""
+    severity: str = "观察"
+
+
+class FeedbackSummaryOut(BaseModel):
+    status: str
+    count: int
+
+
+class ReviewCalibrationSummaryOut(BaseModel):
+    trade_count: int
+    review_count: int
+    plan_review_count: int
+    missing_plan_review_count: int
+    execution_feedback_count: int
+    ignored_recommendation_count: int
+    pending_review_count: int
+    avg_discipline_score: int
+    focus: str
+    issues: list[CalibrationIssueOut] = Field(default_factory=list)
+    recent_plan_deviations: list[PlanDeviationOut] = Field(default_factory=list)
+    feedback_summary: list[FeedbackSummaryOut] = Field(default_factory=list)
+    next_actions: list[str] = Field(default_factory=list)
+
+
 class MarketGradeOut(BaseModel):
     grade: str
     total_position_limit: str

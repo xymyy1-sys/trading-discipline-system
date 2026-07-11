@@ -1,10 +1,18 @@
 import json
+from collections import Counter
 from datetime import datetime
 from typing import Any
 from sqlalchemy.orm import Session
 from app.core.database import SessionLocal
-from app.models.trading import TradeLog, TradeReview
-from app.schemas.trading import TradeLogOut, TradeReviewOut
+from app.models.trading import ActionRecommendation, NextDayPlan, RecommendationFeedback, TradeLog, TradeReview
+from app.schemas.trading import (
+    CalibrationIssueOut,
+    FeedbackSummaryOut,
+    PlanDeviationOut,
+    ReviewCalibrationSummaryOut,
+    TradeLogOut,
+    TradeReviewOut,
+)
 from app.services.market_data import _get_response_cache, _last_trading_day
 from app.api.helpers.quotes import (
     _latest_a_share_quotes,
@@ -57,6 +65,110 @@ def _trade_review_out(review: TradeReview) -> TradeReviewOut:
         weakness_tags=_json_list(review.weakness_tags),
         created_at=review.created_at,
     )
+
+
+def _review_calibration_summary(db: Session) -> ReviewCalibrationSummaryOut:
+    trades = db.query(TradeLog).order_by(TradeLog.traded_at.desc()).limit(100).all()
+    reviews = db.query(TradeReview).order_by(TradeReview.created_at.desc()).limit(100).all()
+    plans = db.query(NextDayPlan).order_by(NextDayPlan.plan_date.desc(), NextDayPlan.updated_at.desc()).limit(100).all()
+    feedback = db.query(RecommendationFeedback).order_by(RecommendationFeedback.created_at.desc()).limit(100).all()
+    feedback_by_recommendation = {item.recommendation_id: item for item in feedback}
+    recommendations = db.query(ActionRecommendation).order_by(ActionRecommendation.created_at.desc()).limit(100).all()
+
+    done_reviews = [item for item in reviews if item.status == "done"]
+    pending_review_count = sum(1 for item in reviews if item.status in {"pending", "failed"})
+    avg_score = round(sum(item.discipline_score for item in done_reviews) / len(done_reviews)) if done_reviews else 0
+    plan_reviews = [item for item in plans if item.review_expectation or item.review_execution or item.review_deviation]
+    missing_plan_reviews = [item for item in plans if not (item.review_expectation or item.review_execution or item.review_deviation)]
+    feedback_counter: Counter[str] = Counter(item.status for item in feedback)
+    ignored_recommendation_count = sum(
+        1
+        for item in recommendations
+        if feedback_by_recommendation.get(item.id)
+        and feedback_by_recommendation[item.id].status in {"忽略", "暂不执行"}
+    )
+    issues: list[CalibrationIssueOut] = []
+
+    if pending_review_count:
+        issues.append(CalibrationIssueOut(
+            level="中",
+            title="交易复盘未完成",
+            detail=f"仍有 {pending_review_count} 条复盘处于生成中或失败状态。",
+            action="先刷新交易日志，失败项重新保存触发复盘。",
+        ))
+    if missing_plan_reviews:
+        sample = "、".join(item.name for item in missing_plan_reviews[:3])
+        issues.append(CalibrationIssueOut(
+            level="高" if len(missing_plan_reviews) >= 3 else "中",
+            title="次日计划缺少盘后校准",
+            detail=f"{len(missing_plan_reviews)} 张计划卡未填写预期/执行/偏差复盘。{sample}",
+            action="盘后至少补齐预期是否命中、实际执行、偏差原因。",
+        ))
+    low_score_reviews = [item for item in done_reviews if item.discipline_score < 60]
+    if low_score_reviews:
+        item = low_score_reviews[0]
+        issues.append(CalibrationIssueOut(
+            level="高",
+            title="纪律评分低于 60",
+            detail=f"{item.name}：{item.summary}",
+            action="下一笔交易前先复核该错误是否再次出现。",
+            code=item.code,
+            name=item.name,
+        ))
+    if ignored_recommendation_count:
+        issues.append(CalibrationIssueOut(
+            level="中",
+            title="执行提醒被忽略",
+            detail=f"{ignored_recommendation_count} 条状态机建议被忽略或暂不执行。",
+            action="复盘是否因为主观判断覆盖了系统证据。",
+        ))
+
+    deviations: list[PlanDeviationOut] = []
+    for plan in plan_reviews[:20]:
+        joined = f"{plan.review_expectation} {plan.review_execution} {plan.review_deviation}"
+        severity = "高" if _contains_any(joined, ("严重", "未执行", "幻想", "补仓", "亏损", "破位")) else "中" if plan.review_deviation else "观察"
+        deviations.append(PlanDeviationOut(
+            plan_id=plan.id,
+            code=plan.code,
+            name=plan.name,
+            plan_date=plan.plan_date,
+            expectation=plan.review_expectation,
+            execution=plan.review_execution,
+            deviation=plan.review_deviation,
+            severity=severity,
+        ))
+
+    next_actions = [
+        "每张次日计划盘后必须填写：预期是否命中、是否按计划执行、偏差原因。",
+        "低于 60 分的交易，下一笔买入前先检查同类错误是否重复。",
+        "被忽略的执行提醒必须写明理由，否则视为纪律风险样本。",
+    ]
+    if not issues:
+        next_actions.insert(0, "当前 P1 复盘闭环没有明显缺口，继续积累样本。")
+    focus = "先补齐计划盘后校准，再处理低分交易和被忽略提醒。"
+    if low_score_reviews:
+        focus = f"优先复盘低分交易：{low_score_reviews[0].name}。"
+    elif missing_plan_reviews:
+        focus = "优先补齐次日计划盘后校准。"
+    elif ignored_recommendation_count:
+        focus = "优先解释被忽略/暂不执行的系统建议。"
+
+    return ReviewCalibrationSummaryOut(
+        trade_count=len(trades),
+        review_count=len(reviews),
+        plan_review_count=len(plan_reviews),
+        missing_plan_review_count=len(missing_plan_reviews),
+        execution_feedback_count=len(feedback),
+        ignored_recommendation_count=ignored_recommendation_count,
+        pending_review_count=pending_review_count,
+        avg_discipline_score=avg_score,
+        focus=focus,
+        issues=issues,
+        recent_plan_deviations=deviations,
+        feedback_summary=[FeedbackSummaryOut(status=status, count=count) for status, count in feedback_counter.most_common()],
+        next_actions=next_actions,
+    )
+
 
 def _create_pending_trade_review(trade: TradeLog, db: Session) -> TradeReview:
     db.query(TradeReview).filter(TradeReview.trade_id == trade.id).delete()

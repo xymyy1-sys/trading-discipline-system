@@ -4404,6 +4404,148 @@ h3 {
   font-size: 12px;
 }
 
+.calibration-dashboard {
+  display: grid;
+  gap: 14px;
+}
+
+.calibration-dashboard .env-hero {
+  align-items: center;
+}
+
+.calibration-metrics {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 10px;
+}
+
+.calibration-metric {
+  border: 1px solid #dfe5ec;
+  background: #fff;
+  padding: 12px;
+  border-radius: 4px;
+  display: grid;
+  gap: 6px;
+}
+
+.calibration-metric span {
+  color: var(--ink-muted);
+  font-size: 12px;
+}
+
+.calibration-metric strong {
+  color: var(--ink);
+  font-size: 20px;
+  font-variant-numeric: tabular-nums;
+}
+
+.calibration-metric.good strong {
+  color: var(--cn-rise);
+}
+
+.calibration-metric.warn strong {
+  color: var(--warn);
+}
+
+.calibration-metric.bad strong {
+  color: var(--cn-fall);
+}
+
+.calibration-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.1fr) minmax(0, 1fr);
+  gap: 12px;
+}
+
+.calibration-panel {
+  display: grid;
+  align-content: start;
+  gap: 10px;
+}
+
+.calibration-panel h3 {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.calibration-panel:last-child {
+  grid-column: 1 / -1;
+}
+
+.calibration-issue,
+.plan-deviation {
+  border: 1px solid #dfe5ec;
+  background: #fbfcfd;
+  padding: 10px;
+  border-radius: 4px;
+  display: grid;
+  gap: 7px;
+}
+
+.calibration-issue > div,
+.plan-deviation > div {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+}
+
+.calibration-issue b,
+.plan-deviation b {
+  color: var(--ink);
+  font-size: 13px;
+}
+
+.calibration-issue span,
+.plan-deviation span {
+  border: 1px solid #dfe5ec;
+  background: #fff;
+  color: var(--ink-muted);
+  border-radius: 4px;
+  padding: 2px 7px;
+  font-size: 11px;
+}
+
+.calibration-issue.level-高 span,
+.plan-deviation.severity-高 span {
+  color: var(--cn-fall);
+  border-color: var(--cn-fall-border);
+  background: var(--cn-fall-bg);
+}
+
+.calibration-issue.level-中 span,
+.plan-deviation.severity-中 span {
+  color: var(--warn);
+  border-color: #efcf8a;
+  background: #fff7e6;
+}
+
+.calibration-issue p,
+.plan-deviation p,
+.calibration-issue small,
+.plan-deviation small {
+  margin: 0;
+  color: var(--ink-muted);
+  line-height: 1.55;
+  font-size: 12px;
+}
+
+.feedback-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.feedback-summary span {
+  border: 1px solid #dfe5ec;
+  background: #fff;
+  color: var(--ink-muted);
+  border-radius: 4px;
+  padding: 5px 8px;
+  font-size: 12px;
+}
+
 .sell-layout,
 .review-layout,
 .buycheck-layout,

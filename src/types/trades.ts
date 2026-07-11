@@ -56,6 +56,47 @@ export interface GrowthProfile {
   recent_scores: number[];
 }
 
+export interface CalibrationIssue {
+  level: string;
+  title: string;
+  detail: string;
+  action: string;
+  code: string;
+  name: string;
+}
+
+export interface PlanDeviation {
+  plan_id: number;
+  code: string;
+  name: string;
+  plan_date: string;
+  expectation: string;
+  execution: string;
+  deviation: string;
+  severity: string;
+}
+
+export interface FeedbackSummary {
+  status: string;
+  count: number;
+}
+
+export interface ReviewCalibrationSummary {
+  trade_count: number;
+  review_count: number;
+  plan_review_count: number;
+  missing_plan_review_count: number;
+  execution_feedback_count: number;
+  ignored_recommendation_count: number;
+  pending_review_count: number;
+  avg_discipline_score: number;
+  focus: string;
+  issues: CalibrationIssue[];
+  recent_plan_deviations: PlanDeviation[];
+  feedback_summary: FeedbackSummary[];
+  next_actions: string[];
+}
+
 export interface PreTradeCheckIn {
   code: string;
   name: string;

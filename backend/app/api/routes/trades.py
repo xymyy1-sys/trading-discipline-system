@@ -8,7 +8,8 @@ from app.schemas.trading import (
     TradeLogUpdate,
     TradeLogOut,
     TradeReviewOut,
-    GrowthProfileOut
+    GrowthProfileOut,
+    ReviewCalibrationSummaryOut,
 )
 from app.api.helpers.quotes import _normalize_code
 from app.api.helpers.holdings_calc import _account_total_asset, _rebuild_holdings_from_trades
@@ -17,6 +18,7 @@ from app.api.helpers.trade_review import (
     _trade_review_out,
     _create_pending_trade_review,
     _complete_trade_review_task,
+    _review_calibration_summary,
     _json_list
 )
 
@@ -160,3 +162,7 @@ def trade_growth_profile(db: Session = Depends(get_db)) -> GrowthProfileOut:
         improvement_actions=actions or ["每笔交易先写明主线、前排地位、买点、止损和退出计划。"],
         recent_scores=scores[:20],
     )
+
+@router.get("/review-calibration/summary", response_model=ReviewCalibrationSummaryOut)
+def review_calibration_summary(db: Session = Depends(get_db)) -> ReviewCalibrationSummaryOut:
+    return _review_calibration_summary(db)
