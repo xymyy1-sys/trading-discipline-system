@@ -219,6 +219,38 @@ export interface ExpectationSnapshot {
   created_at: string;
 }
 
+export interface VolumePriceSnapshot {
+  id: number | null;
+  trade_date: string;
+  code: string;
+  name: string;
+  stage: string;
+  captured_at: string;
+  price: number;
+  change_pct: number;
+  open_price: number;
+  high_price: number;
+  low_price: number;
+  prev_close: number;
+  volume: number;
+  amount: number;
+  estimated_full_day_amount: number;
+  turnover: number;
+  volume_ratio: number;
+  vwap: number;
+  price_vs_vwap: number;
+  high_drawdown: number;
+  active_buy_amount: number;
+  active_sell_amount: number;
+  attack_efficiency: number;
+  volume_acceleration: number;
+  pattern: string;
+  data_quality: string;
+  data_source: string;
+  evidence: string[];
+  counter_evidence: string[];
+}
+
 export interface TEligibility {
   holding_id: number;
   code: string;
@@ -267,6 +299,7 @@ export interface StockDecisionCard {
   current_price: number;
   change_pct: number;
   expectation: ExpectationSnapshot;
+  volume_price: VolumePriceSnapshot | null;
   execution_state: PositionExecutionState | null;
   timeline: IntradayEvidenceEvent[];
   allowed_actions: string[];

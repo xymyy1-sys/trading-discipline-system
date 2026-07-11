@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime
+from datetime import datetime, time
 from typing import Any
 
 from sqlalchemy.orm import Session
@@ -10,9 +10,12 @@ from app.api.helpers.execution import build_position_execution_state
 from app.api.helpers.holdings_calc import _find_holding_by_code
 from app.api.helpers.quotes import _latest_a_share_quotes, _quote_lookup_code, _safe_float
 from app.api.helpers.seesaw import _holding_theme_profile
+from app.api.helpers.volume_price import build_volume_price_snapshot
 from app.models.trading import ExpectationSnapshot, Holding, IntradayEvidenceEvent, TTradePlan
 from app.schemas.trading import (
+    ExpectationSnapshotIn,
     ExpectationSnapshotOut,
+    ExpectationSnapshotUpdate,
     IntradayEvidenceEventOut,
     StockDecisionCardOut,
     TEligibilityOut,
@@ -35,6 +38,28 @@ def _json_list(raw: str | None) -> list[str]:
     except Exception:
         return []
     return [str(item) for item in value] if isinstance(value, list) else []
+
+
+def current_expectation_stage(now: datetime | None = None) -> str:
+    now = now or datetime.now()
+    current = now.time()
+    if current < time(9, 25):
+        return "盘前预期"
+    if current < time(9, 30):
+        return "竞价确认"
+    if current < time(9, 35):
+        return "开盘确认"
+    if current < time(10, 0):
+        return "五分钟确认"
+    if current < time(11, 30):
+        return "第一阶段确认"
+    if current < time(13, 0):
+        return "午盘状态"
+    if current < time(14, 30):
+        return "午后确认"
+    if current < time(15, 0):
+        return "尾盘状态"
+    return "收盘校准"
 
 
 def _expectation_out(row: ExpectationSnapshot) -> ExpectationSnapshotOut:
@@ -106,6 +131,7 @@ def build_expectation_snapshot(
     persist: bool = True,
 ) -> ExpectationSnapshotOut:
     quote = quote or quote_for_code(code)
+    stage = stage or current_expectation_stage()
     open_pct = _safe_float(quote.get("open_pct"))
     change_pct = _safe_float(quote.get("change_pct"))
     current = _safe_float(quote.get("price"))
@@ -190,6 +216,43 @@ def build_expectation_snapshot(
         db.add(row)
         db.commit()
         db.refresh(row)
+    return _expectation_out(row)
+
+
+def create_expectation_snapshot(db: Session, payload: ExpectationSnapshotIn) -> ExpectationSnapshotOut:
+    quote = quote_for_code(payload.code)
+    if payload.actual_open_pct is not None:
+        quote["open_pct"] = payload.actual_open_pct
+    if payload.actual_change_pct is not None:
+        quote["change_pct"] = payload.actual_change_pct
+    return build_expectation_snapshot(
+        db,
+        payload.code,
+        name=payload.name,
+        stage=payload.stage or current_expectation_stage(),
+        quote=quote,
+        base_hint=payload.base_hint,
+        persist=payload.persist,
+    )
+
+
+def update_expectation_snapshot(
+    db: Session,
+    row: ExpectationSnapshot,
+    payload: ExpectationSnapshotUpdate,
+) -> ExpectationSnapshotOut:
+    data = payload.model_dump(exclude_unset=True)
+    for key, value in data.items():
+        if value is None:
+            continue
+        if key == "evidence":
+            row.evidence_json = _json_dumps(value)
+        elif key == "counter_evidence":
+            row.counter_evidence_json = _json_dumps(value)
+        else:
+            setattr(row, key, value)
+    db.commit()
+    db.refresh(row)
     return _expectation_out(row)
 
 
@@ -293,7 +356,9 @@ def decision_card(db: Session, code: str) -> StockDecisionCardOut:
     name = holding.name if holding else str(quote.get("name") or code)
     theme = _holding_theme_profile(holding) if holding else {"industry": "", "concepts": [], "source": "quote-only"}
     base_hint = holding.position_type if holding else ""
-    expectation = build_expectation_snapshot(db, code, name=name, quote=quote, base_hint=base_hint)
+    stage = current_expectation_stage()
+    expectation = build_expectation_snapshot(db, code, name=name, stage=stage, quote=quote, base_hint=base_hint)
+    volume_price = build_volume_price_snapshot(db, code, name=name, stage=stage, quote=quote)
     execution = build_position_execution_state(db, holding, quote=quote) if holding else None
     t_eligibility = build_t_eligibility(db, holding) if holding else None
     events: list[IntradayEvidenceEventOut] = []
@@ -333,6 +398,7 @@ def decision_card(db: Session, code: str) -> StockDecisionCardOut:
         current_price=_safe_float(quote.get("price")) or (holding.current_price if holding else 0),
         change_pct=_safe_float(quote.get("change_pct")),
         expectation=expectation,
+        volume_price=volume_price,
         execution_state=execution,
         timeline=events,
         allowed_actions=allowed,

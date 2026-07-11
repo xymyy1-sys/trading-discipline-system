@@ -2309,6 +2309,33 @@ h4 {
   gap: 8px;
 }
 
+.volume-price-grid {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.volume-price-grid div {
+  display: grid;
+  gap: 4px;
+  border: 1px solid var(--border-dim);
+  border-radius: 6px;
+  padding: 8px;
+  min-width: 0;
+}
+
+.volume-price-grid b {
+  color: var(--ink-dim);
+  font-size: 11px;
+}
+
+.volume-price-grid span {
+  color: var(--ink);
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
+}
+
 .decision-section p,
 .decision-t-box p {
   margin: 0;
@@ -3285,6 +3312,9 @@ h4 {
   }
   .decision-grid {
     grid-template-columns: 1fr;
+  }
+  .volume-price-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
   .seesaw-alert-list {
     grid-template-columns: 1fr;

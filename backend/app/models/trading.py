@@ -300,6 +300,40 @@ class ExpectationSnapshot(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc), index=True)
 
 
+class VolumePriceSnapshot(Base):
+    __tablename__ = "volume_price_snapshots"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    trade_date: Mapped[str] = mapped_column(String(16), index=True)
+    code: Mapped[str] = mapped_column(String(16), index=True)
+    name: Mapped[str] = mapped_column(String(64), default="")
+    stage: Mapped[str] = mapped_column(String(32), default="盘中状态", index=True)
+    captured_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc), index=True)
+    price: Mapped[float] = mapped_column(Float, default=0)
+    change_pct: Mapped[float] = mapped_column(Float, default=0)
+    open_price: Mapped[float] = mapped_column(Float, default=0)
+    high_price: Mapped[float] = mapped_column(Float, default=0)
+    low_price: Mapped[float] = mapped_column(Float, default=0)
+    prev_close: Mapped[float] = mapped_column(Float, default=0)
+    volume: Mapped[float] = mapped_column(Float, default=0)
+    amount: Mapped[float] = mapped_column(Float, default=0)
+    estimated_full_day_amount: Mapped[float] = mapped_column(Float, default=0)
+    turnover: Mapped[float] = mapped_column(Float, default=0)
+    volume_ratio: Mapped[float] = mapped_column(Float, default=0)
+    vwap: Mapped[float] = mapped_column(Float, default=0)
+    price_vs_vwap: Mapped[float] = mapped_column(Float, default=0)
+    high_drawdown: Mapped[float] = mapped_column(Float, default=0)
+    active_buy_amount: Mapped[float] = mapped_column(Float, default=0)
+    active_sell_amount: Mapped[float] = mapped_column(Float, default=0)
+    attack_efficiency: Mapped[float] = mapped_column(Float, default=0)
+    volume_acceleration: Mapped[float] = mapped_column(Float, default=0)
+    pattern: Mapped[str] = mapped_column(String(64), default="量价中性")
+    data_quality: Mapped[str] = mapped_column(String(32), default="manual")
+    data_source: Mapped[str] = mapped_column(String(64), default="")
+    evidence_json: Mapped[str] = mapped_column(Text, default="[]")
+    counter_evidence_json: Mapped[str] = mapped_column(Text, default="[]")
+
+
 class TTradePlan(Base):
     __tablename__ = "t_trade_plans"
 

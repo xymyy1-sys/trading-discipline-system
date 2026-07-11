@@ -227,6 +227,70 @@ class ExpectationSnapshotOut(BaseModel):
         from_attributes = True
 
 
+class ExpectationSnapshotIn(BaseModel):
+    code: str
+    name: str = ""
+    stage: str = ""
+    base_hint: str = ""
+    actual_open_pct: float | None = None
+    actual_change_pct: float | None = None
+    persist: bool = True
+
+
+class ExpectationSnapshotUpdate(BaseModel):
+    stage: str | None = None
+    base_expectation: str | None = None
+    expected_open_low: float | None = None
+    expected_open_high: float | None = None
+    outperform_threshold: float | None = None
+    underperform_threshold: float | None = None
+    severe_underperform_threshold: float | None = None
+    actual_open_pct: float | None = None
+    actual_change_pct: float | None = None
+    expectation_gap_score: int | None = None
+    expectation_result: str | None = None
+    state_transition: str | None = None
+    confidence: float | None = None
+    evidence: list[str] | None = None
+    counter_evidence: list[str] | None = None
+    suggestion: str | None = None
+
+
+class VolumePriceSnapshotOut(BaseModel):
+    id: int | None = None
+    trade_date: str
+    code: str
+    name: str = ""
+    stage: str
+    captured_at: datetime
+    price: float = 0
+    change_pct: float = 0
+    open_price: float = 0
+    high_price: float = 0
+    low_price: float = 0
+    prev_close: float = 0
+    volume: float = 0
+    amount: float = 0
+    estimated_full_day_amount: float = 0
+    turnover: float = 0
+    volume_ratio: float = 0
+    vwap: float = 0
+    price_vs_vwap: float = 0
+    high_drawdown: float = 0
+    active_buy_amount: float = 0
+    active_sell_amount: float = 0
+    attack_efficiency: float = 0
+    volume_acceleration: float = 0
+    pattern: str = "量价中性"
+    data_quality: str = "manual"
+    data_source: str = ""
+    evidence: list[str] = Field(default_factory=list)
+    counter_evidence: list[str] = Field(default_factory=list)
+
+    class Config:
+        from_attributes = True
+
+
 class TTradePlanIn(BaseModel):
     t_type: str = "POSITIVE_T"
     planned_sell_price: float = 0
@@ -295,6 +359,7 @@ class StockDecisionCardOut(BaseModel):
     current_price: float = 0
     change_pct: float = 0
     expectation: ExpectationSnapshotOut
+    volume_price: VolumePriceSnapshotOut | None = None
     execution_state: PositionExecutionStateOut | None = None
     timeline: list[IntradayEvidenceEventOut] = Field(default_factory=list)
     allowed_actions: list[str] = Field(default_factory=list)

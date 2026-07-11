@@ -95,6 +95,24 @@ export default function DecisionCard() {
               <div><b>可信度</b><span>{(card.expectation.confidence * 100).toFixed(0)}%</span></div>
             </div>
 
+            {card.volume_price && (
+              <div className="decision-section volume-price-section">
+                <b>量价快照 · {card.volume_price.stage}</b>
+                <p>{card.volume_price.pattern} · {card.volume_price.data_quality} · {card.volume_price.data_source || '行情源待确认'}</p>
+                <div className="volume-price-grid">
+                  <div><b>VWAP</b><span>{card.volume_price.vwap ? card.volume_price.vwap.toFixed(2) : '--'}</span></div>
+                  <div><b>偏离VWAP</b><span className={card.volume_price.price_vs_vwap >= 0 ? 'num-up' : 'num-down'}>{card.volume_price.price_vs_vwap >= 0 ? '+' : ''}{card.volume_price.price_vs_vwap.toFixed(2)}%</span></div>
+                  <div><b>高点回撤</b><span>{card.volume_price.high_drawdown.toFixed(2)}%</span></div>
+                  <div><b>成交额</b><span>{card.volume_price.amount.toFixed(2)}亿</span></div>
+                  <div><b>估算全天</b><span>{card.volume_price.estimated_full_day_amount.toFixed(2)}亿</span></div>
+                  <div><b>换手</b><span>{card.volume_price.turnover ? `${card.volume_price.turnover.toFixed(2)}%` : '--'}</span></div>
+                </div>
+                <ul>
+                  {(card.volume_price.evidence.length ? card.volume_price.evidence : ['暂无明确量价偏离。']).slice(0, 5).map(item => <li key={item}>{item}</li>)}
+                </ul>
+              </div>
+            )}
+
             <div className="decision-section">
               <b>预期建议</b>
               <p>{card.expectation.suggestion}</p>
