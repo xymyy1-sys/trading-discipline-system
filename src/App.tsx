@@ -13,6 +13,7 @@ import {
   ShieldAlert,
   Target,
   WalletCards,
+  Crosshair,
   Menu,
   X,
 } from 'lucide-react'
@@ -87,10 +88,12 @@ export default function App() {
     <main className="terminal-shell">
       <aside className={`sidebar ${sidebarOpen ? 'open' : ''}`}>
         <div className="brand" style={{ display: 'flex', width: '100%', alignItems: 'center' }}>
-          <span className="brand-mark">TD</span>
+          <span className="brand-mark" aria-hidden="true">
+            <Crosshair size={22} strokeWidth={1.8} />
+          </span>
           <div style={{ flex: 1 }}>
             <strong>交易纪律系统</strong>
-            <span>A 股短线 / 超短线</span>
+            <span>A 股交易纪律工作台</span>
           </div>
           <button className="hamburger-btn" style={{ marginLeft: 'auto' }} onClick={() => setSidebarOpen(false)}>
             <X size={18} />

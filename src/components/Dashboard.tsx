@@ -246,15 +246,15 @@ function ThemeFlowChart({ items, selectedName }: { items: ThemeRadarItem[]; sele
   useEffect(() => {
     if (!ref.current || !items.length || !xData.length) return
     const chart = echarts.init(ref.current)
-    const colors = ['#e5484d', '#2f9e44', '#f59f00', '#228be6', '#9c6ade', '#12b886', '#f76707', '#6f7f96']
+    const colors = ['#c92a2a', '#16834f', '#9a6700', '#285f9f', '#5f4b8b', '#0b7285', '#b45500', '#596574']
     chart.setOption({
       backgroundColor: 'transparent',
       grid: { left: 48, right: 18, top: 16, bottom: 34 },
       tooltip: {
         trigger: 'axis',
-        backgroundColor: '#121826',
-        borderColor: 'rgba(255,255,255,0.12)',
-        textStyle: { color: '#e8ede7', fontSize: 12 },
+        backgroundColor: '#ffffff',
+        borderColor: '#d8dee6',
+        textStyle: { color: '#1d2630', fontSize: 12 },
         valueFormatter: (v: unknown) => `${Number(v).toFixed(2)} 亿`,
       },
       legend: {
@@ -263,15 +263,15 @@ function ThemeFlowChart({ items, selectedName }: { items: ThemeRadarItem[]; sele
         left: 'center',
         itemWidth: 10,
         itemHeight: 7,
-        textStyle: { color: '#9aa4b2', fontSize: 11 },
+        textStyle: { color: '#596574', fontSize: 11 },
       },
       xAxis: {
         type: 'category',
         boundaryGap: false,
         data: xData,
-        axisLine: { lineStyle: { color: 'rgba(255,255,255,0.1)' } },
+        axisLine: { lineStyle: { color: '#d8dee6' } },
         axisLabel: {
-          color: '#94a3b8',
+          color: '#6b7280',
           fontSize: 10,
           interval: Math.max(0, Math.floor(xData.length / 8) - 1),
         },
@@ -279,9 +279,9 @@ function ThemeFlowChart({ items, selectedName }: { items: ThemeRadarItem[]; sele
       yAxis: {
         type: 'value',
         name: '亿元',
-        nameTextStyle: { color: '#64748b', fontSize: 10 },
-        axisLabel: { color: '#94a3b8', fontSize: 10 },
-        splitLine: { lineStyle: { color: 'rgba(255,255,255,0.06)', type: 'dashed' } },
+        nameTextStyle: { color: '#8a94a3', fontSize: 10 },
+        axisLabel: { color: '#6b7280', fontSize: 10 },
+        splitLine: { lineStyle: { color: '#e7ebf0', type: 'dashed' } },
       },
       series: items.map((item, i) => {
         const isSelected = selectedName === item.name
@@ -306,8 +306,8 @@ function ThemeFlowChart({ items, selectedName }: { items: ThemeRadarItem[]; sele
               x2: 0,
               y2: 1,
               colorStops: [
-                { offset: 0, color: 'rgba(229,72,77,0.10)' },
-                { offset: 1, color: 'rgba(0,0,0,0)' },
+                { offset: 0, color: 'rgba(201,42,42,0.10)' },
+                { offset: 1, color: 'rgba(255,255,255,0)' },
               ],
             },
             opacity: isSelected ? 0.16 : 0.03,
