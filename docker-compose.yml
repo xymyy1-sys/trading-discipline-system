@@ -11,7 +11,7 @@ services:
       CORS_ORIGINS: ${CORS_ORIGINS:-["http://localhost:5173","http://127.0.0.1:5173"]}
       AUDIT_ENABLED: ${AUDIT_ENABLED:-true}
     volumes:
-      - backend-data:/app/data
+      - "${BACKEND_DATA_PATH:-backend-data}:/app/data"
     expose:
       - "8000"
     restart: unless-stopped

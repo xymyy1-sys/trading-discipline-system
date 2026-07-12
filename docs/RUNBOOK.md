@@ -24,6 +24,7 @@ npm run dev -- --host 127.0.0.1 --port 5173
 
 1. 复制 `.env.example` 为 `.env`。
 2. 设置独立的长密码和至少 32 位随机 `AUTH_SECRET`。
+   如果旧系统数据库位于仓库的 `backend/data`，设置 `BACKEND_DATA_PATH=./backend/data`，Compose 会原地迁移该数据库；不要复制空库覆盖它。
 3. 保持服务器公网 8000 端口关闭；Compose 默认把前端 5173 也只绑定到 `127.0.0.1`，供宿主机 TLS 代理访问。
 4. 用云负载均衡、Caddy 或宿主机 Nginx 将 HTTPS 反向代理到 `127.0.0.1:5173`。
 5. HTTPS 生效后设置 `AUTH_COOKIE_SECURE=true`，并把 HTTPS 站点地址加入 `CORS_ORIGINS`。
