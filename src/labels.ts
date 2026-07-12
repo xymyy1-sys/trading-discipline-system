@@ -16,6 +16,17 @@ const LABELS: Record<string, string> = {
   REDUCE_ALL: '全面减仓', BLOCK_NEW_POSITION: '禁止新开仓',
   NO_T: '禁止做T', INTRADAY_T: '日内做T', ROLLING_T: '滚动做T',
   PRICE: '价格', EXPECTATION: '预期', VOLUME_PRICE: '量价', ACTION: '动作',
+  EXTREME_STRONG: '极强', STRONG: '强势', NEUTRAL: '中性', WEAK: '弱势',
+  REPAIR: '修复阶段', EBB: '退潮阶段',
+  STRONG_TO_STRONGER: '强势转更强', WEAK_TO_STRONG: '弱转强',
+  DIVERGENCE_TO_CONSENSUS: '分歧转一致', CONSENSUS_TO_DIVERGENCE: '一致转分歧',
+  STRONG_TO_WEAK: '强转弱', REPAIR_SUCCESS: '修复成功', REPAIR_FAILED: '修复失败',
+  VWAP_BROKEN: '跌破分时均价线', VWAP_RECOVERED: '收复分时均价线',
+  VOLUME_PRICE_WEAKENING: '量价转弱', VOLUME_PRICE_STRENGTHENING: '量价转强',
+  PROFIT_DRAWDOWN_WARNING: '利润回撤预警', TIME_STOP_TRIGGERED: '时间止损触发',
+  HIGH_OPEN_FAILED_BREAKOUT: '高开冲板失败', LIMIT_UP_OPENED: '涨停开板',
+  BELOW_VWAP: '位于分时均价线下方', ABOVE_VWAP: '位于分时均价线上方',
+  VOLUME_EXPANSION: '放量', VOLUME_CONTRACTION: '缩量',
 }
 
 export function chineseLabel(value?: string | null) {
