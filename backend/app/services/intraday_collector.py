@@ -31,7 +31,7 @@ def _json_list(raw: str | None) -> list[str]:
 def _is_market_watch_time(now: datetime | None = None) -> bool:
     now = now or datetime.now()
     current = now.time()
-    return time(9, 15) <= current <= time(15, 5)
+    return now.weekday() < 5 and time(9, 15) <= current <= time(15, 0)
 
 
 def run_intraday_collection_once(trigger: str = "manual") -> IntradayCollectionRun:
@@ -49,7 +49,10 @@ def run_intraday_collection_once(trigger: str = "manual") -> IntradayCollectionR
         holdings = db.query(Holding).order_by(Holding.updated_at.desc()).all()
         stage = current_expectation_stage(started)
         run.holding_count = len(holdings)
-        if not holdings:
+        if not _is_market_watch_time(started):
+            notes.append("当前不在交易采样时段（交易日09:15-15:00），不生成盘后证据和操作建议。")
+            holdings = []
+        elif not holdings:
             notes.append("暂无持仓，后台采集跳过。")
         for holding in holdings:
             collect_holding_evidence(db, holding, stage=stage, now=started)

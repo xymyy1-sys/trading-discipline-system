@@ -338,10 +338,12 @@ def decision_card(db: Session, code: str) -> StockDecisionCardOut:
     name = holding.name if holding else str(quote.get("name") or code)
     theme = _holding_theme_profile(holding) if holding else {"industry": "", "concepts": [], "source": "quote-only"}
     base_hint = holding.position_type if holding else ""
-    stage = current_expectation_stage()
+    now = datetime.now()
+    stage = current_expectation_stage(now)
+    during_market = now.weekday() < 5 and time(9, 15) <= now.time() <= time(15, 0)
     expectation = build_expectation_snapshot(db, code, name=name, stage=stage, quote=quote, base_hint=base_hint)
     daily_metrics = _daily_history_metrics(code)
-    volume_price = build_volume_price_snapshot(db, code, name=name, stage=stage, quote=quote, daily_metrics=daily_metrics)
+    volume_price = build_volume_price_snapshot(db, code, name=name, stage=stage, quote=quote, daily_metrics=daily_metrics, persist=during_market)
     consensus_risk = build_consensus_risk(quote, expectation, volume_price, daily_metrics)
     cumulative_amount = 0.0
     cumulative_volume = 0.0
@@ -360,16 +362,17 @@ def decision_card(db: Session, code: str) -> StockDecisionCardOut:
             "amount": round(amount_value / 1e8, 4),
             "amount_estimated": bool(item.get("amount_estimated") or quote.get("minute_amount_estimated")),
         })
-    execution = build_position_execution_state(db, holding, quote=quote, expectation=expectation, volume_price=volume_price) if holding else None
+    execution = build_position_execution_state(db, holding, quote=quote, expectation=expectation, volume_price=volume_price, persist=during_market) if holding else None
     t_eligibility = build_t_eligibility(db, holding) if holding else None
     events: list[IntradayEvidenceEventOut] = []
     rows = (
         db.query(IntradayEvidenceEvent)
         .filter(IntradayEvidenceEvent.target_code.in_([code, code.lstrip("0")]))
         .order_by(IntradayEvidenceEvent.captured_at.desc())
-        .limit(20)
+        .limit(100)
         .all()
     )
+    rows = [row for row in rows if time(9, 15) <= row.captured_at.time() <= time(15, 0)][:20]
     for row in rows:
         events.append(
             IntradayEvidenceEventOut(

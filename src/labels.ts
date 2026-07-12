@@ -34,6 +34,11 @@ const LABELS: Record<string, string> = {
   DIVERGENCE_RESEAL: '分歧后回封', REPAIR_CONFIRMED: '修复确认',
   SECTOR_REPAIR: '板块修复', TREND_BREAKOUT: '趋势突破',
   SLIGHTLY_STRONGER: '略强于预期',
+  SECTOR_MIGRATION_CONFIRMED: '跨板块资金迁移确认',
+  SECTOR_FLOW_PEAK_REVERSAL: '板块资金见顶回落', HIGH_DRAWDOWN: '高点明显回撤',
+  LOSS_OBSERVATION: '浮亏观察',
+  critical: '严重', warning: '警告', info: '提示', RED: '红色', WATCH: '观察',
+  POSITIVE_T: '正向做T', REVERSE_T: '倒T',
 }
 
 export function chineseLabel(value?: string | null) {

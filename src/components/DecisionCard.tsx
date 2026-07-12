@@ -142,8 +142,8 @@ export default function DecisionCard() {
             </div>
 
             <div className="decision-kpi-grid">
-              <div><b>基础预期</b><span>{card.expectation.base_expectation}</span></div>
-              <div><b>实际表现</b><span>{card.expectation.expectation_result}</span></div>
+              <div><b>基础预期</b><span>{chineseLabel(card.expectation.base_expectation)}</span></div>
+              <div><b>实际表现</b><span>{chineseLabel(card.expectation.expectation_result)}</span></div>
               <div><b>状态变化</b><span>{chineseEvidence(card.expectation.state_transition)}</span></div>
               <div><b>预期差</b><span>{card.expectation.expectation_gap_score}</span></div>
               <div><b>合理开盘</b><span>{card.expectation.expected_open_low.toFixed(1)}% - {card.expectation.expected_open_high.toFixed(1)}%</span></div>
@@ -206,9 +206,9 @@ export default function DecisionCard() {
                 <b>执行结论</b>
                 <p>{chineseEvidence(card.execution_state.recommended_action)} · {chineseLabel(card.execution_state.state)}</p>
                 <div className="execution-status-row">
-                  <span>预期 {card.execution_state.expectation_state}</span>
-                  <span>量价 {card.execution_state.volume_price_state}</span>
-                  <span>板块 {card.execution_state.sector_state || '待确认'}</span>
+                  <span>预期 {chineseLabel(card.execution_state.expectation_state)}</span>
+                  <span>量价 {chineseLabel(card.execution_state.volume_price_state)}</span>
+                  <span>板块 {chineseEvidence(card.execution_state.sector_state || '待确认')}</span>
                 </div>
                 <div className="execution-line-grid">
                   <div><b>结构止损</b><span>{card.execution_state.structure_stop_price.toFixed(2)}</span></div>
@@ -240,21 +240,21 @@ export default function DecisionCard() {
             <div className="decision-action-lists">
               <div>
                 <b>允许</b>
-                {card.allowed_actions.map(item => <span key={item}>{item}</span>)}
+                {card.allowed_actions.map(item => <span key={item}>{chineseEvidence(item)}</span>)}
               </div>
               <div>
                 <b>禁止</b>
-                {card.forbidden_actions.map(item => <span key={item}>{item}</span>)}
+                {card.forbidden_actions.map(item => <span key={item}>{chineseEvidence(item)}</span>)}
               </div>
             </div>
             <h3>做T资格</h3>
             {card.t_eligibility ? (
               <div className="decision-t-box">
-                <strong>{card.t_eligibility.eligible ? card.t_eligibility.t_type : '禁止做T'}</strong>
+                <strong>{card.t_eligibility.eligible ? chineseLabel(card.t_eligibility.t_type) : '禁止做T'}</strong>
                 <p>可卖 {card.t_eligibility.sellable_quantity.toLocaleString()} 股，建议 {card.t_eligibility.suggested_quantity.toLocaleString()} 股。</p>
                 <p>接回区间 {card.t_eligibility.buyback_price_low.toFixed(2)} - {card.t_eligibility.buyback_price_high.toFixed(2)}</p>
                 <ul>
-                  {(card.t_eligibility.eligible ? card.t_eligibility.buyback_conditions : card.t_eligibility.forbidden_reasons).slice(0, 5).map(item => <li key={item}>{item}</li>)}
+                  {(card.t_eligibility.eligible ? card.t_eligibility.buyback_conditions : card.t_eligibility.forbidden_reasons).slice(0, 5).map(item => <li key={item}>{chineseEvidence(item)}</li>)}
                 </ul>
               </div>
             ) : <p className="plain-text">非持仓股不生成做T计划。</p>}
@@ -266,8 +266,8 @@ export default function DecisionCard() {
               <article key={`${item.event_type}-${item.captured_at}`}>
                 <time>{new Date(item.captured_at).toLocaleTimeString('zh-CN', { hour12: false })}</time>
                 <strong>{chineseLabel(item.event_type)}</strong>
-                <span>{item.severity}</span>
-                <p>{item.evidence[0] || `${item.value} / ${item.previous_value}`}</p>
+                <span>{chineseLabel(item.severity)}</span>
+                <p>{chineseEvidence(item.evidence[0] || `${item.value} / ${item.previous_value}`)}</p>
               </article>
             )) : <p className="plain-text">暂无盘中事件，刷新持仓执行后会自动沉淀。</p>}
           </section>

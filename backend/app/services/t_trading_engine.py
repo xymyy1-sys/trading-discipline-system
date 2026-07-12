@@ -71,7 +71,9 @@ class TTradingEngine:
         self.db = db
 
     def build_eligibility(self, holding: Holding) -> TEligibilityOut:
-        execution = build_position_execution_state(self.db, holding)
+        # Eligibility is a read model. Opening the decision card must not append
+        # execution events or recommendations, especially after market close.
+        execution = build_position_execution_state(self.db, holding, persist=False)
         forbidden: list[str] = []
         evidence: list[str] = []
         current = holding.current_price

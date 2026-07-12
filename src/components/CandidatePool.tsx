@@ -58,11 +58,11 @@ export default function CandidatePool() {
       <small>{item.code} · {item.theme || '题材待确认'} · {item.role || '角色待确认'}</small>
       {item.limit_level > 0 && <p className="candidate-positive">+ {item.limit_level}板 · {item.limit_quality}</p>}
       <div className="candidate-gates">
-        <span className={item.expectation_gap !== null && item.expectation_gap >= 0 ? 'pass' : 'wait'}>盘前预期：{item.expectation_status}{item.expectation_gap !== null ? `（差值 ${item.expectation_gap.toFixed(1)}）` : ''}</span>
-        <span className={item.volume_price_status !== '量价待确认' ? 'pass' : 'wait'}>量价确认：{item.volume_price_status}</span>
+        <span className={item.expectation_gap !== null && item.expectation_gap >= 0 ? 'pass' : 'wait'}>盘前预期：{item.expectation_status}{item.expectation_gap !== null ? `（推演强度差 ${item.expectation_gap.toFixed(1)}）` : ''}</span>
+        <span className={!item.missing_conditions.some(value => value.includes('量价')) ? 'pass' : 'wait'}>量价确认：{item.volume_price_status}</span>
         <span className={(item.risk_reward_ratio ?? 0) >= 1.5 ? 'pass' : 'wait'}>风险收益比：{item.risk_reward_ratio?.toFixed(2) ?? '待计算'}</span>
       </div>
-      {item.reasons.slice(0, 4).map(reason => <p className="candidate-positive" key={reason}>+ {chineseEvidence(reason)}</p>)}
+      {item.reasons.slice(0, 6).map(reason => <p className="candidate-positive" key={reason}>+ {chineseEvidence(reason)}</p>)}
       {item.risks.slice(0, 3).map(reason => <p className="candidate-negative" key={reason}>- {chineseEvidence(reason)}</p>)}
       {item.missing_conditions.slice(0, 3).map(reason => <p className="candidate-negative" key={`gate-${reason}`}>待补：{reason}</p>)}
     </article>)}</div>

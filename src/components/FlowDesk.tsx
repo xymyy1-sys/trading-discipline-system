@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import type { ReactNode } from 'react'
-import { Flame, MoonStar, RefreshCcw, TrendingUp } from 'lucide-react'
+import { Flame, MoonStar, RefreshCcw, Search, TrendingUp } from 'lucide-react'
 import { API_BASE } from '../api'
 import { cachedJson } from '../apiCache'
 import type {
@@ -37,6 +37,7 @@ export default function FlowDesk() {
   const [selected, setSelected] = useState<string | null>(null)
   const [detailTarget, setDetailTarget] = useState<SectorFlowItem | null>(null)
   const [fetchedAt, setFetchedAt] = useState<string | null>(null)
+  const [darkQuery, setDarkQuery] = useState('')
 
   const loadFunds = useCallback((force = false) => {
     setLoading(true)
@@ -198,7 +199,12 @@ export default function FlowDesk() {
         )}
 
         {tab === 'hot' && <HotThemePanel data={hotThemes} loading={loading} />}
-        {tab === 'dark' && <DarkTradePanel data={darkTrade} loading={loading} />}
+        {tab === 'dark' && (
+          <>
+            {darkScope === '个股' && <label className="dark-stock-search"><Search size={15} /><input value={darkQuery} onChange={event => setDarkQuery(event.target.value)} placeholder="输入股票名称或代码查询" /></label>}
+            <DarkTradePanel data={darkTrade} loading={loading} query={darkQuery} />
+          </>
+        )}
       </section>
 
       <section className="decision-grid flow-summary-grid">
@@ -292,10 +298,12 @@ function HotThemePanel({ data, loading }: { data: HotThemesOut | null; loading: 
   )
 }
 
-function DarkTradePanel({ data, loading }: { data: DarkTradeOut | null; loading: boolean }) {
+function DarkTradePanel({ data, loading, query }: { data: DarkTradeOut | null; loading: boolean; query: string }) {
   if (loading && !data) return <EmptyState title="暗盘资金同步中" body="正在读取东方财富暗盘资金榜。" />
   if (!data?.items.length) return <EmptyState title="暂无暗盘资金" body="东方财富暗盘接口暂未返回数据。" />
 
+  const keyword = query.trim().toLowerCase()
+  const items = keyword ? data.items.filter(item => item.name.toLowerCase().includes(keyword) || item.code.toLowerCase().includes(keyword)) : data.items
   return (
     <div className="flow-data-panel">
       <div className="dark-table-head">
@@ -318,9 +326,10 @@ function DarkTradePanel({ data, loading }: { data: DarkTradeOut | null; loading:
             </tr>
           </thead>
           <tbody>
-            {data.items.map(item => (
+            {items.map(item => (
               <DarkTradeRow item={item} key={`${item.code}-${item.rank}`} />
             ))}
+            {!items.length && <tr><td colSpan={9} className="plain-text">榜单中未找到匹配股票；请尝试完整名称或6位代码。</td></tr>}
           </tbody>
         </table>
       </div>

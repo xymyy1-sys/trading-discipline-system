@@ -167,7 +167,7 @@ def test_inverse_t_requires_profit_protection_and_reversal_setup(db_session, mon
         recommended_action="继续持有",
         structure_stop_price=10.4,
     )
-    monkeypatch.setattr("app.services.t_trading_engine.build_position_execution_state", lambda db, row: execution)
+    monkeypatch.setattr("app.services.t_trading_engine.build_position_execution_state", lambda db, row, **kwargs: execution)
 
     eligibility = build_t_eligibility(db_session, holding)
 
@@ -204,7 +204,7 @@ def test_inverse_t_payload_is_normalized_to_reverse_t(db_session, monkeypatch):
         recommended_action="继续持有",
         structure_stop_price=10.4,
     )
-    monkeypatch.setattr("app.services.t_trading_engine.build_position_execution_state", lambda db, row: execution)
+    monkeypatch.setattr("app.services.t_trading_engine.build_position_execution_state", lambda db, row, **kwargs: execution)
 
     plan = create_t_plan(db_session, holding)
 
@@ -288,10 +288,10 @@ def test_volume_price_snapshot_calculates_minute_flow_metrics(db_session):
             "amount": 6.0,
             "volume": 60_000_000,
             "minute_bars": [
-                {"price": 10.1, "volume": 1000, "amount": 10100, "active_buy_amount": 8000, "active_sell_amount": 2100},
-                {"price": 10.4, "volume": 1300, "amount": 13520, "active_buy_amount": 9000, "active_sell_amount": 4520},
-                {"price": 10.8, "volume": 1800, "amount": 19440, "active_buy_amount": 15000, "active_sell_amount": 4440},
-                {"price": 10.6, "volume": 900, "amount": 9540, "active_buy_amount": 2500, "active_sell_amount": 7040},
+                {"price": 10.1, "volume": 10_000_000, "amount": 101_000_000, "active_buy_amount": 80_000_000, "active_sell_amount": 21_000_000},
+                {"price": 10.4, "volume": 13_000_000, "amount": 135_200_000, "active_buy_amount": 90_000_000, "active_sell_amount": 45_200_000},
+                {"price": 10.8, "volume": 18_000_000, "amount": 194_400_000, "active_buy_amount": 150_000_000, "active_sell_amount": 44_400_000},
+                {"price": 10.6, "volume": 9_000_000, "amount": 95_400_000, "active_buy_amount": 25_000_000, "active_sell_amount": 70_400_000},
             ],
             "turnover": 4.5,
             "note": "东方财富实时行情",
@@ -302,6 +302,8 @@ def test_volume_price_snapshot_calculates_minute_flow_metrics(db_session):
     assert snapshot.volume_acceleration > 0
     assert snapshot.attack_amount > 0
     assert snapshot.pullback_amount > 0
+    assert snapshot.attack_amount < 10
+    assert snapshot.pullback_amount < 10
     assert snapshot.pullback_amount_ratio > 0
     assert snapshot.pullback_sell_ratio > 70
     assert any("分钟主动买卖额" in item for item in snapshot.evidence)

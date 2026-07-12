@@ -39,7 +39,7 @@ def test_watchlist_recommendations_combine_theme_and_limit_quality(client, monke
         source="测试涨停源", trade_date="2026-07-12", updated_at=now,
         groups=[LimitUpGroupOut(level=3, label="三连板", stocks=[LimitUpStockOut(
             code="600001", name="测试龙头", turnover=12, break_count=0,
-            consecutive_limit_days=3, concepts=["机器人"],
+            consecutive_limit_days=3, sealed_amount=1.5, price=10.0, concepts=["机器人"],
         )])], clusters=[], summary=[], notes=[],
     )
     monkeypatch.setattr(MarketDataProvider, "theme_radar", lambda self: radar)
@@ -49,9 +49,10 @@ def test_watchlist_recommendations_combine_theme_and_limit_quality(client, monke
     assert response.status_code == 200
     data = response.json()
     assert data[0]["code"] == "600001"
-    assert data[0]["tier"] == "等待确认"
-    assert data[0]["gate_passed"] is False
-    assert "未建立盘前预期" in data[0]["missing_conditions"]
+    assert data[0]["tier"] == "重点观察"
+    assert data[0]["gate_passed"] is True
+    assert data[0]["expectation_status"].startswith("系统推演")
+    assert "封板量价确认" in data[0]["volume_price_status"]
     assert data[0]["limit_quality"] == "封板稳定、未炸板"
     assert any("题材排名" in reason for reason in data[0]["reasons"])
 

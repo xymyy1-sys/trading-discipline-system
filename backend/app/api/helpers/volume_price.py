@@ -150,18 +150,22 @@ def _minute_flow_metrics(quote: dict[str, Any]) -> tuple[float, float, float, fl
     attack_efficiency = positive_price_gain / positive_amount * 10000 if positive_amount > 0 else 0.0
     pullback_pct = ((peak_price - latest_price) / peak_price * 100) if peak_price > 0 and latest_price > 0 else 0.0
 
+    active_buy_yi = active_buy / 1e8
+    active_sell_yi = active_sell / 1e8
+    attack_amount_yi = attack_amount / 1e8
+    pullback_amount_yi = pullback_amount / 1e8
     if active_buy or active_sell:
-        evidence.append(f"分钟主动买卖额：主动买 {active_buy:.2f}，主动卖 {active_sell:.2f}。")
+        evidence.append(f"分钟主动买卖额：主动买 {active_buy_yi:.2f} 亿，主动卖 {active_sell_yi:.2f} 亿。")
     if attack_efficiency:
         evidence.append(f"上攻效率 {attack_efficiency:.2f}，量能加速度 {volume_acceleration:+.2f}%。")
     pullback_ratio = (pullback_amount / attack_amount * 100) if attack_amount > 0 else 0.0
     sell_ratio = (pullback_sell_amount / pullback_amount * 100) if pullback_amount > 0 else 0.0
     if attack_amount > 0 or pullback_amount > 0:
-        evidence.append(f"上攻段成交额 {attack_amount:.2f}，回落段成交额 {pullback_amount:.2f}（{pullback_ratio:.1f}%），回落段卖出占比 {sell_ratio:.1f}%。")
+        evidence.append(f"上攻段成交额 {attack_amount_yi:.2f} 亿，回落段成交额 {pullback_amount_yi:.2f} 亿（{pullback_ratio:.1f}%），回落段卖出占比 {sell_ratio:.1f}%。")
     if pullback_pct >= 2 and active_sell > active_buy:
         evidence.append(f"高点回落 {pullback_pct:.2f}% 且回落段卖出额占优，属于回落量能放大。")
 
-    return active_buy, active_sell, attack_efficiency, volume_acceleration, attack_amount, pullback_amount, pullback_ratio, sell_ratio, evidence
+    return active_buy_yi, active_sell_yi, attack_efficiency, volume_acceleration, attack_amount_yi, pullback_amount_yi, pullback_ratio, sell_ratio, evidence
 
 
 def _classify_pattern(
@@ -350,6 +354,7 @@ def build_volume_price_snapshot(
 
     row = VolumePriceSnapshot(
         trade_date=_today(),
+        captured_at=datetime.now(),
         code=lookup_code,
         name=name or str(quote.get("name") or code),
         stage=stage,

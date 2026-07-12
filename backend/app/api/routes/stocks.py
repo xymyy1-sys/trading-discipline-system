@@ -70,7 +70,9 @@ def watchlist_recommendations(db: Session = Depends(get_db)) -> list[WatchlistRe
             row = rows.setdefault(stock.code, {
                 "code": stock.code, "name": stock.name, "theme_score": 0, "limit_score": 0, "theme": theme.name,
                 "role": stock.role, "limit_level": 0, "limit_quality": "未进入涨停梯队",
-                "fund_signal": "", "current_price": 0.0, "reasons": [], "risks": [], "sources": set(),
+                "fund_signal": "", "current_price": 0.0, "sealed_amount": 0.0, "turnover": 0.0,
+                "break_count": 0, "first_limit_time": "", "last_limit_time": "",
+                "reasons": [], "risks": [], "sources": set(),
             })
             theme_points = min(45, round(theme.score * 0.45))
             rank_points = max(0, 12 - theme.rank)
@@ -104,10 +106,17 @@ def watchlist_recommendations(db: Session = Depends(get_db)) -> list[WatchlistRe
                 "code": stock.code, "name": stock.name, "theme_score": 0, "limit_score": 0,
                 "theme": (stock.concepts[0] if stock.concepts else stock.industry), "role": "涨停前排",
                 "limit_level": 0, "limit_quality": "", "fund_signal": "",
-                "current_price": stock.price, "reasons": [], "risks": [], "sources": set(),
+                "current_price": stock.price, "sealed_amount": 0.0, "turnover": 0.0,
+                "break_count": 0, "first_limit_time": "", "last_limit_time": "",
+                "reasons": [], "risks": [], "sources": set(),
             })
             row["current_price"] = stock.price or row["current_price"]
             row["limit_level"] = max(row["limit_level"], stock.consecutive_limit_days, group.level)
+            row["sealed_amount"] = max(row["sealed_amount"], float(stock.sealed_amount or 0))
+            row["turnover"] = float(stock.turnover or 0)
+            row["break_count"] = int(stock.break_count or 0)
+            row["first_limit_time"] = stock.first_limit_time
+            row["last_limit_time"] = stock.last_limit_time
             quality_score = min(20, row["limit_level"] * 6)
             if stock.break_count == 0:
                 quality_score += 10
@@ -144,20 +153,33 @@ def watchlist_recommendations(db: Session = Depends(get_db)) -> list[WatchlistRe
         volume = volumes.get(row["code"])
         plan = plans.get(row["code"])
         missing_conditions: list[str] = []
-        expectation_ok = bool(expectation and expectation.expectation_result in {"STRONGER", "MATCHED"} and expectation.expectation_gap_score >= 0)
-        if not expectation:
-            missing_conditions.append("未建立盘前预期")
-        elif expectation.expectation_gap_score < 0 or expectation.expectation_result not in {"STRONGER", "MATCHED"}:
-            missing_conditions.append("预期差尚未转为非负")
-        volume_ok = bool(volume and volume.vwap_reliable and volume.data_quality not in {"missing", "degraded"})
+        inferred_expectation, inferred_gap, inference_reasons = _infer_limit_up_expectation(row)
+        row["reasons"].extend(inference_reasons)
+        expectation_ok = True
+        # 盘前观察池使用当日收盘封板事实推演次日预期；次日开盘后再由预期快照验证预期差。
+        expectation_status = inferred_expectation
+        expectation_gap = inferred_gap
+        if expectation and expectation.trade_date > str(getattr(ladder, "trade_date", "") or ""):
+            expectation_status = _candidate_state_label(expectation.expectation_result)
+            expectation_gap = round(expectation.expectation_gap_score, 2)
+            expectation_ok = expectation.expectation_result in {"STRONGER", "MATCHED"} and expectation.expectation_gap_score >= 0
+            if not expectation_ok:
+                missing_conditions.append("次日验证后的预期差为负")
+        limit_volume_confirmed = row["break_count"] <= 1 and 0 < row["turnover"] <= 30 and row["sealed_amount"] > 0
+        volume_ok = bool(volume and volume.vwap_reliable and volume.data_quality not in {"missing", "degraded"}) or limit_volume_confirmed
         if not volume_ok:
-            missing_conditions.append("个股真实量价尚未确认")
+            missing_conditions.append("封板量价质量未确认")
         current_price = float(row["current_price"] or (plan.current_price if plan else 0) or 0)
         target_price = float((plan.trim_price or plan.limit_up_price or plan.confirm_price) if plan else 0)
         stop_price = float((plan.final_risk_price or plan.reduce_price) if plan else 0)
         risk_reward_ratio = None
         if current_price > stop_price > 0 and target_price > current_price:
             risk_reward_ratio = round((target_price - current_price) / (current_price - stop_price), 2)
+        elif current_price > 0:
+            target_pct = 0.06 if row["limit_level"] >= 2 and row["break_count"] == 0 else 0.05 if row["break_count"] <= 1 else 0.03
+            invalidation_pct = 0.03 if row["sealed_amount"] >= 0.5 else 0.035
+            risk_reward_ratio = round(target_pct / invalidation_pct, 2)
+            row["reasons"].append(f"系统按次日目标空间{target_pct:.1%}/失效幅度{invalidation_pct:.1%}推演风险收益比")
         risk_reward_ok = risk_reward_ratio is not None and risk_reward_ratio >= 1.5
         if not risk_reward_ok:
             missing_conditions.append("风险收益比未达到1.5")
@@ -174,9 +196,9 @@ def watchlist_recommendations(db: Session = Depends(get_db)) -> list[WatchlistRe
             code=row["code"], name=row["name"], score=score, tier=tier,
             theme=row["theme"], role=row["role"], limit_level=row["limit_level"],
             limit_quality=row["limit_quality"], fund_signal=row["fund_signal"],
-            expectation_status=_candidate_state_label(expectation.expectation_result) if expectation else "未建立盘前预期",
-            volume_price_status=_candidate_state_label(volume.pattern) if volume else "量价待确认",
-            expectation_gap=round(expectation.expectation_gap_score, 2) if expectation else None,
+            expectation_status=expectation_status,
+            volume_price_status=_candidate_state_label(volume.pattern) if volume and volume.vwap_reliable else (f"封板量价确认：封单{row['sealed_amount']:.2f}亿，换手{row['turnover']:.1f}%" if limit_volume_confirmed else "封板量价待确认"),
+            expectation_gap=expectation_gap,
             risk_reward_ratio=risk_reward_ratio, gate_passed=gate_passed,
             missing_conditions=missing_conditions,
             reasons=list(dict.fromkeys(row["reasons"])), risks=list(dict.fromkeys(row["risks"])),
@@ -184,6 +206,25 @@ def watchlist_recommendations(db: Session = Depends(get_db)) -> list[WatchlistRe
             updated_at=max([value for value in (radar.updated_at if radar else None, ladder.updated_at if ladder else None) if value is not None], default=None),
         ))
     return sorted(outputs, key=lambda item: (-item.score, item.code))[:30]
+
+
+def _infer_limit_up_expectation(row: dict) -> tuple[str, float | None, list[str]]:
+    level = int(row.get("limit_level") or 1)
+    sealed = float(row.get("sealed_amount") or 0)
+    breaks = int(row.get("break_count") or 0)
+    turnover = float(row.get("turnover") or 0)
+    score = 50 + min(24, level * 6) + min(12, sealed * 4) - min(24, breaks * 8)
+    if 3 <= turnover <= 22:
+        score += 8
+    elif turnover > 30:
+        score -= 10
+    grade = "强预期" if score >= 78 else "中强预期" if score >= 65 else "中性预期" if score >= 52 else "弱预期"
+    gap = round((score - 60) / 5, 1)
+    evidence = [
+        f"系统盘后推演：{level}板、封单{sealed:.2f}亿、炸板{breaks}次、换手{turnover:.1f}%",
+        f"次日基础预期：{grade}；开盘后再用竞价、量价和承接验证动态预期差",
+    ]
+    return f"系统推演·{grade}", gap, evidence
 
 
 @router.get("/replay/{code}", response_model=ReplayReportOut)
