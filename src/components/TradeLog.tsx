@@ -152,7 +152,7 @@ export default function TradeLog() {
       {profile && (
         <section className="growth-panel panel">
           <div>
-            <span className="eyebrow">Growth Profile</span>
+            <span className="eyebrow">交易成长画像</span>
             <h3>成长画像</h3>
             <p>{profile.current_focus}</p>
           </div>

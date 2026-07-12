@@ -1,3 +1,4 @@
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -29,10 +30,104 @@ from app.schemas.trading import (
     StockDecisionCardOut,
     VolumePriceSnapshotOut,
     CandidateOut,
+    WatchlistRecommendationOut,
     ReplayReportOut,
 )
 
 router = APIRouter()
+
+
+@router.get("/watchlist-recommendations", response_model=list[WatchlistRecommendationOut])
+def watchlist_recommendations(db: Session = Depends(get_db)) -> list[WatchlistRecommendationOut]:
+    from app.services.market_data import MarketDataProvider
+
+    provider = MarketDataProvider()
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        theme_future = executor.submit(provider.theme_radar)
+        ladder_future = executor.submit(provider.limit_up_ladder)
+        try:
+            radar = theme_future.result()
+        except Exception:
+            radar = None
+        try:
+            ladder = ladder_future.result()
+        except Exception:
+            ladder = None
+
+    holding_codes = {row.code for row in db.query(Holding.code).all()}
+    rows: dict[str, dict] = {}
+    theme_source = radar.source if radar else "题材数据不可用"
+    for theme in (radar.themes[:20] if radar else []):
+        for stock in theme.core_stocks:
+            if not stock.code:
+                continue
+            row = rows.setdefault(stock.code, {
+                "code": stock.code, "name": stock.name, "score": 0, "theme": theme.name,
+                "role": stock.role, "limit_level": 0, "limit_quality": "未进入涨停梯队",
+                "fund_signal": "", "reasons": [], "risks": [], "sources": set(),
+            })
+            theme_points = min(45, round(theme.score * 0.45))
+            rank_points = max(0, 12 - theme.rank)
+            role_points = 12 if any(word in stock.role for word in ("龙头", "核心", "前排")) else 5
+            row["score"] += theme_points + rank_points + role_points
+            row["reasons"].append(f"{theme.name}题材排名第{theme.rank}，强度{theme.score}分")
+            row["reasons"].append(f"题材角色：{stock.role or '核心股'}")
+            if theme.net_inflow > 0:
+                row["score"] += 8
+                row["fund_signal"] = f"题材净流入{theme.net_inflow:.2f}亿"
+                row["reasons"].append(row["fund_signal"])
+            else:
+                row["risks"].append("题材资金尚未形成净流入确认")
+            row["sources"].add(theme_source)
+
+    ladder_source = ladder.source if ladder else "涨停数据不可用"
+    for group in (ladder.groups if ladder else []):
+        for stock in group.stocks:
+            if not stock.code:
+                continue
+            row = rows.setdefault(stock.code, {
+                "code": stock.code, "name": stock.name, "score": 0,
+                "theme": (stock.concepts[0] if stock.concepts else stock.industry), "role": "涨停前排",
+                "limit_level": 0, "limit_quality": "", "fund_signal": "",
+                "reasons": [], "risks": [], "sources": set(),
+            })
+            row["limit_level"] = max(row["limit_level"], stock.consecutive_limit_days, group.level)
+            quality_score = min(20, row["limit_level"] * 6)
+            if stock.break_count == 0:
+                quality_score += 10
+                row["limit_quality"] = "封板稳定、未炸板"
+            else:
+                quality_score -= min(18, stock.break_count * 6)
+                row["limit_quality"] = f"炸板{stock.break_count}次"
+                row["risks"].append(row["limit_quality"])
+            if 3 <= stock.turnover <= 22:
+                quality_score += 6
+            elif stock.turnover > 30:
+                quality_score -= 8
+                row["risks"].append(f"换手率{stock.turnover:.1f}%偏高")
+            row["score"] += quality_score
+            row["reasons"].append(f"{group.label}，{row['limit_quality']}")
+            row["sources"].add(ladder_source)
+
+    outputs: list[WatchlistRecommendationOut] = []
+    for row in rows.values():
+        if "ST" in row["name"].upper():
+            row["score"] -= 50
+            row["risks"].append("风险警示股票不纳入自动观察池")
+        if row["code"] in holding_codes:
+            row["score"] -= 15
+            row["risks"].append("当前已持仓，应转入持仓执行而非新增观察")
+        score = max(0, min(100, int(row["score"])))
+        tier = "重点观察" if score >= 70 and not any("风险警示" in risk for risk in row["risks"]) else "普通观察" if score >= 50 else "暂不纳入"
+        outputs.append(WatchlistRecommendationOut(
+            code=row["code"], name=row["name"], score=score, tier=tier,
+            theme=row["theme"], role=row["role"], limit_level=row["limit_level"],
+            limit_quality=row["limit_quality"], fund_signal=row["fund_signal"],
+            reasons=list(dict.fromkeys(row["reasons"])), risks=list(dict.fromkeys(row["risks"])),
+            source=" + ".join(sorted(row["sources"])),
+            updated_at=max([value for value in (radar.updated_at if radar else None, ladder.updated_at if ladder else None) if value is not None], default=None),
+        ))
+    return sorted(outputs, key=lambda item: (-item.score, item.code))[:30]
 
 
 @router.get("/replay/{code}", response_model=ReplayReportOut)
@@ -60,29 +155,29 @@ def list_candidates(db: Session = Depends(get_db)) -> list[CandidateOut]:
         expectation_result = expectation.expectation_result if expectation else "UNKNOWN"
         if expectation_result in {"STRONGER", "MATCHED"}:
             score += 20
-            reasons.append(f"expectation {expectation_result}")
+            reasons.append(f"预期状态：{_candidate_state_label(expectation_result)}")
         elif expectation_result in {"WEAKER", "INVALID"}:
             score -= 30
-            exclusions.append(f"expectation {expectation_result}")
+            exclusions.append(f"预期状态：{_candidate_state_label(expectation_result)}")
         else:
             score -= 10
-            exclusions.append("expectation evidence missing")
+            exclusions.append("缺少预期证据")
 
         volume_state = volume.pattern if volume else "UNKNOWN"
         data_quality = volume.data_quality if volume else "missing"
         if volume and volume.vwap_reliable:
             score += 15
-            reasons.append("real minute VWAP is reliable")
+            reasons.append("真实分钟均价线可靠")
         else:
             score -= 15
-            exclusions.append("real minute VWAP is unavailable")
+            exclusions.append("真实分钟均价线不可用")
         if execution:
             if execution.state in {"EXIT_REQUIRED", "REDUCE_REQUIRED", "EXPECTATION_INVALIDATED", "STOP_LOSS_WARNING"}:
                 score -= 35
-                exclusions.append(f"execution state {execution.state}")
+                exclusions.append(f"执行状态：{_candidate_state_label(execution.state)}")
             elif execution.state in {"NORMAL_HOLD", "PROFIT_EXPANSION"}:
                 score += 10
-                reasons.append(f"execution state {execution.state}")
+                reasons.append(f"执行状态：{_candidate_state_label(execution.state)}")
         score = max(0, min(100, score))
         pool = "A" if score >= 75 and not exclusions else "B" if score >= 55 else "C" if score >= 35 else "D"
         outputs.append(CandidateOut(
@@ -99,6 +194,17 @@ def list_candidates(db: Session = Depends(get_db)) -> list[CandidateOut]:
             updated_at=max([value for value in (expectation.created_at if expectation else None, volume.captured_at if volume else None, execution.updated_at if execution else None) if value is not None], default=None),
         ))
     return sorted(outputs, key=lambda item: (-item.score, item.code))
+
+
+def _candidate_state_label(value: str) -> str:
+    return {
+        "STRONGER": "强于预期", "MATCHED": "符合预期", "WEAKER": "弱于预期",
+        "SLIGHTLY_WEAKER": "略弱于预期", "INVALID": "预期证伪", "UNKNOWN": "未知",
+        "EXIT_REQUIRED": "必须退出", "REDUCE_REQUIRED": "必须减仓",
+        "EXPECTATION_INVALIDATED": "预期失效", "STOP_LOSS_WARNING": "止损警告",
+        "NORMAL_HOLD": "正常持有", "PROFIT_EXPANSION": "利润扩张",
+        "DEGRADED_DATA_OBSERVATION": "数据降级观察",
+    }.get(value, value or "未知")
 
 
 @router.get("/expectation-rules", response_model=list[ExpectationRuleOut])

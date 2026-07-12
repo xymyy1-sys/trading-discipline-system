@@ -73,37 +73,11 @@ def _is_realtime_note(price_note: str) -> bool:
     return "实时行情" in note or "东方财富" in note or "AkShare" in note or "新浪" in note or "腾讯" in note
 
 def _latest_a_share_quotes(codes: list[str]) -> dict[str, dict[str, Any]]:
+    # Holdings and decision cards normally request only a few symbols.  Prefer
+    # lightweight symbol APIs so a slow full-market AkShare snapshot cannot
+    # make the UI look as if holdings disappeared.
     try:
-        import akshare as ak
-        frame = ak.stock_zh_a_spot_em()
-        if frame.empty:
-            raise ValueError("empty spot quote")
-        normalized = set()
-        for code in codes:
-            normalized.update(_quote_code_candidates(code))
-        quotes: dict[str, dict[str, Any]] = {}
-        for _, row in frame.iterrows():
-            code = str(row.get("代码") or row.get("code") or "").zfill(6)
-            if code not in normalized:
-                continue
-            price = _safe_float(row.get("最新价") or row.get("price"))
-            if price <= 0:
-                continue
-            open_price = _safe_float(row.get("今开") or row.get("open"))
-            prev_close = _safe_float(row.get("昨收") or row.get("prev_close"))
-            high_price = _safe_float(row.get("最高") or row.get("high"))
-            low_price = _safe_float(row.get("最低") or row.get("low"))
-            quotes[code] = {
-                "price": price,
-                "change_pct": _safe_float(row.get("涨跌幅") or row.get("change_pct")),
-                "amount": round(_safe_float(row.get("成交额") or row.get("amount")) / 1e8, 2),
-                "turnover": _safe_turnover(row.get("换手率") or row.get("turnover")),
-                "open": open_price,
-                "prev_close": prev_close,
-                "high": high_price,
-                "low": low_price,
-                "note": "AkShare/东方财富实时行情",
-            }
+        quotes = _latest_a_share_quotes_eastmoney(codes)
         if quotes:
             _attach_minute_bars(quotes)
             return quotes
@@ -116,9 +90,33 @@ def _latest_a_share_quotes(codes: list[str]) -> dict[str, dict[str, Any]]:
             return quotes
     except Exception:
         pass
-    quotes = _latest_a_share_quotes_eastmoney(codes)
-    _attach_minute_bars(quotes)
-    return quotes
+    try:
+        import akshare as ak
+        frame = ak.stock_zh_a_spot_em()
+        if frame.empty:
+            return {}
+        normalized = {candidate for code in codes for candidate in _quote_code_candidates(code)}
+        quotes: dict[str, dict[str, Any]] = {}
+        for _, row in frame.iterrows():
+            code = str(row.get("代码") or row.get("code") or "").zfill(6)
+            price = _safe_float(row.get("最新价") or row.get("price"))
+            if code not in normalized or price <= 0:
+                continue
+            quotes[code] = {
+                "price": price,
+                "change_pct": _safe_float(row.get("涨跌幅") or row.get("change_pct")),
+                "amount": round(_safe_float(row.get("成交额") or row.get("amount")) / 1e8, 2),
+                "turnover": _safe_turnover(row.get("换手率") or row.get("turnover")),
+                "open": _safe_float(row.get("今开") or row.get("open")),
+                "prev_close": _safe_float(row.get("昨收") or row.get("prev_close")),
+                "high": _safe_float(row.get("最高") or row.get("high")),
+                "low": _safe_float(row.get("最低") or row.get("low")),
+                "note": "东方财富实时行情",
+            }
+        _attach_minute_bars(quotes)
+        return quotes
+    except Exception:
+        return {}
 
 def _latest_a_share_quotes_sina(codes: list[str]) -> dict[str, dict[str, Any]]:
     symbols = []

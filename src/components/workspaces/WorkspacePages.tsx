@@ -314,7 +314,7 @@ export function TodayDecisionSummary() {
             </article>
           ))
         ) : (
-          <p className="plain-text">暂无盘中证据轨迹。后台采集器运行后会展示价格、VWAP、预期状态和动作建议的时间线。</p>
+          <p className="plain-text">暂无盘中证据轨迹。后台采集器运行后会展示价格、分时均价、预期状态和动作建议的时间线。</p>
         )}
       </div>
     </section>

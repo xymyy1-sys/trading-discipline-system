@@ -65,6 +65,30 @@ export default function NextDayPlans() {
     () => seesaw?.holding_alerts.find(item => item.code === selected?.code || item.name === selected?.name) ?? null,
     [seesaw, selected],
   )
+  const conditionOrderAdvice = useMemo(() => {
+    if (!draft) return null
+    if (draft.plan_type === 'limit_up_auction') {
+      const hasEvidence = Boolean(draft.auction_plan.board_strength && draft.auction_plan.limit_quality)
+      return {
+        level: hasEvidence ? '谨慎预埋' : '暂不预埋',
+        action: hasEvidence
+          ? `可在券商端预填 ${num(draft.auction_plan.order_price || draft.limit_up_price)} 的买入委托，但盘前不得无条件启用。`
+          : '题材、资金或封板质量证据不完整，只保存预案，不向券商提交委托。',
+        trigger: draft.auction_plan.keep_order_condition || draft.auction_plan.opening_confirmation || '竞价强度、主线地位和量价同时确认后才允许生效。',
+        cancel: draft.auction_plan.cancel_condition || '竞价弱于预期、主线退潮、核心股负反馈或数据源异常时立即撤单。',
+      }
+    }
+    const riskPrice = draft.final_risk_price || draft.reduce_price
+    if (!riskPrice) {
+      return { level: '暂不预埋', action: '尚未设置有效风险价，先补全减仓线与最终风险线。', trigger: '价格条件缺失。', cancel: '计划更新前不提交条件单。' }
+    }
+    return {
+      level: '建议预埋防守单',
+      action: `预埋卖出保护：跌破 ${num(riskPrice)} 执行减仓/退出；不预埋补仓买单。`,
+      trigger: `减仓线 ${num(draft.reduce_price)}，最终风险线 ${num(draft.final_risk_price)}；数量以计划卡和可卖数量为上限。`,
+      cancel: '只有收盘后重新评估并保存了更强证据，才允许上调或撤销保护线；盘中不得因主观期待放宽。',
+    }
+  }, [draft])
 
   const selectPlan = (plan: Plan) => {
     selectedIdRef.current = plan.id
@@ -225,6 +249,19 @@ export default function NextDayPlans() {
                   刷新阶段验收
                 </button>
               </div>
+
+              {conditionOrderAdvice && (
+                <div className="condition-order-advice">
+                  <div>
+                    <span>条件单结论</span>
+                    <strong>{conditionOrderAdvice.level}</strong>
+                  </div>
+                  <p><b>怎么挂：</b>{conditionOrderAdvice.action}</p>
+                  <p><b>生效条件：</b>{conditionOrderAdvice.trigger}</p>
+                  <p><b>撤销条件：</b>{conditionOrderAdvice.cancel}</p>
+                  <small>系统只生成券商条件单模板，不会替你自动下单；提交前必须核对价格、可卖数量和券商触发规则。</small>
+                </div>
+              )}
 
               <div className="auction-evidence-grid">
                 <div>

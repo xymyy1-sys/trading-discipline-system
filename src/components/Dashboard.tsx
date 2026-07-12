@@ -90,7 +90,7 @@ export default function Dashboard() {
     <div className="theme-radar trading-desk-page">
       <section className="radar-command">
         <div className="desk-heading">
-          <span className="eyebrow">Theme Radar</span>
+          <span className="eyebrow">主线题材雷达</span>
           <h2>{radar?.strongest_theme?.name ?? '题材雷达'}</h2>
           <p>
             {radar?.strongest_theme
@@ -123,7 +123,7 @@ export default function Dashboard() {
         <article className="panel theme-ranking-panel">
           <div className="panel-title-line">
             <h3><BarChart3 size={16} /> 主线强度排行</h3>
-            <span>{topThemes.length ? `TOP ${topThemes.length}` : '等待数据'}</span>
+            <span>{topThemes.length ? `前 ${topThemes.length} 名` : '等待数据'}</span>
           </div>
           <div className="theme-rank-list">
             {topThemes.map(item => (

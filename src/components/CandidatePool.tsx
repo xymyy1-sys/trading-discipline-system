@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { RefreshCcw } from 'lucide-react'
 import { API_BASE } from '../api'
+import { chineseEvidence, chineseLabel } from '../labels'
 
 type Candidate = {
   code: string; name: string; pool: string; score: number; expectation_result: string;
@@ -8,22 +9,53 @@ type Candidate = {
   reasons: string[]; exclusions: string[];
 }
 
+type Recommendation = {
+  code: string; name: string; score: number; tier: string; theme: string; role: string;
+  limit_level: number; limit_quality: string; fund_signal: string;
+  reasons: string[]; risks: string[]; source: string; updated_at: string | null;
+}
+
 export default function CandidatePool() {
   const [items, setItems] = useState<Candidate[]>([])
+  const [recommendations, setRecommendations] = useState<Recommendation[]>([])
   const [loading, setLoading] = useState(false)
+  const [error, setError] = useState('')
   const load = () => {
     setLoading(true)
-    fetch(`${API_BASE}/api/candidates`).then(r => r.json()).then(setItems).finally(() => setLoading(false))
+    setError('')
+    Promise.all([
+      fetch(`${API_BASE}/api/watchlist-recommendations`).then(r => {
+        if (!r.ok) throw new Error(`自动观察池请求失败（${r.status}）`)
+        return r.json()
+      }),
+      fetch(`${API_BASE}/api/candidates`).then(r => {
+        if (!r.ok) throw new Error(`已有标的分层请求失败（${r.status}）`)
+        return r.json()
+      }),
+    ]).then(([nextRecommendations, nextItems]) => {
+      setRecommendations(Array.isArray(nextRecommendations) ? nextRecommendations : [])
+      setItems(Array.isArray(nextItems) ? nextItems : [])
+    }).catch(error => setError(error instanceof Error ? error.message : '观察池加载失败')).finally(() => setLoading(false))
   }
   useEffect(load, [])
   return <section className="candidate-pool">
-    <header className="pos-header"><div><h2>A/B/C/D 候选池</h2><p>按预期、真实量价、执行风险和数据质量自动分层。</p></div><button className="refresh-btn inline" onClick={load} disabled={loading}><RefreshCcw size={14} />刷新</button></header>
+    <header className="pos-header"><div><h2>自动观察池</h2><p>从主线题材核心股和涨停梯队中自动发现，不再只给已有持仓打分。</p></div><button className="refresh-btn inline" onClick={load} disabled={loading}><RefreshCcw size={14} />{loading ? '分析中' : '重新分析'}</button></header>
+    {error && <p className="error-msg">{error}；这不是“暂无数据”，请检查网络或行情源。</p>}
+    <div className="candidate-grid">{recommendations.map(item => <article className={`candidate-card ${item.tier === '重点观察' ? 'pool-A' : item.tier === '普通观察' ? 'pool-B' : 'pool-D'}`} key={`auto-${item.code}`}>
+      <div className="candidate-head"><strong>{item.tier} · {item.name || item.code}</strong><b>{item.score}</b></div>
+      <small>{item.code} · {item.theme || '题材待确认'} · {item.role || '角色待确认'}</small>
+      {item.limit_level > 0 && <p className="candidate-positive">+ {item.limit_level}板 · {item.limit_quality}</p>}
+      {item.reasons.slice(0, 4).map(reason => <p className="candidate-positive" key={reason}>+ {chineseEvidence(reason)}</p>)}
+      {item.risks.slice(0, 3).map(reason => <p className="candidate-negative" key={reason}>- {chineseEvidence(reason)}</p>)}
+    </article>)}</div>
+    {!loading && !recommendations.length && !error && <p className="plain-text">当前主线与涨停质量没有产生合格的新观察标的，不用为了凑数量强行入池。</p>}
+    <header className="pos-header candidate-existing-head"><div><h3>已有标的纪律分层</h3><p>仅用于管理持仓和已建立的次日计划，不再冒充自动选股结果。</p></div></header>
     <div className="candidate-grid">{items.map(item => <article className={`candidate-card pool-${item.pool}`} key={item.code}>
       <div className="candidate-head"><strong>{item.pool}池 · {item.name || item.code}</strong><b>{item.score}</b></div>
-      <small>{item.code} · {item.expectation_result} · {item.data_quality}</small>
-      {item.reasons.map(reason => <p className="candidate-positive" key={reason}>+ {reason}</p>)}
-      {item.exclusions.map(reason => <p className="candidate-negative" key={reason}>- {reason}</p>)}
+      <small>{item.code} · {chineseLabel(item.expectation_result)} · {chineseLabel(item.data_quality)}</small>
+      {item.reasons.map(reason => <p className="candidate-positive" key={reason}>+ {chineseEvidence(reason)}</p>)}
+      {item.exclusions.map(reason => <p className="candidate-negative" key={reason}>- {chineseEvidence(reason)}</p>)}
     </article>)}</div>
-    {!items.length && <p className="plain-text">暂无候选数据；先建立次日计划或持仓。</p>}
+    {!loading && !items.length && !error && <p className="plain-text">暂无已有标的。</p>}
   </section>
 }

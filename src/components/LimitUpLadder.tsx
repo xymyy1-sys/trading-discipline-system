@@ -70,7 +70,7 @@ export default function LimitUpLadder() {
     <section className="ladder-page trading-desk-page">
       <div className="ladder-command">
         <div className="desk-heading">
-          <span className="eyebrow">Limit Up Ladder</span>
+          <span className="eyebrow">涨停质量天梯</span>
           <h2>涨停天梯</h2>
           <p>按连板高度、封单质量、题材聚类观察市场情绪，优先服务次日打板预案。</p>
         </div>

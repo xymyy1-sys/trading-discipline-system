@@ -42,7 +42,7 @@ export default function IntelDesk() {
     <div className="intel-full trading-desk-page">
       <header className="intel-command">
         <div className="desk-heading">
-          <span className="eyebrow">Information Edge</span>
+          <span className="eyebrow">信息差线索</span>
           <h2>信息差雷达</h2>
           <p>把新闻、快讯和题材映射成候选方向，只做观察池，不替代买点确认。</p>
         </div>

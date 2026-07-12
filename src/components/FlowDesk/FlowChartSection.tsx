@@ -136,12 +136,12 @@ export default function FlowChartSection({
     return (
       <div className="chart-surface-large chart-empty-state">
         <strong>当前只有快照数据</strong>
-        <span>主图不再绘制孤立点；请看右侧 TOP10 榜单和资金拆解，盘中多次刷新后自动形成连续曲线。</span>
+        <span>主图不再绘制孤立点；请看右侧前10名榜单和资金拆解，盘中多次刷新后自动形成连续曲线。</span>
       </div>
     )
   }
 
-  return <div className="chart-surface-large" ref={ref} aria-label="主力行业资金流入流出 TOP10 曲线" />
+  return <div className="chart-surface-large" ref={ref} aria-label="主力行业资金流入流出前10名曲线" />
 }
 
 function timeOrder(label: string) {

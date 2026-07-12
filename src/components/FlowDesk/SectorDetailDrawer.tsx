@@ -55,7 +55,7 @@ export default function SectorDetailDrawer({
       <aside className="sector-drawer" aria-label={`${item.name}成分股`}>
         <div className="drawer-head">
           <div>
-            <span className="eyebrow">Sector Drilldown</span>
+            <span className="eyebrow">板块明细</span>
             <h2>{detail?.name ?? item.name}</h2>
             <p>{[detail?.category ?? item.category, detail?.subline ?? item.subline].filter(Boolean).join(' / ')}</p>
           </div>
@@ -70,13 +70,13 @@ export default function SectorDetailDrawer({
           <MiniStat label="涨停股" value={`${detail?.limit_up_stocks.length ?? 0}只`} />
           <MiniStat label="强度" value={`${detail?.strength ?? item.strength}/100`} />
           <MiniStat label="板块指数" value={item.sector_price?.toFixed(2) ?? '--'} tone={item.sector_vwap_reliable ? (item.sector_below_vwap ? 'down' : 'up') : undefined} />
-          <MiniStat label="板块VWAP" value={item.sector_vwap?.toFixed(2) ?? '--'} />
+          <MiniStat label="板块分时均价" value={item.sector_vwap?.toFixed(2) ?? '--'} />
         </div>
 
         <p className="plain-text">
           {item.sector_vwap_reliable
-            ? `东方财富板块指数分钟均价口径：当前指数${item.sector_below_vwap ? '低于' : '高于'} VWAP，共 ${item.index_timeline.length} 个真实分钟点。`
-            : '板块指数真实分钟均价暂不可用，不生成板块 VWAP 结论。'}
+            ? `东方财富板块指数分钟均价口径：当前指数${item.sector_below_vwap ? '低于' : '高于'}分时均价，共 ${item.index_timeline.length} 个真实分钟点。`
+            : '板块指数真实分钟均价暂不可用，不生成板块分时均价结论。'}
         </p>
 
         {((detail?.flow_breakdown?.length ? detail.flow_breakdown : item.flow_breakdown) ?? []).length > 0 && (

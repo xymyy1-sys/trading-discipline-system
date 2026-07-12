@@ -29,6 +29,7 @@ export default function Positions() {
   const [refreshing, setRefreshing] = useState(false)
   const [syncing, setSyncing] = useState(false)
   const [refreshMessage, setRefreshMessage] = useState('')
+  const [holdingsError, setHoldingsError] = useState('')
   const refreshingRef = useRef(false)
   const [showForm, setShowForm] = useState(false)
   const [editingId, setEditingId] = useState<number | null>(null)
@@ -74,14 +75,21 @@ export default function Positions() {
     refreshingRef.current = true
     setRefreshing(true)
     setRefreshMessage('')
+    setHoldingsError('')
     fetch(`${API_BASE}/api/holdings`)
-      .then(r => r.json())
+      .then(async r => {
+        if (!r.ok) throw new Error(`持仓接口返回 ${r.status}`)
+        return r.json()
+      })
       .then((data: Holding[]) => applyHoldings(data))
       .then(() => {
         fetchSeesaw()
         fetchExecutionStates()
       })
-      .catch(() => setRefreshMessage('行情刷新失败，暂用已有价格'))
+      .catch(error => {
+        setHoldingsError(error instanceof Error ? error.message : '持仓加载失败')
+        setRefreshMessage('持仓加载失败，页面不会把接口故障误报为“暂无持仓”')
+      })
       .finally(() => {
         refreshingRef.current = false
         setRefreshing(false)
@@ -419,7 +427,7 @@ export default function Positions() {
 
       <section className="panel account-asset-panel">
         <div>
-          <span className="eyebrow">Account Asset</span>
+          <span className="eyebrow">账户资产</span>
           <h3>账户总资产</h3>
           <p>仓位按单只持仓市值 / 总资产计算。未填写时仓位显示为空，避免误判为满仓。</p>
         </div>
@@ -457,7 +465,7 @@ export default function Positions() {
           <div className="selected-theme-head">
             <div>
               <strong>时间止损规则</strong>
-              <span>按剧本类型控制确认截止、持续低于VWAP和冲板未回封阈值。</span>
+              <span>按剧本类型控制确认截止、持续低于分时均价和冲板未回封阈值。</span>
             </div>
             {ruleMessage && <span className="asset-message">{ruleMessage}</span>}
           </div>
@@ -484,7 +492,7 @@ export default function Positions() {
                     />
                   </label>
                   <label>
-                    <span>低于VWAP分钟</span>
+                    <span>低于分时均价分钟</span>
                     <input
                       type="number"
                       min="1"
@@ -595,7 +603,7 @@ export default function Positions() {
           </div>
           <div className="auction-evidence-grid">
             <div>
-              <b>行业流入 TOP10</b>
+              <b>行业流入前10名</b>
               <ul>
                 {seesaw.inflow_targets.slice(0, 4).map(item => (
                   <li key={item.name}>{item.name}：净流入 {item.net_inflow.toFixed(2)} 亿，主力 {item.main_inflow.toFixed(2)} 亿，涨停 {item.limit_up_count} 只</li>
@@ -603,7 +611,7 @@ export default function Positions() {
               </ul>
             </div>
             <div>
-              <b>行业流出 TOP10</b>
+              <b>行业流出前10名</b>
               <ul>
                 {(seesaw.outflow_targets.length ? seesaw.outflow_targets : [{ name: '暂无明显流出板块', net_inflow: 0, main_inflow: 0, limit_up_count: 0 } as RotationItem]).slice(0, 4).map(item => (
                   <li key={item.name}>{item.name}：净流入 {item.net_inflow.toFixed(2)} 亿，主力 {item.main_inflow.toFixed(2)} 亿</li>
@@ -648,7 +656,7 @@ export default function Positions() {
                     <span>{item.pullback_from_high_pct.toFixed(2)}%</span>
                   </div>
                   <div>
-                    <b>VWAP</b>
+                    <b>分时均价</b>
                     <span>{item.below_vwap ? '已跌破' : '未跌破'}</span>
                   </div>
                   <div>
@@ -686,7 +694,7 @@ export default function Positions() {
           <div className="selected-theme-head">
             <div>
               <strong>持仓执行状态机</strong>
-              <span>按利润保护、VWAP、结构止损、板块证据生成动作；缺失数据会标明降级，不用 0 冒充。</span>
+              <span>按利润保护、分时均价、结构止损、板块证据生成动作；缺失数据会标明降级，不用 0 冒充。</span>
             </div>
           </div>
           <div className="execution-card-grid">
@@ -750,7 +758,7 @@ export default function Positions() {
                   <div>
                     <b>做T口径</b>
                     <p><span>可卖</span>{item.sellable_quantity.toLocaleString()} 股 · 今日买入 {item.today_buy_quantity.toLocaleString()} 股</p>
-                    <p><span>类型</span>{item.t_eligible ? item.t_type : 'NO_T'} · {item.t_eligible ? '等待计划生成' : '禁止做T'}</p>
+                    <p><span>类型</span>{item.t_eligible ? item.t_type : '禁止做T'} · {item.t_eligible ? '等待计划生成' : '禁止做T'}</p>
                   </div>
                 </div>
                 <div className="execution-feedback">
@@ -771,7 +779,9 @@ export default function Positions() {
         </section>
       )}
 
-      {holdings.length === 0 ? (
+      {holdingsError ? (
+        <div className="panel error-msg"><p>持仓数据加载失败：{holdingsError}。请稍后重试；数据库中的原有记录未因此删除。</p></div>
+      ) : holdings.length === 0 ? (
         <div className="panel"><p className="plain-text">暂无持仓，点击"添加持仓"录入。</p></div>
       ) : (
         <div className="pos-table-wrap">

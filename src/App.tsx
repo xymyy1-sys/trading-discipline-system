@@ -2,17 +2,8 @@ import { useEffect, useState, Suspense, lazy } from 'react'
 import { Routes, Route, useNavigate, useLocation, Navigate } from 'react-router-dom'
 import {
   Activity,
-  BarChart3,
   BookOpenCheck,
-  ClipboardCheck,
   Flame,
-  Gauge,
-  Layers3,
-  NotebookPen,
-  ScanLine,
-  ListChecks,
-  Newspaper,
-  ShieldAlert,
   Target,
   WalletCards,
   Crosshair,
@@ -32,9 +23,6 @@ const Positions = lazy(() => import('./components/Positions'))
 const DecisionCard = lazy(() => import('./components/DecisionCard'))
 const NextDayPlans = lazy(() => import('./components/NextDayPlans'))
 const TradeLog = lazy(() => import('./components/TradeLog'))
-const BuyCheck = lazy(() => import('./components/BuyCheck'))
-const ConcentratedAttack = lazy(() => import('./components/ConcentratedAttack'))
-const SellPlan = lazy(() => import('./components/SellPlan'))
 const MonthlyReview = lazy(() => import('./components/MonthlyReview'))
 const ReviewCalibration = lazy(() => import('./components/ReviewCalibration'))
 const CandidatePool = lazy(() => import('./components/CandidatePool'))
@@ -47,22 +35,6 @@ const navItems = [
   ['打板预期', Flame, '/打板预期'],
   ['持仓执行', WalletCards, '/持仓执行'],
   ['复盘校准', BookOpenCheck, '/复盘校准'],
-] as const
-
-const legacyNavItems = [
-  ['题材雷达', Gauge, '/题材雷达'],
-  ['资金流证据', BarChart3, '/资金流证据'],
-  ['涨停天梯', Flame, '/涨停天梯'],
-  ['信息差', Newspaper, '/信息差'],
-  ['市场环境', Activity, '/市场环境'],
-  ['持仓快照', WalletCards, '/持仓快照'],
-  ['个股决策卡', ScanLine, '/个股决策卡'],
-  ['次日计划卡', NotebookPen, '/次日计划卡'],
-  ['交易日志', ListChecks, '/交易日志'],
-  ['买入检查', ClipboardCheck, '/买入检查'],
-  ['集中进攻', Layers3, '/集中进攻'],
-  ['卖出执行卡', ShieldAlert, '/卖出执行卡'],
-  ['月度复盘', ListChecks, '/月度复盘'],
 ] as const
 
 const oldPathToWorkspace: Record<string, string> = {
@@ -83,7 +55,6 @@ const oldPathToWorkspace: Record<string, string> = {
 
 const routeLabels: Record<string, string> = Object.fromEntries([
   ...navItems.map(([label, _, path]) => [path, label]),
-  ...legacyNavItems.map(([label, _, path]) => [path, label]),
 ])
 
 export default function App() {
@@ -113,7 +84,7 @@ export default function App() {
   useEffect(() => {
     const handler = (e: Event) => {
       const detail = (e as CustomEvent<string>).detail
-      const item = [...navItems, ...legacyNavItems].find(([label]) => label === detail)
+      const item = navItems.find(([label]) => label === detail)
       if (item) {
         navigate(item[2])
         setSidebarOpen(false)
@@ -155,24 +126,6 @@ export default function App() {
             </button>
           ))}
         </nav>
-        <div className="legacy-nav">
-          <span>原功能入口</span>
-          {legacyNavItems.map(([label, Icon, path]) => (
-            <button
-              className={activePath === path ? 'active' : ''}
-              key={label}
-              onClick={() => {
-                navigate(path)
-                setSidebarOpen(false)
-              }}
-              type="button"
-              title={label}
-            >
-              <Icon size={14} strokeWidth={1.8} />
-              <span>{label}</span>
-            </button>
-          ))}
-        </div>
         <div className="discipline-strip">
           <span>今日模式</span>
           <strong>标准短线</strong>
@@ -187,7 +140,7 @@ export default function App() {
               <Menu size={18} />
             </button>
             <div>
-              <span className="eyebrow">Market Discipline Desk</span>
+              <span className="eyebrow">交易纪律工作台</span>
               <h1>{activeLabel}</h1>
             </div>
           </div>
@@ -210,19 +163,9 @@ export default function App() {
             <Route path="/打板预期" element={<LimitExpectationWorkspace />} />
             <Route path="/持仓执行" element={<PositionExecutionWorkspace />} />
             <Route path="/复盘校准" element={<ReviewCalibrationWorkspace />} />
-            <Route path="/题材雷达" element={<Dashboard />} />
-            <Route path="/资金流证据" element={<FlowDesk />} />
-            <Route path="/涨停天梯" element={<LimitUpLadder />} />
-            <Route path="/信息差" element={<IntelDesk />} />
-            <Route path="/市场环境" element={<MarketEnv />} />
-            <Route path="/持仓快照" element={<Positions />} />
-            <Route path="/个股决策卡" element={<DecisionCard />} />
-            <Route path="/次日计划卡" element={<NextDayPlans />} />
-            <Route path="/交易日志" element={<TradeLog />} />
-            <Route path="/买入检查" element={<BuyCheck />} />
-            <Route path="/集中进攻" element={<ConcentratedAttack />} />
-            <Route path="/卖出执行卡" element={<SellPlan />} />
-            <Route path="/月度复盘" element={<MonthlyReview />} />
+            {Object.entries(oldPathToWorkspace).map(([path, destination]) => (
+              <Route key={path} path={path} element={<Navigate to={destination} replace />} />
+            ))}
             <Route path="*" element={<Navigate to="/今日决策" replace />} />
           </Routes>
         </Suspense>
@@ -235,7 +178,7 @@ function TodayDecisionWorkspace() {
   return (
     <WorkspacePage
       title="今日决策中心"
-      subtitle="Decision Command Center"
+      subtitle="盘中决策与风险处置"
       objective="先回答今天该做什么、什么不能做、哪些持仓必须处理，再进入具体模块。"
       allowed={['处理持仓风险', '按市场档位选择策略', '只执行有证据的计划']}
       forbidden={['风险未解除前扩大仓位', '无计划追高', '亏损仓补仓摊低成本']}
@@ -254,19 +197,16 @@ function StockSelectionWorkspace() {
   return (
     <WorkspacePage
       title="选股中心"
-      subtitle="Stock Selection Center"
-      objective="把题材、资金、涨停梯队、个股决策卡和买入检查统一放在选股流程内。"
+      subtitle="盘前发现与观察池管理"
+      objective="从主线、题材强度、资金与涨停质量中发现新标的，形成少而精的观察池。"
       allowed={['主线前排', '资金确认', '量价健康', '预期差不为负']}
       forbidden={['后排跟风', '数据质量不合格', '高位巨量滞涨', '板块资金持续转弱']}
       modules={[
-        { key: 'candidates', label: '候选池分层', description: 'A/B/C/D执行、等待、观察和排除池', Component: CandidatePool },
-        { key: 'strategies', label: '交易剧本', description: '可编辑、可版本化的策略模板', Component: StrategyTemplates },
-        { key: 'radar', label: '题材雷达', description: '主线强度、共振方向、核心股', Component: Dashboard },
-        { key: 'flow', label: '板块资金', description: '主力资金、热点题材、暗盘资金', Component: FlowDesk },
-        { key: 'ladder', label: '涨停天梯', description: '连板高度、涨停质量、题材聚类', Component: LimitUpLadder },
-        { key: 'card', label: '个股决策卡', description: '预期、实际、事件、动作约束', Component: DecisionCard },
-        { key: 'buy', label: '买入检查', description: '买入前纪律和风险校验', Component: BuyCheck },
-        { key: 'attack', label: '集中进攻', description: '进攻仓位和聚焦标的', Component: ConcentratedAttack },
+        { key: 'candidates', label: '自动观察池', description: '主线、涨停质量、资金与风险综合推荐', Component: CandidatePool },
+        { key: 'radar', label: '主线题材', description: '主线强度、共振方向、核心股', Component: Dashboard },
+        { key: 'flow', label: '资金证据', description: '板块资金拐点、排名与强弱', Component: FlowDesk },
+        { key: 'ladder', label: '涨停质量', description: '连板高度、封板质量、题材聚类', Component: LimitUpLadder },
+        { key: 'card', label: '个股研判', description: '预期、实际、事件与失效条件', Component: DecisionCard },
       ]}
     />
   )
@@ -276,15 +216,12 @@ function LimitExpectationWorkspace() {
   return (
     <WorkspacePage
       title="打板预期中心"
-      subtitle="Limit-up Expectation Center"
+      subtitle="盘前预期与条件单预案"
       objective="围绕涨停质量、次日合理预期、竞价验证、开盘确认和冲板/炸板风险组织打板决策。"
       allowed={['强预期且量价确认', '前排助攻充分', '封板质量可解释']}
       forbidden={['竞价严重低于预期仍买入', '炸板后无修复继续幻想', '弱预期不降仓']}
       modules={[
-        { key: 'plans', label: '次日计划卡', description: '盘前预期、竞价条件、三套剧本', Component: NextDayPlans },
-        { key: 'ladder', label: '昨日涨停质量', description: '连板梯队、封板质量、炸板次数', Component: LimitUpLadder },
-        { key: 'flow', label: '板块资金验证', description: '题材资金是否继续强化', Component: FlowDesk },
-        { key: 'sell', label: '卖出执行卡', description: '冲板失败、跌破VWAP、减仓退出', Component: SellPlan },
+        { key: 'plans', label: '预期与执行预案', description: '合理开盘、竞价验证、三套剧本和失效条件', Component: NextDayPlans },
       ]}
     />
   )
@@ -294,15 +231,12 @@ function PositionExecutionWorkspace() {
   return (
     <WorkspacePage
       title="持仓执行中心"
-      subtitle="Position Execution Center"
+      subtitle="盘中持仓与风险执行"
       objective="围绕原始买入逻辑、当前预期、利润保护、止损线、资金跷跷板和做T计划管理持仓。"
       allowed={['继续持有有证据', '按状态机减仓', '只在逻辑成立时做T']}
       forbidden={['预期证伪后补仓', '用做T掩盖止损', '利润保护失效仍等待回本']}
       modules={[
-        { key: 'positions', label: '持仓快照', description: '持仓、盈亏、执行状态机、做T入口', Component: Positions },
-        { key: 'card', label: '个股决策卡', description: '单票执行状态和证据时间线', Component: DecisionCard },
-        { key: 'sell', label: '卖出执行卡', description: '减仓、清仓、接回约束', Component: SellPlan },
-        { key: 'plans', label: '次日持仓计划', description: '持仓次日剧本与失效条件', Component: NextDayPlans },
+        { key: 'positions', label: '持仓与执行', description: '盈亏、状态机、止损、减仓和做T约束', Component: Positions },
       ]}
     />
   )
@@ -312,12 +246,13 @@ function ReviewCalibrationWorkspace() {
   return (
     <WorkspacePage
       title="复盘校准中心"
-      subtitle="Review Calibration Center"
+      subtitle="盘后复盘与规则校准"
       objective="先沉淀计划、执行、偏差和纪律记录；P2 再接入模型有效性统计和参数自动校准。"
       allowed={['记录真实执行', '复盘计划偏差', '统计纪律问题']}
       forbidden={['只复盘盈亏', '忽略未执行提醒', '用主观判断覆盖证据']}
       modules={[
         { key: 'replay', label: '历史回放', description: '单股盘中事件与操作建议时间线', Component: HistoricalReplay },
+        { key: 'strategies', label: '交易规则', description: '可编辑、可版本化的交易剧本', Component: StrategyTemplates },
         { key: 'calibration', label: '执行校准', description: '计划偏差、执行反馈、纪律缺口', Component: ReviewCalibration },
         { key: 'trades', label: '交易日志', description: '交易记录、深度复盘、执行原因', Component: TradeLog },
         { key: 'month', label: '月度复盘', description: '月度纪律、盈亏结构、改进建议', Component: MonthlyReview },

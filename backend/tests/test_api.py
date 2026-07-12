@@ -15,6 +15,45 @@ def test_market_sector_flow(client):
     assert isinstance(data["outflow"], list)
 
 
+def test_watchlist_recommendations_combine_theme_and_limit_quality(client, monkeypatch):
+    from datetime import datetime
+    from app.schemas.trading import (
+        LimitUpGroupOut, LimitUpLadderOut, LimitUpStockOut,
+        ThemeRadarItem, ThemeRadarOut, ThemeStockRole,
+    )
+    from app.services.market_data import MarketDataProvider
+
+    now = datetime.now()
+    theme = ThemeRadarItem(
+        name="机器人", theme_type="概念", stage="主升", stage_reason="资金共振",
+        score=92, rank=1, change_pct=4.2, net_inflow=18.6, main_inflow=12.1,
+        limit_up_count=8, stock_count=30, leader_names=["测试龙头"],
+        core_stocks=[ThemeStockRole(code="600001", name="测试龙头", role="龙头", change_pct=10, reason="前排")],
+        resonance_tags=["资金共振"], action="观察", risk="高位分歧",
+    )
+    radar = ThemeRadarOut(
+        source="测试题材源", updated_at=now, market_temperature="强",
+        strongest_theme=theme, resonance=[theme], themes=[theme], notes=[],
+    )
+    ladder = LimitUpLadderOut(
+        source="测试涨停源", trade_date="2026-07-12", updated_at=now,
+        groups=[LimitUpGroupOut(level=3, label="三连板", stocks=[LimitUpStockOut(
+            code="600001", name="测试龙头", turnover=12, break_count=0,
+            consecutive_limit_days=3, concepts=["机器人"],
+        )])], clusters=[], summary=[], notes=[],
+    )
+    monkeypatch.setattr(MarketDataProvider, "theme_radar", lambda self: radar)
+    monkeypatch.setattr(MarketDataProvider, "limit_up_ladder", lambda self: ladder)
+
+    response = client.get("/api/watchlist-recommendations")
+    assert response.status_code == 200
+    data = response.json()
+    assert data[0]["code"] == "600001"
+    assert data[0]["tier"] == "重点观察"
+    assert data[0]["limit_quality"] == "封板稳定、未炸板"
+    assert any("题材排名" in reason for reason in data[0]["reasons"])
+
+
 def test_intraday_collector_status(client):
     response = client.get("/api/intraday-collector/status")
 

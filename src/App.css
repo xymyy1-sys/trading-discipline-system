@@ -5172,3 +5172,10 @@ h3 {
 .replay-summary { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; margin-bottom: 12px; }.replay-summary.complete { border-color: var(--up); }.replay-summary span { color: var(--warn); }.replay-summary.complete span { color: var(--up); }
 .replay-checkpoints { display: flex; flex-wrap: wrap; gap: 7px; margin-bottom: 12px; }.replay-checkpoints span { padding: 6px 8px; border: 1px solid var(--down); border-radius: 6px; color: var(--down); }.replay-checkpoints span.matched { border-color: var(--up); color: var(--up); }
 .replay-timeline { display: grid; gap: 8px; }.replay-timeline article { display: grid; grid-template-columns: 80px 180px minmax(0, 1fr); gap: 10px; padding: 10px; border-left: 2px solid var(--accent); background: var(--panel); }.replay-timeline small { grid-column: 3; color: var(--ink-muted); }
+.error-msg { margin: 12px 0; padding: 11px 13px; border: 1px solid color-mix(in srgb, var(--down) 45%, var(--line)); border-radius: 7px; color: var(--down); background: color-mix(in srgb, var(--down) 7%, var(--panel)); }
+.candidate-existing-head { margin-top: 22px; }
+.condition-order-advice { display: grid; gap: 8px; margin: 16px 0; padding: 14px; border: 1px solid color-mix(in srgb, var(--warn) 55%, var(--line)); border-left: 4px solid var(--warn); border-radius: 8px; background: color-mix(in srgb, var(--warn) 7%, var(--panel)); }
+.condition-order-advice > div { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.condition-order-advice span, .condition-order-advice small { color: var(--ink-muted); }
+.condition-order-advice strong { color: var(--warn); font-size: 18px; }
+.condition-order-advice p { margin: 0; line-height: 1.65; }

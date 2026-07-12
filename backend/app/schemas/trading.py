@@ -492,6 +492,22 @@ class CandidateOut(BaseModel):
     updated_at: datetime | None = None
 
 
+class WatchlistRecommendationOut(BaseModel):
+    code: str
+    name: str
+    score: int
+    tier: str
+    theme: str = ""
+    role: str = ""
+    limit_level: int = 0
+    limit_quality: str = ""
+    fund_signal: str = ""
+    reasons: list[str] = Field(default_factory=list)
+    risks: list[str] = Field(default_factory=list)
+    source: str = ""
+    updated_at: datetime | None = None
+
+
 class AccountRiskIn(BaseModel):
     opening_asset: float | None = None
     current_asset: float | None = None

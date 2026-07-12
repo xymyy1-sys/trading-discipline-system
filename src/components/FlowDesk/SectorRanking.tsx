@@ -58,7 +58,7 @@ export default function SectorRanking({
                 {item.rank_change !== null && `排名${item.rank_change > 0 ? `↑${item.rank_change}` : item.rank_change < 0 ? `↓${Math.abs(item.rank_change)}` : '持平'}`}
                 {item.flow_event && ` · ${flowEventLabel[item.flow_event]}`}
                 {item.flow_pullback_pct !== null && item.flow_pullback_pct < 0 && ` ${item.flow_pullback_pct.toFixed(1)}%`}
-                {item.sector_vwap_reliable && ` · 板块${item.sector_below_vwap ? '跌破' : '站上'}VWAP`}
+                {item.sector_vwap_reliable && ` · 板块${item.sector_below_vwap ? '跌破' : '站上'}分时均价`}
               </span>
             )}
             <span className="rank-stats">
