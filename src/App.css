@@ -5278,6 +5278,7 @@ h3 {
 .trajectory-summary-latest strong { color: var(--ink); }
 .dark-stock-search { display: flex; align-items: center; gap: 8px; margin: 12px 0; padding: 10px 12px; max-width: 420px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); color: var(--ink-muted); }
 .dark-stock-search input { width: 100%; border: 0; outline: 0; background: transparent; color: var(--ink); font: inherit; }
+.candidate-category { display: inline-flex; width: fit-content; margin: 8px 0 3px; padding: 3px 8px; border-radius: 999px; background: #e8f3fb; color: #245b82; font-size: 12px; font-weight: 700; }
 
 .expectation-journey { margin: 18px 0; padding: 16px; border: 1px solid #b9d7ef; border-radius: 12px; background: linear-gradient(135deg, #f5fbff, #fff); }
 .expectation-journey-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; margin-bottom: 14px; }

@@ -455,6 +455,9 @@ class WatchlistEntry(Base):
     name: Mapped[str] = mapped_column(String(64), default="")
     status: Mapped[str] = mapped_column(String(16), default="active", index=True)
     source: Mapped[str] = mapped_column(String(16), default="manual")
+    snapshot_date: Mapped[str] = mapped_column(String(16), default="", index=True)
+    category: Mapped[str] = mapped_column(String(32), default="")
+    snapshot_rank: Mapped[int] = mapped_column(Integer, default=0)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc))
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
 

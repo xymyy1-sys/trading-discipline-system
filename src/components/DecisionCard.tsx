@@ -46,7 +46,7 @@ export default function DecisionCard({ mode = 'watchlist' }: { mode?: DecisionCa
   }
 
   useEffect(() => {
-    fetch(mode === 'holding' ? `${API_BASE}/api/holdings` : `${API_BASE}/api/watchlist-recommendations`)
+    const loadTargets = () => fetch(mode === 'holding' ? `${API_BASE}/api/holdings` : `${API_BASE}/api/watchlist-recommendations`)
       .then(r => r.json())
       .then((data: HoldingOut[] | WatchlistStock[]) => {
         if (mode === 'holding') setHoldings(data as HoldingOut[])
@@ -57,10 +57,14 @@ export default function DecisionCard({ mode = 'watchlist' }: { mode?: DecisionCa
         }
       })
       .catch(() => {})
+    loadTargets()
+    const syncWatchlist = () => { if (mode === 'watchlist') loadTargets() }
+    window.addEventListener('watchlist-updated', syncWatchlist)
     fetch(`${API_BASE}/api/expectation-rules`)
       .then(r => r.json())
       .then((data: ExpectationRule[]) => setRules(data))
       .catch(() => setRules([]))
+    return () => window.removeEventListener('watchlist-updated', syncWatchlist)
   }, [mode])
 
   const updateRule = (id: number, patch: Partial<ExpectationRule>) => {

@@ -523,6 +523,7 @@ class WatchlistRecommendationOut(BaseModel):
     reasons: list[str] = Field(default_factory=list)
     risks: list[str] = Field(default_factory=list)
     source: str = ""
+    category: str = ""
     updated_at: datetime | None = None
 
 

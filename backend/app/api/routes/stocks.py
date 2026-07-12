@@ -1,5 +1,5 @@
 from concurrent.futures import ThreadPoolExecutor, wait
-from datetime import datetime
+from datetime import date, datetime, timedelta
 import json
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -46,10 +46,29 @@ def watchlist_recommendations(db: Session = Depends(get_db)) -> list[WatchlistRe
     from app.services.market_data import MarketDataProvider
 
     provider = MarketDataProvider()
-    executor = ThreadPoolExecutor(max_workers=2)
+    def previous_trading_days(count: int) -> list[str]:
+        result: list[str] = []
+        cursor = date.today()
+        while len(result) < count:
+            cursor -= timedelta(days=1)
+            if cursor.weekday() < 5:
+                result.append(cursor.isoformat())
+        return result
+
+    recent_dates = previous_trading_days(5)
+    def load_ladder(value: str):
+        try:
+            return provider.limit_up_ladder(value)
+        except TypeError:
+            # 兼容测试替身及只实现默认日期的旧数据提供器。
+            return provider.limit_up_ladder()
+    executor = ThreadPoolExecutor(max_workers=8)
     theme_future = executor.submit(provider.theme_radar)
-    ladder_future = executor.submit(provider.limit_up_ladder)
-    done, pending = wait((theme_future, ladder_future), timeout=22)
+    ladder_future = executor.submit(load_ladder, recent_dates[0])
+    historical_futures = {value: executor.submit(load_ladder, value) for value in recent_dates[1:]}
+    broken_future = executor.submit(provider.broken_limit_pool, recent_dates[0])
+    all_futures = (theme_future, ladder_future, broken_future, *historical_futures.values())
+    done, pending = wait(all_futures, timeout=22)
     try:
         radar = theme_future.result() if theme_future in done else None
     except Exception:
@@ -58,6 +77,18 @@ def watchlist_recommendations(db: Session = Depends(get_db)) -> list[WatchlistRe
         ladder = ladder_future.result() if ladder_future in done else None
     except Exception:
         ladder = None
+    historical_ladders = []
+    for value, future in historical_futures.items():
+        if future not in done:
+            continue
+        try:
+            historical_ladders.append((value, future.result()))
+        except Exception:
+            continue
+    try:
+        broken_stocks = broken_future.result() if broken_future in done else []
+    except Exception:
+        broken_stocks = []
     for future in pending:
         future.cancel()
     executor.shutdown(wait=False, cancel_futures=True)
@@ -137,7 +168,43 @@ def watchlist_recommendations(db: Session = Depends(get_db)) -> list[WatchlistRe
                 row["risks"].append(f"换手率{stock.turnover:.1f}%偏高")
             row["limit_score"] = max(row["limit_score"], quality_score)
             row["reasons"].append(f"{group.label}，{row['limit_quality']}")
+            row["category"] = "昨日涨停承接观察"
             row["sources"].add(ladder_source)
+
+    for history_date, history_ladder in historical_ladders:
+        days_ago = recent_dates.index(history_date) + 1 if history_date in recent_dates else 2
+        for group in history_ladder.groups:
+            for stock in group.stocks:
+                if not stock.code or stock.code in rows and rows[stock.code].get("limit_level", 0) > 0:
+                    continue
+                row = rows.setdefault(stock.code, {
+                    "code": stock.code, "name": stock.name, "theme_score": 0, "limit_score": 0,
+                    "theme": (stock.concepts[0] if stock.concepts else stock.industry), "role": "近期涨停结构观察",
+                    "limit_level": 0, "limit_quality": "近期涨停后承接待验证", "fund_signal": "",
+                    "current_price": stock.price, "sealed_amount": 0.0, "turnover": stock.turnover,
+                    "break_count": stock.break_count, "first_limit_time": "", "last_limit_time": "",
+                    "reasons": [], "risks": [], "sources": set(),
+                })
+                row["limit_score"] = max(row["limit_score"], max(8, 24 - days_ago * 4 + group.level * 2))
+                row["theme_score"] = max(row["theme_score"], 38)
+                row["category"] = "近几日涨停／炸板承接观察"
+                row["reasons"].append(f"{history_date} 曾涨停，观察横盘支撑、回踩承接及再次选择方向")
+                row["sources"].add(history_ladder.source)
+
+    for stock in broken_stocks:
+        if not stock.code or stock.code in rows and rows[stock.code].get("limit_level", 0) > 0:
+            continue
+        row = rows.setdefault(stock.code, {
+            "code": stock.code, "name": stock.name, "theme_score": 38, "limit_score": 22,
+            "theme": (stock.concepts[0] if stock.concepts else stock.industry), "role": "炸板承接观察",
+            "limit_level": 0, "limit_quality": f"冲板未封，炸板{stock.break_count}次", "fund_signal": "",
+            "current_price": stock.price, "sealed_amount": 0.0, "turnover": stock.turnover,
+            "break_count": stock.break_count, "first_limit_time": stock.first_limit_time, "last_limit_time": "",
+            "reasons": [], "risks": [], "sources": set(),
+        })
+        row["category"] = "近几日涨停／炸板承接观察"
+        row["reasons"].append(f"昨日曾冲击涨停但未封住，当前涨幅{stock.change_pct:+.2f}%，重点验证炸板后的支撑与承接")
+        row["sources"].add("东方财富炸板池")
 
     codes = list(rows)
     for entry in overrides.values():
@@ -147,7 +214,7 @@ def watchlist_recommendations(db: Session = Depends(get_db)) -> list[WatchlistRe
                 "theme": "手动观察", "role": "用户加入", "limit_level": 0, "limit_quality": "等待行情验证",
                 "fund_signal": "", "current_price": 0.0, "sealed_amount": 0.0, "turnover": 0.0,
                 "break_count": 0, "first_limit_time": "", "last_limit_time": "",
-                "reasons": ["用户手动加入观察池"], "risks": [], "sources": {"用户维护"},
+                "reasons": ["用户手动加入观察池"], "risks": [], "sources": {"用户维护"}, "category": "手动自选",
             }
     codes = list(rows)
     expectations: dict[str, ExpectationSnapshot] = {}
@@ -165,10 +232,24 @@ def watchlist_recommendations(db: Session = Depends(get_db)) -> list[WatchlistRe
     for row in rows.values():
         if overrides.get(row["code"]) and overrides[row["code"]].status == "excluded":
             continue
+        if overrides.get(row["code"]) and overrides[row["code"]].status == "active" and overrides[row["code"]].source == "manual":
+            row["category"] = "手动自选"
+            row["reasons"].insert(0, "用户手动加入观察池")
         score_value = row["theme_score"] + row["limit_score"]
         expectation = expectations.get(row["code"])
         volume = volumes.get(row["code"])
         plan = plans.get(row["code"])
+        if row.get("category") == "近几日涨停／炸板承接观察" and volume:
+            support = max(float(volume.ma20 or 0), float(volume.vwap or 0))
+            if support > 0 and float(volume.price or 0) >= support * 0.98:
+                score_value += 10
+                row["reasons"].append(f"现价仍在重要支撑{support:.2f}附近或上方，尚未有效跌破")
+            elif support > 0:
+                score_value -= 18
+                row["risks"].append(f"现价已跌破重要支撑{support:.2f}，暂不作为横盘承接候选")
+            if volume.high_drawdown <= 4 and volume.price_vs_vwap >= -1.5:
+                score_value += 8
+                row["reasons"].append("回撤受控且未明显远离分时均价，炸板/涨停后仍有承接")
         missing_conditions: list[str] = []
         inferred_expectation, inferred_gap, inference_reasons = _infer_limit_up_expectation(row)
         row["reasons"].extend(inference_reasons)
@@ -220,23 +301,67 @@ def watchlist_recommendations(db: Session = Depends(get_db)) -> list[WatchlistRe
             missing_conditions=missing_conditions,
             reasons=list(dict.fromkeys(row["reasons"])), risks=list(dict.fromkeys(row["risks"])),
             source=" + ".join(sorted(row["sources"])),
+            category=str(row.get("category") or "主线题材观察"),
             updated_at=max([value for value in (radar.updated_at if radar else None, ladder.updated_at if ladder else None) if value is not None], default=None),
         ))
-    return sorted(outputs, key=lambda item: (-item.score, item.code))[:10]
+    output_by_code = {item.code: item for item in outputs}
+    snapshot_date = str(getattr(ladder, "trade_date", "") or date.today().isoformat())
+    today_auto = db.query(WatchlistEntry).filter(
+        WatchlistEntry.source == "auto",
+        WatchlistEntry.snapshot_date == snapshot_date,
+    ).all()
+    if not today_auto:
+        ranked = [item for item in sorted(outputs, key=lambda item: (-item.score, item.code)) if item.category in {"昨日涨停承接观察", "近几日涨停／炸板承接观察"}]
+        first = [item for item in ranked if item.category == "昨日涨停承接观察"][:5]
+        second = [item for item in ranked if item.category == "近几日涨停／炸板承接观察"][:5]
+        selected = (first + second)[:10]
+        if len(selected) < 10:
+            selected_codes = {item.code for item in selected}
+            selected.extend(item for item in ranked if item.code not in selected_codes and item not in selected)
+            selected = selected[:10]
+        for rank, item in enumerate(selected, start=1):
+            existing = overrides.get(item.code)
+            if existing and existing.status == "excluded":
+                continue
+            if existing is None:
+                existing = WatchlistEntry(code=item.code, name=item.name, source="auto")
+            if existing.source != "manual":
+                existing.source = "auto"
+                existing.status = "active"
+                existing.snapshot_date = snapshot_date
+                existing.category = item.category
+                existing.snapshot_rank = rank
+                db.add(existing)
+        db.commit()
+        today_auto = db.query(WatchlistEntry).filter(WatchlistEntry.source == "auto", WatchlistEntry.snapshot_date == snapshot_date).all()
+
+    active_entries = db.query(WatchlistEntry).filter(WatchlistEntry.status == "active").all()
+    active_codes = {item.code for item in active_entries if item.source == "manual" or item.snapshot_date == snapshot_date}
+    return sorted(
+        [output_by_code[code] for code in active_codes if code in output_by_code],
+        key=lambda item: next((entry.snapshot_rank for entry in active_entries if entry.code == item.code and entry.snapshot_rank), 999),
+    )
 
 
 @router.post("/watchlist", response_model=WatchlistEntryOut)
 def add_watchlist_entry(payload: WatchlistEntryIn, db: Session = Depends(get_db)) -> WatchlistEntryOut:
     code = payload.code.strip()
-    if not code:
-        raise HTTPException(status_code=422, detail="股票代码不能为空")
+    if len(code) != 6 or not code.isdigit():
+        raise HTTPException(status_code=422, detail="请输入6位股票代码")
+    resolved_name = payload.name.strip()
+    if not resolved_name:
+        try:
+            resolved_name = str(quote_for_code(code).get("name") or "").strip()
+        except Exception:
+            resolved_name = ""
     row = db.query(WatchlistEntry).filter(WatchlistEntry.code == code).first()
     if row is None:
-        row = WatchlistEntry(code=code, name=payload.name.strip() or code, status="active", source="manual")
+        row = WatchlistEntry(code=code, name=resolved_name or code, status="active", source="manual", category="手动自选")
     else:
-        row.name = payload.name.strip() or row.name or code
+        row.name = resolved_name or row.name or code
         row.status = "active"
         row.source = "manual"
+        row.category = "手动自选"
         row.updated_at = datetime.now()
     db.add(row); db.commit(); db.refresh(row)
     return WatchlistEntryOut(code=row.code, name=row.name, status=row.status, source=row.source)

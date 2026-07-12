@@ -1239,6 +1239,39 @@ class MarketDataProvider:
             raise ValueError("empty limit-up pool")
         return rows
 
+    def broken_limit_pool(self, trade_date: str) -> list[LimitUpStockOut]:
+        """Return real Eastmoney failed-limit rows for post-breakout support analysis."""
+        return [self._build_limit_up_stock(item) for item in self._fetch_broken_limit_pool_raw(trade_date.replace("-", ""))]
+
+    def _fetch_broken_limit_pool_raw(self, date_text: str) -> list[dict[str, Any]]:
+        resp = requests.get(
+            "https://push2ex.eastmoney.com/getTopicZBPool",
+            params={
+                "ut": "7eea3edcaed734bea9cbfc24409ed989", "dpt": "wz.ztzt",
+                "Pageindex": 0, "pagesize": 10000, "sort": "fbt:asc", "date": date_text,
+                "_": int(datetime.now().timestamp() * 1000),
+            },
+            headers={"User-Agent": "Mozilla/5.0", "Referer": "https://quote.eastmoney.com/ztb/detail"},
+            timeout=6,
+        )
+        resp.raise_for_status()
+        pool = (resp.json().get("data") or {}).get("pool") or []
+        results: list[dict[str, Any]] = []
+        for row in pool:
+            if not isinstance(row, dict):
+                continue
+            stats = row.get("zttj") if isinstance(row.get("zttj"), dict) else {}
+            results.append({
+                "代码": str(row.get("c") or ""), "名称": str(row.get("n") or ""),
+                "最新价": round(float(row.get("p") or 0) / 1000, 3),
+                "涨跌幅": float(row.get("zdp") or 0), "成交额": float(row.get("amount") or 0),
+                "换手率": float(row.get("hs") or 0), "封板资金": 0,
+                "首次封板时间": str(row.get("fbt") or ""), "最后封板时间": "",
+                "炸板次数": max(1, int(row.get("zbc") or 1)),
+                "连板数": max(1, int(stats.get("ct") or 1)), "所属行业": str(row.get("hybk") or ""),
+            })
+        return results
+
     def _fetch_direct_limit_up_pool_raw(self, date_text: str) -> list[dict[str, Any]]:
         resp = requests.get(
             "https://push2ex.eastmoney.com/getTopicZTPool",
