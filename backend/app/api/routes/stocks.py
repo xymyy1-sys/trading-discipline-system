@@ -29,9 +29,16 @@ from app.schemas.trading import (
     StockDecisionCardOut,
     VolumePriceSnapshotOut,
     CandidateOut,
+    ReplayReportOut,
 )
 
 router = APIRouter()
+
+
+@router.get("/replay/{code}", response_model=ReplayReportOut)
+def replay_stock(code: str, trade_date: str, db: Session = Depends(get_db)) -> ReplayReportOut:
+    from app.services.replay_engine import ReplayEngine
+    return ReplayEngine(db).replay(code, trade_date)
 
 
 @router.get("/candidates", response_model=list[CandidateOut])

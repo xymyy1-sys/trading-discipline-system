@@ -276,3 +276,18 @@ def test_strategy_templates_seed_and_version(client):
     assert updated.status_code == 200
     assert updated.json()["version"] == template["version"] + 1
     assert updated.json()["position_limit"] == 0.3
+
+
+def test_historical_replay_orders_evidence_frames(client, db_session):
+    from datetime import datetime, timedelta
+    from app.models.trading import ActionRecommendation, IntradayEvidenceEvent
+
+    start = datetime(2026, 7, 10, 9, 30)
+    db_session.add(IntradayEvidenceEvent(trade_date="2026-07-10", captured_at=start, target_code="600123", target_name="replay", event_type="VWAP_BROKEN", evidence_json='["broken"]'))
+    db_session.add(ActionRecommendation(trade_date="2026-07-10", code="600123", name="replay", created_at=start + timedelta(minutes=5), level="REDUCE", state="REDUCE_REQUIRED", action="reduce 25%"))
+    db_session.commit()
+    response = client.get("/api/replay/600123?trade_date=2026-07-10")
+    assert response.status_code == 200
+    report = response.json()
+    assert report["complete"] is True
+    assert [frame["frame_type"] for frame in report["frames"]] == ["event", "recommendation"]

@@ -39,6 +39,7 @@ const MonthlyReview = lazy(() => import('./components/MonthlyReview'))
 const ReviewCalibration = lazy(() => import('./components/ReviewCalibration'))
 const CandidatePool = lazy(() => import('./components/CandidatePool'))
 const StrategyTemplates = lazy(() => import('./components/StrategyTemplates'))
+const HistoricalReplay = lazy(() => import('./components/HistoricalReplay'))
 
 const navItems = [
   ['今日决策', Activity, '/今日决策'],
@@ -316,6 +317,7 @@ function ReviewCalibrationWorkspace() {
       allowed={['记录真实执行', '复盘计划偏差', '统计纪律问题']}
       forbidden={['只复盘盈亏', '忽略未执行提醒', '用主观判断覆盖证据']}
       modules={[
+        { key: 'replay', label: '历史回放', description: '单股盘中事件与操作建议时间线', Component: HistoricalReplay },
         { key: 'calibration', label: '执行校准', description: '计划偏差、执行反馈、纪律缺口', Component: ReviewCalibration },
         { key: 'trades', label: '交易日志', description: '交易记录、深度复盘、执行原因', Component: TradeLog },
         { key: 'month', label: '月度复盘', description: '月度纪律、盈亏结构、改进建议', Component: MonthlyReview },

@@ -2,9 +2,7 @@
 
 Status: V2 first-phase foundation completed, P0 hardening in progress.
 
-Deferred by request:
-- Historical market replay.
-- Changdian Technology 600584 dedicated replay report.
+Historical replay is implemented against persisted evidence. A complete 600584 acceptance pass still requires the target trading-day evidence dataset to be present.
 
 ## Completed
 
@@ -29,6 +27,8 @@ Deferred by request:
 - Added `/api/market/capital-rotation` with per-holding confidence and confirmation details.
 - Added 12 seeded, editable, versioned trading strategy templates with complete environment, expectation, auction, volume-price, position, stop, invalidation, holding, and forbidden-action fields.
 - Stock Selection workspace includes a strategy-template editor and versioned save workflow.
+- Added `ReplayEngine` and `/api/replay/{code}` to merge historical expectation, volume-price, event, state-transition, and recommendation evidence into a time-ordered replay.
+- Added 600584 acceptance checkpoints and a visual replay workspace under Review Calibration.
 
 - Background intraday collector with status and manual run APIs.
 - Intraday collection run records.

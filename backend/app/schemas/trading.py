@@ -479,6 +479,35 @@ class StrategyTemplateOut(StrategyTemplateIn):
     updated_at: datetime
 
 
+class ReplayFrame(BaseModel):
+    timestamp: datetime
+    frame_type: str
+    state: str = ""
+    action: str = ""
+    price: float = 0
+    vwap: float = 0
+    data_quality: str = ""
+    evidence: list[str] = Field(default_factory=list)
+
+
+class ReplayCheckpoint(BaseModel):
+    expected_time: str
+    expected_signal: str
+    matched: bool = False
+    matched_time: datetime | None = None
+
+
+class ReplayReportOut(BaseModel):
+    code: str
+    name: str = ""
+    trade_date: str
+    generated_at: datetime
+    complete: bool = False
+    frames: list[ReplayFrame] = Field(default_factory=list)
+    checkpoints: list[ReplayCheckpoint] = Field(default_factory=list)
+    summary: list[str] = Field(default_factory=list)
+
+
 class StopLevelsOut(BaseModel):
     holding_id: int
     code: str
