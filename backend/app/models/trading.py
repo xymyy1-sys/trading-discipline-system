@@ -385,6 +385,23 @@ class VolumePriceSnapshot(Base):
     counter_evidence_json: Mapped[str] = mapped_column(Text, default="[]")
 
 
+class ExpectationRule(Base):
+    __tablename__ = "expectation_rules"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    script_type: Mapped[str] = mapped_column(String(32), index=True)
+    stage: Mapped[str] = mapped_column(String(32), default="*", index=True)
+    base_expectation: Mapped[str] = mapped_column(String(32), index=True)
+    display_name: Mapped[str] = mapped_column(String(64), default="")
+    expected_open_low: Mapped[float] = mapped_column(Float)
+    expected_open_high: Mapped[float] = mapped_column(Float)
+    outperform_threshold: Mapped[float] = mapped_column(Float)
+    underperform_threshold: Mapped[float] = mapped_column(Float)
+    severe_underperform_threshold: Mapped[float] = mapped_column(Float)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
+
+
 class TTradePlan(Base):
     __tablename__ = "t_trade_plans"
 

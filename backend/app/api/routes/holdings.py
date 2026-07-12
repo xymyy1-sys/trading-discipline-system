@@ -437,6 +437,16 @@ def get_holding_t_eligibility(
         raise HTTPException(status_code=404, detail="holding not found")
     return build_t_eligibility(db, holding)
 
+
+@router.get("/t-plans", response_model=list[TTradePlanOut])
+def list_t_plans(active_only: bool = False, db: Session = Depends(get_db)) -> list[TTradePlanOut]:
+    query = db.query(TTradePlan)
+    if active_only:
+        query = query.filter(TTradePlan.status.in_(("planned", "sold_wait_buyback", "partially_bought_back")))
+    rows = query.order_by(TTradePlan.updated_at.desc(), TTradePlan.id.desc()).limit(200).all()
+    from app.services.t_trading_engine import _t_plan_out
+    return [_t_plan_out(row) for row in rows]
+
 @router.post("/holdings/{holding_id}/t-plan", response_model=TTradePlanOut)
 def create_holding_t_plan(
     holding_id: int,

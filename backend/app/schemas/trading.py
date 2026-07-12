@@ -285,6 +285,27 @@ class ExpectationSnapshotUpdate(BaseModel):
     suggestion: str | None = None
 
 
+class ExpectationRuleIn(BaseModel):
+    script_type: str = "default"
+    stage: str = "*"
+    base_expectation: str
+    display_name: str = ""
+    expected_open_low: float
+    expected_open_high: float
+    outperform_threshold: float
+    underperform_threshold: float
+    severe_underperform_threshold: float
+    enabled: bool = True
+
+
+class ExpectationRuleOut(ExpectationRuleIn):
+    id: int
+    updated_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
 class VolumePriceSnapshotOut(BaseModel):
     id: int | None = None
     trade_date: str

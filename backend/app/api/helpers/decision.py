@@ -11,7 +11,7 @@ from app.api.helpers.holdings_calc import _find_holding_by_code
 from app.api.helpers.quotes import _latest_a_share_quotes, _quote_lookup_code, _safe_float
 from app.api.helpers.seesaw import _holding_theme_profile
 from app.api.helpers.volume_price import build_volume_price_snapshot
-from app.models.trading import ExpectationSnapshot, Holding, IntradayEvidenceEvent, TTradePlan
+from app.models.trading import ExpectationRule, ExpectationSnapshot, Holding, IntradayEvidenceEvent, TTradePlan
 from app.schemas.trading import (
     ExpectationSnapshotIn,
     ExpectationSnapshotOut,
@@ -127,6 +127,57 @@ def quote_for_code(code: str) -> dict[str, Any]:
     return quotes.get(_quote_lookup_code(code, quotes), {})
 
 
+EXPECTATION_DEFAULTS = {
+    "EXTREME_STRONG": (5.0, 9.5),
+    "STRONG": (2.0, 5.5),
+    "NEUTRAL": (-1.0, 2.0),
+    "WEAK": (-4.0, 0.5),
+    "REPAIR": (-2.0, 2.5),
+    "EBB": (-6.0, -1.0),
+}
+
+
+def infer_script_type(base_hint: str) -> str:
+    if any(value in base_hint for value in ("打板", "冲板", "首板", "连板")):
+        return "breakout"
+    if any(value in base_hint for value in ("趋势", "容量", "低吸", "突破")):
+        return "trend"
+    return "default"
+
+
+def ensure_expectation_rules(db: Session) -> list[ExpectationRule]:
+    if db.query(ExpectationRule).count() == 0:
+        for base, (low, high) in EXPECTATION_DEFAULTS.items():
+            db.add(ExpectationRule(
+                script_type="default",
+                stage="*",
+                base_expectation=base,
+                display_name=f"默认 {base}",
+                expected_open_low=low,
+                expected_open_high=high,
+                outperform_threshold=high + 1.0,
+                underperform_threshold=low - 1.0,
+                severe_underperform_threshold=min(low - 3.0, -3.0),
+                enabled=True,
+            ))
+        db.commit()
+    return db.query(ExpectationRule).order_by(ExpectationRule.script_type, ExpectationRule.stage, ExpectationRule.base_expectation).all()
+
+
+def expectation_rule_for(db: Session, script_type: str, stage: str, base_expectation: str) -> ExpectationRule | None:
+    ensure_expectation_rules(db)
+    for candidate_script, candidate_stage in ((script_type, stage), (script_type, "*"), ("default", stage), ("default", "*")):
+        row = db.query(ExpectationRule).filter(
+            ExpectationRule.script_type == candidate_script,
+            ExpectationRule.stage == candidate_stage,
+            ExpectationRule.base_expectation == base_expectation,
+            ExpectationRule.enabled.is_(True),
+        ).first()
+        if row:
+            return row
+    return None
+
+
 def build_expectation_snapshot(
     db: Session,
     code: str,
@@ -156,20 +207,17 @@ def build_expectation_snapshot(
     if any(key in base_hint for key in ("退潮", "衰退", "兑现", "禁止")):
         base_expectation = "EBB"
 
-    expected_low, expected_high = (-1.0, 2.0)
-    if base_expectation == "EXTREME_STRONG":
-        expected_low, expected_high = (5.0, 9.5)
-    elif base_expectation == "STRONG":
-        expected_low, expected_high = (2.0, 5.5)
-    elif base_expectation == "WEAK":
-        expected_low, expected_high = (-4.0, 0.5)
-    elif base_expectation == "REPAIR":
-        expected_low, expected_high = (-2.0, 2.5)
-    elif base_expectation == "EBB":
-        expected_low, expected_high = (-6.0, -1.0)
+    expected_low, expected_high = EXPECTATION_DEFAULTS[base_expectation]
     outperform = expected_high + 1.0
     underperform = expected_low - 1.0
     severe_under = min(underperform - 2.0, -3.0)
+    rule = expectation_rule_for(db, infer_script_type(base_hint), stage, base_expectation)
+    if rule:
+        expected_low = rule.expected_open_low
+        expected_high = rule.expected_open_high
+        outperform = rule.outperform_threshold
+        underperform = rule.underperform_threshold
+        severe_under = rule.severe_underperform_threshold
 
     open_score = 0
     evidence: list[str] = []

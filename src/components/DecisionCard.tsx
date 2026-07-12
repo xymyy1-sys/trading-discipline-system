@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react'
 import { RefreshCcw, Search } from 'lucide-react'
 import { API_BASE } from '../api'
 
-import type { HoldingOut, StockDecisionCard } from '../types'
+import type { ExpectationRule, HoldingOut, StockDecisionCard } from '../types'
 
 export default function DecisionCard() {
   const [code, setCode] = useState('')
@@ -10,6 +10,8 @@ export default function DecisionCard() {
   const [holdings, setHoldings] = useState<HoldingOut[]>([])
   const [loading, setLoading] = useState(false)
   const [message, setMessage] = useState('')
+  const [rules, setRules] = useState<ExpectationRule[]>([])
+  const [showRules, setShowRules] = useState(false)
 
   const loadCard = (target = code) => {
     const normalized = target.trim()
@@ -43,7 +45,33 @@ export default function DecisionCard() {
         }
       })
       .catch(() => {})
+    fetch(`${API_BASE}/api/expectation-rules`)
+      .then(r => r.json())
+      .then((data: ExpectationRule[]) => setRules(data))
+      .catch(() => setRules([]))
   }, [])
+
+  const updateRule = (id: number, patch: Partial<ExpectationRule>) => {
+    setRules(current => current.map(rule => rule.id === id ? { ...rule, ...patch } : rule))
+  }
+
+  const saveRule = (rule: ExpectationRule) => {
+    setMessage('')
+    fetch(`${API_BASE}/api/expectation-rules`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(rule),
+    })
+      .then(async response => {
+        if (!response.ok) throw new Error((await response.json()).detail || '阈值保存失败')
+        return response.json()
+      })
+      .then((saved: ExpectationRule) => {
+        updateRule(saved.id, saved)
+        setMessage(`${saved.display_name || saved.base_expectation} 阈值已保存`)
+      })
+      .catch(error => setMessage(error instanceof Error ? error.message : '阈值保存失败'))
+  }
 
   return (
     <section className="decision-page">
@@ -61,6 +89,26 @@ export default function DecisionCard() {
         </div>
       </header>
       {message && <p className="refresh-note">{message}</p>}
+
+      <section className="panel expectation-rule-panel">
+        <div className="selected-theme-head">
+          <div><strong>预期阈值模板</strong><span>可按交易剧本、阶段和基础预期覆盖默认开盘区间。</span></div>
+          <button className="refresh-btn inline" type="button" onClick={() => setShowRules(value => !value)}>{showRules ? '收起' : '编辑阈值'}</button>
+        </div>
+        {showRules && <div className="expectation-rule-grid">
+          {rules.map(rule => (
+            <article key={rule.id} className="expectation-rule-card">
+              <header><b>{rule.display_name || rule.base_expectation}</b><span>{rule.script_type} · {rule.stage}</span></header>
+              <label>合理低值<input type="number" step="0.1" value={rule.expected_open_low} onChange={e => updateRule(rule.id, { expected_open_low: Number(e.target.value) })} /></label>
+              <label>合理高值<input type="number" step="0.1" value={rule.expected_open_high} onChange={e => updateRule(rule.id, { expected_open_high: Number(e.target.value) })} /></label>
+              <label>超预期<input type="number" step="0.1" value={rule.outperform_threshold} onChange={e => updateRule(rule.id, { outperform_threshold: Number(e.target.value) })} /></label>
+              <label>低于预期<input type="number" step="0.1" value={rule.underperform_threshold} onChange={e => updateRule(rule.id, { underperform_threshold: Number(e.target.value) })} /></label>
+              <label>严重低于<input type="number" step="0.1" value={rule.severe_underperform_threshold} onChange={e => updateRule(rule.id, { severe_underperform_threshold: Number(e.target.value) })} /></label>
+              <button type="button" onClick={() => saveRule(rule)}>保存</button>
+            </article>
+          ))}
+        </div>}
+      </section>
 
       {holdings.length > 0 && (
         <div className="decision-holding-strip">

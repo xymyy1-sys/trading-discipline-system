@@ -3,7 +3,7 @@ from types import SimpleNamespace
 from app.api.helpers.decision import build_expectation_snapshot, build_t_eligibility, create_t_plan
 from app.api.helpers.plan_calc import _default_next_day_plan, refresh_limit_expectation_stage
 from app.api.helpers.volume_price import build_volume_price_snapshot
-from app.models.trading import Holding, TTradePlan
+from app.models.trading import ExpectationRule, Holding, TTradePlan
 from app.schemas.trading import TTradePlanUpdate
 from app.services.t_trading_engine import update_t_plan
 
@@ -23,6 +23,30 @@ def _execution_plan(db_session):
     db_session.commit()
     db_session.refresh(plan)
     return plan
+
+
+def test_expectation_snapshot_uses_editable_threshold_rule(db_session):
+    db_session.add(ExpectationRule(
+        script_type="default",
+        stage="*",
+        base_expectation="STRONG",
+        display_name="custom strong",
+        expected_open_low=3,
+        expected_open_high=6,
+        outperform_threshold=7,
+        underperform_threshold=2,
+        severe_underperform_threshold=0,
+        enabled=True,
+    ))
+    db_session.commit()
+    snapshot = build_expectation_snapshot(
+        db_session,
+        "600101",
+        quote={"price": 10.3, "prev_close": 10, "open": 10.3, "change_pct": 3},
+        base_hint="强预期 主线前排",
+    )
+    assert snapshot.expected_open_low == 3
+    assert snapshot.outperform_threshold == 7
 
 
 def test_t_execution_feedback_enforces_quantity_guardrail(db_session):

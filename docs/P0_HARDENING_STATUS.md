@@ -19,6 +19,8 @@ Deferred by request:
   - Deployment fails closed when `AUTH_PASSWORD` or `AUTH_SECRET` is missing or weak.
 - SSE recovery UX now records interruptions, automatic recovery time, and recovery count in the Today Decision workspace.
 - T execution feedback now enforces guarded quantities and a one-way lifecycle: planned, sold waiting buyback, partial buyback, completed, or permanent reduction.
+- Positions UI now loads active T plans and records guarded sell, cumulative buyback, and permanent-reduction feedback.
+- Added editable expectation threshold rules scoped by script type, stage, and base expectation, with an editor in the stock decision workspace.
 
 - Background intraday collector with status and manual run APIs.
 - Intraday collection run records.
@@ -80,8 +82,6 @@ Deferred by request:
 - Continue minute-bar production monitoring: retries/backoff metrics, provider health history, and alternate provider support beyond Eastmoney.
 - Strengthen cross-sector migration scoring with original theme outflow, new theme inflow, stock weakening, and leader-switch evidence.
 - Add a front-end SSE connection health indicator and recovery notification UX beyond the current event list.
-- Continue deeper TTradingEngine work: positive/reverse T execution feedback and UI guardrails.
-- Continue expectation transition UI polish and editable thresholds by script type.
 - Add formal acceptance report exports for SSE demo, full single-stock intraday timeline, and T+1 validation.
 
 ## Latest Validation Commands

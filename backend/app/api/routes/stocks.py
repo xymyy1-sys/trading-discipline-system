@@ -13,14 +13,17 @@ from app.api.helpers.decision import (
     decision_card,
     quote_for_code,
     update_expectation_snapshot,
+    ensure_expectation_rules,
 )
 from app.api.helpers.volume_price import build_volume_price_snapshot
 from app.core.database import get_db
-from app.models.trading import ExpectationSnapshot, IntradayEvidenceEvent, PositionExecutionState
+from app.models.trading import ExpectationRule, ExpectationSnapshot, IntradayEvidenceEvent, PositionExecutionState
 from app.schemas.trading import (
     ExpectationSnapshotIn,
     ExpectationSnapshotOut,
     ExpectationSnapshotUpdate,
+    ExpectationRuleIn,
+    ExpectationRuleOut,
     IntradayEvidenceEventOut,
     IntradayReviewOut,
     StockDecisionCardOut,
@@ -28,6 +31,31 @@ from app.schemas.trading import (
 )
 
 router = APIRouter()
+
+
+@router.get("/expectation-rules", response_model=list[ExpectationRuleOut])
+def get_expectation_rules(db: Session = Depends(get_db)) -> list[ExpectationRule]:
+    return ensure_expectation_rules(db)
+
+
+@router.post("/expectation-rules", response_model=ExpectationRuleOut)
+def upsert_expectation_rule(payload: ExpectationRuleIn, db: Session = Depends(get_db)) -> ExpectationRule:
+    if not (payload.severe_underperform_threshold <= payload.underperform_threshold < payload.expected_open_low <= payload.expected_open_high < payload.outperform_threshold):
+        raise HTTPException(status_code=422, detail="expectation thresholds must be strictly ordered")
+    row = db.query(ExpectationRule).filter(
+        ExpectationRule.script_type == payload.script_type,
+        ExpectationRule.stage == payload.stage,
+        ExpectationRule.base_expectation == payload.base_expectation,
+    ).first()
+    if row is None:
+        row = ExpectationRule(**payload.model_dump())
+        db.add(row)
+    else:
+        for key, value in payload.model_dump().items():
+            setattr(row, key, value)
+    db.commit()
+    db.refresh(row)
+    return row
 
 
 @router.get("/stocks/{code}/decision-card", response_model=StockDecisionCardOut)

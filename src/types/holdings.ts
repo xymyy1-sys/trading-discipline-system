@@ -245,6 +245,21 @@ export interface ExpectationSnapshot {
   created_at: string;
 }
 
+export interface ExpectationRule {
+  id: number;
+  script_type: string;
+  stage: string;
+  base_expectation: string;
+  display_name: string;
+  expected_open_low: number;
+  expected_open_high: number;
+  outperform_threshold: number;
+  underperform_threshold: number;
+  severe_underperform_threshold: number;
+  enabled: boolean;
+  updated_at: string;
+}
+
 export interface VolumePriceSnapshot {
   id: number | null;
   trade_date: string;

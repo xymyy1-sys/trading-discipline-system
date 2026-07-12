@@ -18,6 +18,7 @@ export default function Positions() {
   const [timeStopRules, setTimeStopRules] = useState<TimeStopRule[]>([])
   const [feedbackMessage, setFeedbackMessage] = useState('')
   const [tPlanMessage, setTPlanMessage] = useState('')
+  const [tPlans, setTPlans] = useState<Record<number, TTradePlan>>({})
   const [ruleMessage, setRuleMessage] = useState('')
   const [accountAsset, setAccountAsset] = useState('')
   const [assetSaving, setAssetSaving] = useState(false)
@@ -56,6 +57,13 @@ export default function Positions() {
       .then(r => r.json())
       .then((data: TimeStopRule[]) => setTimeStopRules(data))
       .catch(() => setTimeStopRules([]))
+  }
+
+  const fetchTPlans = () => {
+    fetch(`${API_BASE}/api/t-plans?active_only=true`)
+      .then(r => r.json())
+      .then((plans: TTradePlan[]) => setTPlans(Object.fromEntries(plans.map(plan => [plan.holding_id, plan]))))
+      .catch(() => setTPlans({}))
   }
 
   const fetchHoldings = () => {
@@ -128,6 +136,7 @@ export default function Positions() {
     fetchSeesaw()
     fetchExecutionStates()
     fetchTimeStopRules()
+    fetchTPlans()
     const timer = window.setInterval(() => {
       refreshQuotes()
       fetchSeesaw()
@@ -278,11 +287,47 @@ export default function Positions() {
         return r.json()
       })
       .then((plan: TTradePlan) => {
+        setTPlans(prev => ({ ...prev, [plan.holding_id]: plan }))
         setTPlanMessage(plan.status === 'forbidden'
           ? `${state.name} 当前禁止做T：${plan.evidence[0] || '交易逻辑不成立'}`
           : `${state.name} 已生成${plan.t_type}计划：卖出 ${plan.planned_sell_quantity} 股，接回 ${plan.buyback_price_low.toFixed(2)}-${plan.buyback_price_high.toFixed(2)}`)
       })
       .catch(() => setTPlanMessage('做T计划生成失败'))
+  }
+
+  const updateTExecution = (plan: TTradePlan, step: 'sell' | 'buyback' | 'reduction') => {
+    if (!plan.id) return
+    const remaining = Math.max(0, plan.actual_sell_quantity - plan.actual_buyback_quantity)
+    const defaultQuantity = step === 'sell' ? plan.planned_sell_quantity : plan.actual_sell_quantity
+    const quantityText = step === 'reduction' ? String(remaining) : window.prompt(step === 'sell' ? '实际卖出数量' : '本次累计接回数量', String(defaultQuantity))
+    if (quantityText === null) return
+    const quantity = Number(quantityText)
+    if (!Number.isInteger(quantity) || quantity < 0) {
+      setTPlanMessage('数量必须是非负整数')
+      return
+    }
+    const priceText = step === 'reduction' ? null : window.prompt(step === 'sell' ? '实际卖出价格' : '实际接回价格')
+    if (step !== 'reduction' && priceText === null) return
+    const price = Number(priceText)
+    const payload = step === 'sell'
+      ? { actual_sell_quantity: quantity, actual_sell_price: price, execution_note: '前端确认卖出成交' }
+      : step === 'buyback'
+        ? { actual_buyback_quantity: quantity, actual_buyback_price: price, execution_note: '前端确认接回成交' }
+        : { status: 'converted_to_reduction', execution_note: `剩余 ${remaining} 股转为永久减仓` }
+    fetch(`${API_BASE}/api/holdings/${plan.holding_id}/t-plan/${plan.id}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    })
+      .then(async response => {
+        if (!response.ok) throw new Error((await response.json()).detail || '更新失败')
+        return response.json()
+      })
+      .then((saved: TTradePlan) => {
+        setTPlans(prev => ({ ...prev, [saved.holding_id]: saved }))
+        setTPlanMessage(`${saved.name} T计划已更新：${saved.status}`)
+      })
+      .catch(error => setTPlanMessage(error instanceof Error ? error.message : 'T执行反馈失败'))
   }
   const updateTimeStopRule = (rule: TimeStopRule, patch: Partial<TimeStopRule>) => {
     const next = { ...rule, ...patch }
@@ -606,6 +651,20 @@ export default function Positions() {
           <div className="execution-card-grid">
             {(urgentExecutions.length ? urgentExecutions : executionStates).slice(0, 6).map(item => (
               <article className="execution-card" key={`${item.code}-${item.updated_at}`}>
+                {(() => {
+                  const plan = tPlans[item.holding_id]
+                  return plan ? (
+                    <div className="t-execution-strip">
+                      <div><b>{plan.t_type}</b><span>{plan.status}</span></div>
+                      <small>计划卖出 {plan.planned_sell_quantity} 股 · 已卖 {plan.actual_sell_quantity} · 已接回 {plan.actual_buyback_quantity}</small>
+                      <div className="t-execution-actions">
+                        {plan.status === 'planned' && <button type="button" onClick={() => updateTExecution(plan, 'sell')}>记录卖出</button>}
+                        {['sold_wait_buyback', 'partially_bought_back'].includes(plan.status) && <button type="button" onClick={() => updateTExecution(plan, 'buyback')}>记录接回</button>}
+                        {['sold_wait_buyback', 'partially_bought_back'].includes(plan.status) && <button type="button" onClick={() => updateTExecution(plan, 'reduction')}>转永久减仓</button>}
+                      </div>
+                    </div>
+                  ) : null
+                })()}
                 <div className="execution-card-head">
                   <div>
                     <strong>{item.name}</strong>
