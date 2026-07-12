@@ -14,6 +14,7 @@ COLLECTOR_INTERVAL_SECONDS = 60
 COLLECTOR_ENABLED = True
 _collector_task: asyncio.Task | None = None
 _collector_running = False
+_close_expectation_date: str | None = None
 
 
 def _json_dumps(value: list[str]) -> str:
@@ -79,12 +80,21 @@ def run_intraday_collection_once(trigger: str = "manual") -> IntradayCollectionR
 
 
 async def _collector_loop() -> None:
-    global _collector_running
+    global _collector_running, _close_expectation_date
     while True:
         if COLLECTOR_ENABLED and _is_market_watch_time():
             _collector_running = True
             await asyncio.to_thread(run_intraday_collection_once, "scheduler")
             _collector_running = False
+        now = datetime.now()
+        if COLLECTOR_ENABLED and now.weekday() < 5 and now.time() > time(15, 0) and _close_expectation_date != now.date().isoformat():
+            from app.services.next_day_expectations import generate_next_day_expectations
+            db = SessionLocal()
+            try:
+                await asyncio.to_thread(generate_next_day_expectations, db)
+                _close_expectation_date = now.date().isoformat()
+            finally:
+                db.close()
         await asyncio.sleep(COLLECTOR_INTERVAL_SECONDS)
 
 

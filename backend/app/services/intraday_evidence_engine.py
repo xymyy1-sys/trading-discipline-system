@@ -8,11 +8,11 @@ from typing import Any
 
 from sqlalchemy.orm import Session
 
-from app.api.helpers.decision import current_expectation_stage, quote_for_code
+from app.api.helpers.decision import build_expectation_snapshot, current_expectation_stage, quote_for_code
 from app.api.helpers.execution import build_position_execution_state
 from app.api.helpers.quotes import _safe_float
 from app.api.helpers.volume_price import build_volume_price_snapshot
-from app.models.trading import DataCaptureSnapshot, Holding, IntradayEvidenceEvent
+from app.models.trading import DataCaptureSnapshot, ExpectationSnapshot, Holding, IntradayEvidenceEvent
 from app.schemas.trading import PositionExecutionStateOut, VolumePriceSnapshotOut
 
 
@@ -126,7 +126,16 @@ def collect_holding_evidence(
         stage=stage,
         quote=quote,
     )
-    state = build_position_execution_state(db, holding, quote=quote, volume_price=volume)
+    baseline = db.query(ExpectationSnapshot).filter(
+        ExpectationSnapshot.code == holding.code,
+        ExpectationSnapshot.stage == "次日盘前预期",
+        ExpectationSnapshot.trade_date == _trade_date(now),
+    ).order_by(ExpectationSnapshot.created_at.desc()).first()
+    expectation = build_expectation_snapshot(
+        db, holding.code, name=holding.name, stage=stage, quote=quote,
+        base_hint=baseline.base_expectation if baseline else (holding.position_type or ""),
+    )
+    state = build_position_execution_state(db, holding, quote=quote, expectation=expectation, volume_price=volume)
     raw_json = json.dumps(quote, ensure_ascii=False, sort_keys=True, default=str)
     normalized_json = json.dumps({"price": volume.price, "vwap": volume.vwap, "pattern": volume.pattern, "data_quality": volume.data_quality}, ensure_ascii=False, sort_keys=True)
     minute_status = str(quote.get("minute_bar_status") or "missing")

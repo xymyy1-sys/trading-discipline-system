@@ -39,6 +39,9 @@ const LABELS: Record<string, string> = {
   LOSS_OBSERVATION: '浮亏观察',
   critical: '严重', warning: '警告', info: '提示', RED: '红色', WATCH: '观察',
   POSITIVE_T: '正向做T', REVERSE_T: '倒T',
+  OPENING_CONFIRMATION: '开盘确认', INTRADAY_HIGH_CONFIRMED: '日内高点确认',
+  CLOSE_CONFIRMATION: '收盘确认', INTRADAY_EVIDENCE_SNAPSHOT: '盘中证据快照',
+  WAITING_VALIDATION: '等待次日验证',
 }
 
 export function chineseLabel(value?: string | null) {

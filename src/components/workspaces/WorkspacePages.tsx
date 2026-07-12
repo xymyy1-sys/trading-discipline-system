@@ -369,7 +369,7 @@ export function TodayDecisionSummary() {
           <article key={alert.id ?? `${alert.code}-${alert.created_at}`}>
             <b>{alert.name || alert.code}</b>
             <span>{chineseLabel(alert.level)} · {chineseEvidence(alert.action)}</span>
-            <small>{chineseEvidence(alert.evidence[0] || chineseLabel(alert.state))}</small>
+            <small>{decisionCards[alert.code] ? `预期：${chineseLabel(decisionCards[alert.code].expectation.expectation_result)} · 预期差 ${decisionCards[alert.code].expectation.expectation_gap_score.toFixed(1)}；` : ''}{chineseEvidence(alert.evidence[0] || chineseLabel(alert.state))}</small>
             <button type="button" className="alert-ack-button" onClick={() => acknowledgeAlert(alert)}>已阅读并确认</button>
           </article>
         )) : <p className="plain-text">当前没有待确认操作建议。</p>}
@@ -417,7 +417,7 @@ export function TodayDecisionSummary() {
     }
     Promise.allSettled(
       nextHoldings.map(item =>
-        fetchJsonWithTimeout(`${API_BASE}/api/stocks/${item.code}/intraday-review`, 6000)
+        fetchJsonWithTimeout(`${API_BASE}/api/stocks/${item.code}/intraday-review`, 15000)
           .then(review => [item.code, review] as const),
       ),
     ).then(results => {
@@ -443,7 +443,7 @@ export function TodayDecisionSummary() {
   }
 
   function loadSingleIntradayReview(code: string) {
-    fetchJsonWithTimeout(`${API_BASE}/api/stocks/${code}/intraday-review`, 6000)
+    fetchJsonWithTimeout(`${API_BASE}/api/stocks/${code}/intraday-review`, 15000)
       .then(review => {
         setIntradayReviews(prev => ({ ...prev, [code]: review as IntradayReview }))
       })

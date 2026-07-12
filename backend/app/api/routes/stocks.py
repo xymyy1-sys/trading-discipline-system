@@ -1,5 +1,6 @@
 from concurrent.futures import ThreadPoolExecutor, wait
 from datetime import datetime
+import json
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
@@ -15,10 +16,11 @@ from app.api.helpers.decision import (
     quote_for_code,
     update_expectation_snapshot,
     ensure_expectation_rules,
+    minute_evidence_timeline,
 )
 from app.api.helpers.volume_price import build_volume_price_snapshot
 from app.core.database import get_db
-from app.models.trading import ExpectationRule, ExpectationSnapshot, Holding, IntradayEvidenceEvent, NextDayPlan, PositionExecutionState, VolumePriceSnapshot
+from app.models.trading import DataCaptureSnapshot, ExpectationRule, ExpectationSnapshot, Holding, IntradayEvidenceEvent, NextDayPlan, PositionExecutionState, VolumePriceSnapshot
 from app.schemas.trading import (
     ExpectationSnapshotIn,
     ExpectationSnapshotOut,
@@ -395,17 +397,28 @@ def get_stock_timeline(code: str, db: Session = Depends(get_db)) -> list[Intrada
 @router.get("/stocks/{code}/intraday-review", response_model=IntradayReviewOut)
 def get_stock_intraday_review(code: str, db: Session = Depends(get_db)) -> IntradayReviewOut:
     holding = _find_holding_by_code(db, code)
-    state = build_position_execution_state(db, holding) if holding else None
-    if state is None:
-        latest_state = (
+    latest_state = (
             db.query(PositionExecutionState)
             .filter(PositionExecutionState.code.in_([code, code.lstrip("0")]))
             .order_by(PositionExecutionState.updated_at.desc(), PositionExecutionState.id.desc())
             .first()
-        )
-        if not latest_state:
-            raise HTTPException(status_code=404, detail="No intraday review data found")
+    )
+    capture = (
+        db.query(DataCaptureSnapshot)
+        .filter(DataCaptureSnapshot.target_code.in_([code, code.lstrip("0")]), DataCaptureSnapshot.data_type == "stock_minute")
+        .order_by(DataCaptureSnapshot.captured_at.desc(), DataCaptureSnapshot.id.desc())
+        .first()
+    )
+    quote: dict = {}
+    if capture:
+        try:
+            quote = json.loads(capture.raw_value_json or "{}")
+        except Exception:
+            quote = {}
+    timeline = minute_evidence_timeline(code, holding.name if holding else (latest_state.name if latest_state else code), quote)
+    if not timeline:
         timeline = get_stock_timeline(code, db)
+    if latest_state:
         return IntradayReviewOut(
             code=latest_state.code,
             name=latest_state.name,
@@ -418,6 +431,9 @@ def get_stock_intraday_review(code: str, db: Session = Depends(get_db)) -> Intra
             counter_evidence=_json_list(latest_state.counter_evidence_json),
             next_actions=_json_list(latest_state.invalid_conditions_json)[:3],
         )
+    state = build_position_execution_state(db, holding, quote=quote, persist=False) if holding else None
+    if state is None:
+        raise HTTPException(status_code=404, detail="No intraday review data found")
     return IntradayReviewOut(
         code=state.code,
         name=state.name,
@@ -425,7 +441,7 @@ def get_stock_intraday_review(code: str, db: Session = Depends(get_db)) -> Intra
         latest_action=state.recommended_action,
         latest_state=state.state,
         data_quality=state.data_quality,
-        timeline=state.events,
+        timeline=timeline or state.events,
         evidence=state.evidence,
         counter_evidence=state.counter_evidence,
         next_actions=(state.invalid_conditions + state.recovery_conditions)[:5],

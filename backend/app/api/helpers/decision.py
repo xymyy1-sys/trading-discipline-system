@@ -46,6 +46,70 @@ def _json_list(raw: str | None) -> list[str]:
     return [str(item) for item in value] if isinstance(value, list) else []
 
 
+def minute_evidence_timeline(code: str, name: str, quote: dict[str, Any]) -> list[IntradayEvidenceEventOut]:
+    """Build a read-only evidence chain from the actual minute at which a condition occurred."""
+    rows = [row for row in (quote.get("minute_bars") or []) if isinstance(row, dict)]
+    points: list[dict[str, Any]] = []
+    cumulative_amount = 0.0
+    cumulative_volume = 0.0
+    peak = 0.0
+    was_above = False
+    break_added = False
+    drawdown_added = False
+    for row in rows:
+        price = _safe_float(row.get("price") or row.get("close"))
+        volume = _safe_float(row.get("volume"))
+        amount = _safe_float(row.get("amount")) or price * volume
+        if price <= 0 or volume <= 0:
+            continue
+        cumulative_amount += amount
+        cumulative_volume += volume
+        vwap = cumulative_amount / cumulative_volume if cumulative_volume else 0
+        peak = max(peak, _safe_float(row.get("high")) or price)
+        point = {"row": row, "price": price, "vwap": vwap, "peak": peak}
+        if not points:
+            points.append({**point, "type": "OPENING_CONFIRMATION", "severity": "info", "text": f"开盘分钟价格 {price:.2f}，分时均价 {vwap:.2f}。"})
+        if price >= vwap:
+            was_above = True
+        elif was_above and not break_added:
+            points.append({**point, "type": "VWAP_BROKEN", "severity": "warning", "text": f"{row.get('time')} 首次由分时均价线上方跌破，价格 {price:.2f}，VWAP {vwap:.2f}。"})
+            break_added = True
+        drawdown = (peak - price) / peak * 100 if peak else 0
+        if drawdown >= 3 and not drawdown_added:
+            points.append({**point, "type": "PROFIT_DRAWDOWN_WARNING", "severity": "warning", "text": f"相对日内高点首次回撤达到 {drawdown:.2f}%，价格 {price:.2f}。"})
+            drawdown_added = True
+    if not rows or not points:
+        return []
+    valid_rows = [row for row in rows if _safe_float(row.get("price") or row.get("close")) > 0]
+    if valid_rows:
+        high_row = max(valid_rows, key=lambda row: _safe_float(row.get("high") or row.get("price") or row.get("close")))
+        high_price = _safe_float(high_row.get("high") or high_row.get("price") or high_row.get("close"))
+        points.append({"row": high_row, "price": high_price, "vwap": 0, "peak": high_price, "type": "INTRADAY_HIGH_CONFIRMED", "severity": "info", "text": f"日内高点 {high_price:.2f} 在 {high_row.get('time')} 形成。"})
+        last = valid_rows[-1]
+        last_price = _safe_float(last.get("price") or last.get("close"))
+        points.append({"row": last, "price": last_price, "vwap": 0, "peak": peak, "type": "CLOSE_CONFIRMATION", "severity": "info", "text": f"收盘前最后分钟价格 {last_price:.2f}，用于盘后次日预期校准。"})
+    outputs: list[IntradayEvidenceEventOut] = []
+    seen: set[tuple[str, str]] = set()
+    for point in points:
+        row = point["row"]
+        minute = str(row.get("time") or "15:00")[:5]
+        trade_date = str(row.get("trade_date") or quote.get("minute_bar_trade_date") or _today())
+        key = (str(point["type"]), minute)
+        if key in seen:
+            continue
+        seen.add(key)
+        try:
+            captured_at = datetime.fromisoformat(f"{trade_date}T{minute}:00")
+        except ValueError:
+            captured_at = datetime.now().replace(hour=15, minute=0, second=0, microsecond=0)
+        outputs.append(IntradayEvidenceEventOut(
+            captured_at=captured_at, scope="stock", target_code=code, target_name=name,
+            event_type=str(point["type"]), severity=str(point["severity"]), value=round(float(point["price"]), 2),
+            previous_value=round(float(point.get("vwap") or 0), 2), evidence=[str(point["text"])], confirmed=True,
+        ))
+    return sorted(outputs, key=lambda item: item.captured_at, reverse=True)
+
+
 def current_expectation_stage(now: datetime | None = None) -> str:
     now = now or datetime.now()
     current = now.time()
@@ -195,7 +259,7 @@ def build_expectation_snapshot(
     previous_close = _safe_float(quote.get("prev_close"))
     if not open_pct and quote.get("open") and previous_close:
         open_pct = (_safe_float(quote.get("open")) - previous_close) / previous_close * 100
-    base_expectation = "NEUTRAL"
+    base_expectation = base_hint if base_hint in EXPECTATION_DEFAULTS else "NEUTRAL"
     if any(key in base_hint for key in ("一字", "极强", "超强", "核心总龙")):
         base_expectation = "EXTREME_STRONG"
     elif any(key in base_hint for key in ("超预期", "强预期", "主线前排", "打板")):
@@ -364,7 +428,7 @@ def decision_card(db: Session, code: str) -> StockDecisionCardOut:
         })
     execution = build_position_execution_state(db, holding, quote=quote, expectation=expectation, volume_price=volume_price, persist=during_market) if holding else None
     t_eligibility = build_t_eligibility(db, holding) if holding else None
-    events: list[IntradayEvidenceEventOut] = []
+    events: list[IntradayEvidenceEventOut] = minute_evidence_timeline(code, name, quote)
     rows = (
         db.query(IntradayEvidenceEvent)
         .filter(IntradayEvidenceEvent.target_code.in_([code, code.lstrip("0")]))
@@ -373,7 +437,7 @@ def decision_card(db: Session, code: str) -> StockDecisionCardOut:
         .all()
     )
     rows = [row for row in rows if time(9, 15) <= row.captured_at.time() <= time(15, 0)][:20]
-    for row in rows:
+    for row in ([] if events else rows):
         events.append(
             IntradayEvidenceEventOut(
                 id=row.id,
