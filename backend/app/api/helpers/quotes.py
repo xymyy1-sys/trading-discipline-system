@@ -219,21 +219,64 @@ def _eastmoney_secid(code: str) -> str:
 
 def _attach_minute_bars(quotes: dict[str, dict[str, Any]]) -> None:
     for code, quote in quotes.items():
+        primary_error = ""
         try:
             bars = _eastmoney_minute_bars(code)
         except Exception as exc:
-            quote["minute_bar_status"] = "fetch_error"
-            quote["minute_fetch_error"] = str(exc)
-            continue
+            bars = []
+            primary_error = str(exc)
+        if bars:
+            source = "东方财富1分钟分时K线"
+            status = "ok"
+        else:
+            try:
+                bars = _sina_minute_bars(code)
+            except Exception as exc:
+                quote["minute_bar_status"] = "fetch_error" if primary_error else "no_recent_rows"
+                quote["minute_fetch_error"] = "; ".join(
+                    item for item in (f"东方财富: {primary_error}" if primary_error else "", f"新浪: {exc}") if item
+                )
+                continue
+            source = "新浪1分钟分时K线（成交额按收盘价估算）"
+            status = "fallback_ok"
+            quote["minute_amount_estimated"] = True
+            if primary_error:
+                quote["minute_fetch_error"] = f"东方财富: {primary_error}"
         if not bars:
             quote["minute_bar_status"] = "no_recent_rows"
             continue
         quote["minute_bars"] = bars
-        quote["minute_bar_source"] = "东方财富1分钟分时K线"
-        quote["minute_bar_status"] = "ok"
+        quote["minute_bar_source"] = source
+        quote["minute_bar_status"] = status
         quote["minute_bar_trade_date"] = bars[-1].get("trade_date") or _last_trading_day()
         date_note = "" if quote["minute_bar_trade_date"] == datetime.now().date().isoformat() else f"({quote['minute_bar_trade_date']})"
-        quote["note"] = f"{quote.get('note') or '实时行情'} + 东方财富1分钟成交{date_note}"
+        source_note = "东方财富1分钟成交" if status == "ok" else source
+        quote["note"] = f"{quote.get('note') or '实时行情'} + {source_note}{date_note}"
+
+
+def _sina_minute_bars(code: str) -> list[dict[str, Any]]:
+    import akshare as ak
+
+    normalized = _quote_code_candidates(code)[0] if _quote_code_candidates(code) else _normalize_code(code)
+    symbol = ("sh" if normalized.startswith(("5", "6", "9")) else "sz") + normalized
+    trade_date = _last_trading_day()
+    frame = ak.stock_zh_a_minute(symbol=symbol, period="1", adjust="")
+    if frame is None or frame.empty:
+        return []
+    bars: list[dict[str, Any]] = []
+    for _, row in frame.iterrows():
+        timestamp = str(row.get("day") or "")
+        if not timestamp.startswith(trade_date):
+            continue
+        close = _safe_float(row.get("close"))
+        volume = _safe_float(row.get("volume"))
+        bars.append({
+            "trade_date": trade_date, "time": timestamp[11:16],
+            "open": _safe_float(row.get("open")), "price": close, "close": close,
+            "high": _safe_float(row.get("high")), "low": _safe_float(row.get("low")),
+            "volume": volume, "amount": close * volume, "amount_estimated": True,
+        })
+    return bars
 
 
 def _eastmoney_minute_bars(code: str) -> list[dict[str, Any]]:

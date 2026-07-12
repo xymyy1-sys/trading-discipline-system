@@ -1,4 +1,6 @@
-from app.api.helpers.quotes import _attach_minute_bars, _eastmoney_minute_bars, _eastmoney_secid
+import pandas as pd
+
+from app.api.helpers.quotes import _attach_minute_bars, _eastmoney_minute_bars, _eastmoney_secid, _sina_minute_bars
 
 
 def test_eastmoney_secid_handles_a_share_and_etf_markets():
@@ -62,9 +64,37 @@ def test_attach_minute_bars_marks_quote_reliable_source(monkeypatch):
 
 def test_attach_minute_bars_marks_empty_result_as_degraded(monkeypatch):
     monkeypatch.setattr("app.api.helpers.quotes._eastmoney_minute_bars", lambda code: [])
+    monkeypatch.setattr("app.api.helpers.quotes._sina_minute_bars", lambda code: [])
     quotes = {"600584": {"price": 10.2, "note": "东方财富实时行情"}}
 
     _attach_minute_bars(quotes)
 
     assert "minute_bars" not in quotes["600584"]
     assert quotes["600584"]["minute_bar_status"] == "no_recent_rows"
+
+
+def test_sina_minute_bars_maps_ohlcv_and_estimated_amount(monkeypatch):
+    frame = pd.DataFrame([{
+        "day": "2026-07-10 09:31:00", "open": "10.00", "high": "10.30",
+        "low": "9.95", "close": "10.20", "volume": "1000",
+    }])
+    monkeypatch.setattr("app.api.helpers.quotes._last_trading_day", lambda: "2026-07-10")
+    monkeypatch.setattr("akshare.stock_zh_a_minute", lambda **kwargs: frame)
+    bars = _sina_minute_bars("600584")
+    assert bars[0]["time"] == "09:31"
+    assert bars[0]["price"] == 10.2
+    assert bars[0]["amount"] == 10200
+    assert bars[0]["amount_estimated"] is True
+
+
+def test_attach_minute_bars_falls_back_to_sina_and_marks_degraded(monkeypatch):
+    monkeypatch.setattr("app.api.helpers.quotes._eastmoney_minute_bars", lambda code: (_ for _ in ()).throw(RuntimeError("primary down")))
+    monkeypatch.setattr("app.api.helpers.quotes._sina_minute_bars", lambda code: [
+        {"trade_date": "2026-07-10", "time": "09:31", "price": 10.2, "volume": 1000, "amount": 10200}
+    ])
+    quotes = {"600584": {"price": 10.2, "note": "实时行情"}}
+    _attach_minute_bars(quotes)
+    assert quotes["600584"]["minute_bar_status"] == "fallback_ok"
+    assert quotes["600584"]["minute_amount_estimated"] is True
+    assert "新浪1分钟" in quotes["600584"]["minute_bar_source"]
+    assert "primary down" in quotes["600584"]["minute_fetch_error"]

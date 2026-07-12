@@ -264,9 +264,10 @@ def build_volume_price_snapshot(
     amount = _safe_float(quote.get("amount"))
     turnover = _safe_float(quote.get("turnover"))
     minute_vwap, minute_bar_count = _minute_vwap(quote)
+    minute_amount_estimated = bool(quote.get("minute_amount_estimated"))
     if minute_vwap > 0:
         vwap = minute_vwap
-        vwap_source = "minute"
+        vwap_source = "minute_estimated" if minute_amount_estimated else "minute"
     elif _estimated_vwap(quote) > 0:
         vwap = _estimated_vwap(quote)
         vwap_source = "quote_estimated"
