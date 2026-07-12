@@ -35,6 +35,41 @@ def test_sector_flow_outflow_is_negative_and_snapshot_only(monkeypatch):
     assert [item.name for item in flow.inflow] == ["IT服务"]
     assert [item.name for item in flow.outflow] == ["半导体"]
     assert flow.outflow[0].timeline == [SectorFlowPoint(time="当前", value=-248.78)]
+    assert flow.outflow[0].timeline_reliable is False
+    assert flow.outflow[0].flow_peak is None
+    assert flow.outflow[0].flow_event is None
+
+
+def test_sector_flow_derives_peak_pullback_rank_and_reversal_from_real_curve(monkeypatch):
+    provider = MarketDataProvider()
+    monkeypatch.setattr(provider, "_fetch_direct_eastmoney_sector_flow_raw", lambda **_kwargs: [{
+        "name": "半导体", "board_code": "BK1036", "provider": "eastmoney",
+        "net_inflow": 20.0, "main_inflow": 18.0, "change_pct": 1.0,
+        "strength": 70, "leaders": [],
+    }])
+    monkeypatch.setattr(provider, "_fetch_eastmoney_board_intraday_flow", lambda _code: [
+        SectorFlowPoint(time="10:00", value=30.0),
+        SectorFlowPoint(time="11:00", value=100.0),
+        SectorFlowPoint(time="14:00", value=35.0),
+    ])
+    monkeypatch.setattr("app.services.market_data._is_trading_time", lambda: False)
+    monkeypatch.setattr("app.services.market_data._get_snapshots", lambda _flow_type: [{
+        "time": "14:00", "items": [
+            {"name": "人工智能", "net_inflow": 50},
+            {"name": "半导体", "net_inflow": 40},
+        ],
+    }])
+
+    item = provider.sector_flow(flow_type="行业资金流", period="今日", force_refresh=True).inflow[0]
+
+    assert item.rank == 1
+    assert item.rank_change == 1
+    assert item.timeline_reliable is True
+    assert item.flow_peak == 100.0
+    assert item.flow_peak_time == "11:00"
+    assert item.flow_pullback == -80.0
+    assert item.flow_pullback_pct == -80.0
+    assert item.flow_event == "FLOW_PEAK_REVERSAL"
 
 
 def test_sanitize_flow_timeline_last_point_matches_current_net_flow():

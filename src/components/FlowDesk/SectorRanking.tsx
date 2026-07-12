@@ -11,6 +11,12 @@ function categoryLine(item: SectorFlowItem) {
   return category === subline ? category : `${category} / ${subline}`
 }
 
+const flowEventLabel = {
+  FLOW_NEW_HIGH: '资金新高',
+  FLOW_PEAK_REVERSAL: '峰值回落',
+  FLOW_TURN_NEGATIVE: '由正转负',
+} as const
+
 export default function SectorRanking({
   title,
   items,
@@ -47,6 +53,13 @@ export default function SectorRanking({
             <span className="rank-num">{String(i + 1).padStart(2, '0')}</span>
             <span className="rank-name">{displayName(item)}</span>
             <span className="rank-theme-line">{categoryLine(item)}</span>
+            {(item.rank_change !== null || item.flow_event) && (
+              <span className="rank-evidence">
+                {item.rank_change !== null && `排名${item.rank_change > 0 ? `↑${item.rank_change}` : item.rank_change < 0 ? `↓${Math.abs(item.rank_change)}` : '持平'}`}
+                {item.flow_event && ` · ${flowEventLabel[item.flow_event]}`}
+                {item.flow_pullback_pct !== null && item.flow_pullback_pct < 0 && ` ${item.flow_pullback_pct.toFixed(1)}%`}
+              </span>
+            )}
             <span className="rank-stats">
               <span className={direction === 'in' ? 'num-up' : 'num-down'}>
                 {item.net_inflow >= 0 ? '+' : ''}{item.net_inflow.toFixed(2)}亿

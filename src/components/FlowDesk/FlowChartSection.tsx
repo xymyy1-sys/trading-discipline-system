@@ -33,9 +33,7 @@ export default function FlowChartSection({
   const xData = useMemo(() => {
     if (!drawableItems.length) return ['09:30', '15:00']
     const all = new Set<string>()
-    drawableItems.forEach(it => it.timeline.forEach(p => {
-      if (p.time !== '当前') all.add(p.time)
-    }))
+    drawableItems.forEach(it => it.timeline.forEach(p => all.add(p.time)))
     return Array.from(all).sort((a, b) => timeOrder(a) - timeOrder(b))
   }, [drawableItems])
 
@@ -83,7 +81,7 @@ export default function FlowChartSection({
           symbol: 'none',
           endLabel: {
             show: true,
-            formatter: () => `${label} ${item.net_inflow >= 0 ? '+' : ''}${item.net_inflow.toFixed(1)}亿`,
+            formatter: () => `#${item.rank} ${label} ${item.net_inflow >= 0 ? '+' : ''}${item.net_inflow.toFixed(1)}亿`,
             color,
             fontSize: 11,
             fontWeight: 600,
@@ -100,6 +98,15 @@ export default function FlowChartSection({
             return pt ? pt.value : null
           }),
           connectNulls: true,
+          markPoint: isSelected && item.timeline_reliable && item.flow_peak_time ? {
+            symbolSize: 42,
+            label: {
+              formatter: `峰值\n${item.flow_peak?.toFixed(1)}亿`,
+              color: '#fff',
+              fontSize: 10,
+            },
+            data: [{ coord: [item.flow_peak_time, item.flow_peak] }],
+          } : undefined,
         }
       }),
       color: [...inflowColors, ...outflowColors],

@@ -5097,6 +5097,13 @@ h3 {
   color: #e8f0ec;
 }
 
+.rank-evidence {
+  grid-column: 2 / 4;
+  color: #9a6700;
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+}
+
 .auth-card {
   width: min(420px, 100%);
   display: grid;

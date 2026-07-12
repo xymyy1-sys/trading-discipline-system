@@ -100,8 +100,16 @@ export interface SectorFlowItem {
   net_inflow: number;
   main_inflow: number;
   strength: number;
+  rank: number;
+  rank_change: number | null;
   leaders: string[];
   timeline: FlowPoint[];
+  timeline_reliable: boolean;
+  flow_peak: number | null;
+  flow_peak_time: string | null;
+  flow_pullback: number | null;
+  flow_pullback_pct: number | null;
+  flow_event: 'FLOW_NEW_HIGH' | 'FLOW_PEAK_REVERSAL' | 'FLOW_TURN_NEGATIVE' | null;
   flow_breakdown: Array<{
     name: string;
     net: number;

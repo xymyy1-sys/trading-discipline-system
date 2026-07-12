@@ -907,8 +907,16 @@ class SectorFlowItem(BaseModel):
     net_inflow: float
     main_inflow: float
     strength: int
+    rank: int
+    rank_change: int | None = None
     leaders: list[str]
     timeline: list[SectorFlowPoint]
+    timeline_reliable: bool = False
+    flow_peak: float | None = None
+    flow_peak_time: str | None = None
+    flow_pullback: float | None = None
+    flow_pullback_pct: float | None = None
+    flow_event: str | None = None
     flow_breakdown: list[SectorFlowBreakdownItem] = Field(default_factory=list)
 
 

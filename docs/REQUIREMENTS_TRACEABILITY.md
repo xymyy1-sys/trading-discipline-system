@@ -31,7 +31,7 @@ This matrix is derived from all three supplied requirement documents. A feature 
 | Requirement area | Current boundary / remaining work |
 | --- | --- |
 | Exchange microstructure fields | Eastmoney tick direction now provides true active buy/sell and configurable large-order net evidence when available; free-float turnover still depends on a source that exposes free-float shares |
-| Sector evidence chart | sector flow curves, peaks and pullbacks exist; event overlay and sector VWAP completeness still require final UI acceptance |
+| Sector evidence chart | real multi-point curves now expose rank movement, peak, pullback and new-high/reversal/turn-negative events in the chart and ranking; no event is inferred from a single snapshot, while sector VWAP remains unavailable until a trustworthy sector-index minute source is integrated |
 | Parameter auto-calibration | statistics and sample gates exist; automatic parameter writes remain intentionally gated until at least 20 valid samples |
 | Production availability | code is deployable; HTTPS certificate, firewall verification, database backup and real-server smoke tests must run on the target server |
 

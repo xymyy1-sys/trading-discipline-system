@@ -746,7 +746,8 @@ class MarketDataProvider:
                         raw_items = self._fallback_sector_flow_raw()
                         source = "diagnostic-fallback"
 
-        if _is_trading_time():
+        snapshot_recorded = _is_trading_time()
+        if snapshot_recorded:
             try:
                 _record_snapshot(flow_type, raw_items)
             except Exception:
@@ -780,6 +781,18 @@ class MarketDataProvider:
             if str(raw.get("board_code") or "").strip()
         )
         has_eastmoney_intraday_curve = False
+        previous_rank: dict[str, int] = {}
+        rank_snapshot = snaps[-2] if snapshot_recorded and len(snaps) >= 2 else (snaps[-1] if snaps else None)
+        if rank_snapshot:
+            previous_items = sorted(
+                rank_snapshot.get("items", []),
+                key=lambda item: float(item.get("net_inflow") or 0),
+                reverse=True,
+            )
+            previous_rank = {
+                str(item.get("name") or ""): rank
+                for rank, item in enumerate(previous_items, start=1)
+            }
         for idx, raw in enumerate(raw_ordered, start=1):
             name = str(raw.get("name") or "未知板块")
             taxonomy = _classify_sector_taxonomy(raw)
@@ -810,6 +823,29 @@ class MarketDataProvider:
             else:
                 timeline = _current_timeline_point(net)
             timeline = _sanitize_flow_timeline(timeline, net)
+            historical_points = [point for point in timeline if point.time != "当前"]
+            timeline_reliable = len(historical_points) >= 2
+            flow_peak = None
+            flow_peak_time = None
+            flow_pullback = None
+            flow_pullback_pct = None
+            flow_event = None
+            if timeline_reliable:
+                peak_point = max(timeline, key=lambda point: point.value)
+                flow_peak = round(peak_point.value, 2)
+                flow_peak_time = peak_point.time
+                flow_pullback = round(net - peak_point.value, 2)
+                if peak_point.value > 0:
+                    flow_pullback_pct = round((net - peak_point.value) / peak_point.value * 100, 2)
+                values = [point.value for point in timeline]
+                if net < 0 <= values[-2]:
+                    flow_event = "FLOW_TURN_NEGATIVE"
+                elif peak_point.time != timeline[-1].time and peak_point.value > 0 and net <= peak_point.value * 0.7:
+                    flow_event = "FLOW_PEAK_REVERSAL"
+                elif peak_point.time == timeline[-1].time and net > 0:
+                    flow_event = "FLOW_NEW_HIGH"
+
+            old_rank = previous_rank.get(name)
 
             items.append(
                 SectorFlowItem(
@@ -826,8 +862,16 @@ class MarketDataProvider:
                     net_inflow=round(net, 2),
                     main_inflow=round(float(raw.get("main_inflow") or 0), 2),
                     strength=max(0, min(100, int(raw.get("strength") or 50))),
+                    rank=idx,
+                    rank_change=(old_rank - idx) if old_rank is not None else None,
                     leaders=[str(l) for l in raw.get("leaders", []) if str(l).strip()][:4],
                     timeline=timeline,
+                    timeline_reliable=timeline_reliable,
+                    flow_peak=flow_peak,
+                    flow_peak_time=flow_peak_time,
+                    flow_pullback=flow_pullback,
+                    flow_pullback_pct=flow_pullback_pct,
+                    flow_event=flow_event,
                     flow_breakdown=[
                         {
                             "name": str(part.get("name") or ""),
