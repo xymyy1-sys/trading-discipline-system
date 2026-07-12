@@ -18,7 +18,6 @@ const Dashboard = lazy(() => import('./components/Dashboard'))
 const FlowDesk = lazy(() => import('./components/FlowDesk'))
 const IntelDesk = lazy(() => import('./components/IntelDesk'))
 const LimitUpLadder = lazy(() => import('./components/LimitUpLadder'))
-const MarketEnv = lazy(() => import('./components/MarketEnv'))
 const Positions = lazy(() => import('./components/Positions'))
 const DecisionCard = lazy(() => import('./components/DecisionCard'))
 const NextDayPlans = lazy(() => import('./components/NextDayPlans'))
@@ -183,9 +182,7 @@ function TodayDecisionWorkspace() {
       allowed={['处理持仓风险', '按市场档位选择策略', '只执行有证据的计划']}
       forbidden={['风险未解除前扩大仓位', '无计划追高', '亏损仓补仓摊低成本']}
       modules={[
-        { key: 'market', label: '市场环境', description: '指数、情绪周期、进攻/防守档位', Component: MarketEnv },
-        { key: 'positions', label: '持仓风险', description: '持仓快照、执行状态、风险排行', Component: Positions },
-        { key: 'intel', label: '信息差', description: '盘中消息与待验证线索', Component: IntelDesk },
+        { key: 'intel', label: '行业要闻', description: '东方财富、央视及行业资讯原文与资金验证', Component: IntelDesk },
       ]}
     >
       <TodayDecisionSummary />

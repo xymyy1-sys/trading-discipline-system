@@ -210,7 +210,8 @@ function SummaryCard({ label, value, icon }: { label: string; value: string; ico
 }
 
 function sourceLabel(source: string) {
-  if (source.includes('diagnostic')) return '诊断数据'
+  if (source.includes('unavailable')) return '真实涨停数据源不可用'
   if (source.includes('akshare')) return '东方财富涨停池'
+  if (source.includes('eastmoney')) return '东方财富涨停池'
   return source
 }

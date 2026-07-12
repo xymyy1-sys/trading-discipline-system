@@ -279,3 +279,28 @@ def test_hot_themes_uses_hot_market_rows_and_flow_lookup(monkeypatch):
     assert item.net_inflow == 57.49
     assert item.main_inflow == 42.3
     assert item.leaders == ["立方制药"]
+
+
+def test_limit_up_failure_never_returns_simulated_stocks(monkeypatch):
+    provider = MarketDataProvider()
+    monkeypatch.setattr(provider, "_fetch_limit_up_pool_raw", lambda *_: (_ for _ in ()).throw(RuntimeError("offline")))
+
+    result = provider.limit_up_ladder(trade_date="2026-07-10", force_refresh=True)
+
+    assert result.source == "unavailable"
+    assert result.groups == []
+    assert result.clusters == []
+    assert any("不生成模拟涨停股票" in note for note in result.notes)
+
+
+def test_information_failure_never_returns_diagnostic_news(monkeypatch):
+    provider = MarketDataProvider()
+    monkeypatch.setattr(provider, "_fetch_eastmoney_fast_news", lambda: (_ for _ in ()).throw(RuntimeError("offline")))
+    monkeypatch.setattr(provider, "_fetch_cctv_news", lambda *_: (_ for _ in ()).throw(RuntimeError("offline")))
+    monkeypatch.setattr(provider, "sector_flow", lambda: None)
+
+    result = provider.information_differential(date="2026-07-10", force_refresh=True)
+
+    assert result.items == []
+    assert "诊断" not in result.source
+    assert any("不展示诊断样例" in note for note in result.data_notes)

@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { RefreshCcw, Search } from 'lucide-react'
 import { API_BASE } from '../api'
+import { chineseEvidence, chineseLabel } from '../labels'
 import * as echarts from 'echarts/core'
 import { BarChart, LineChart, ScatterChart } from 'echarts/charts'
 import { GridComponent, LegendComponent, TooltipComponent } from 'echarts/components'
@@ -132,7 +133,7 @@ export default function DecisionCard() {
             <div className="selected-theme-head">
               <div>
                 <strong>{card.name} <span className="mono">{card.code}</span></strong>
-                <span>{card.industry || '行业待确认'} · {(card.concepts || []).slice(0, 5).join('、') || '概念待确认'} · {card.data_quality}</span>
+                <span>{card.industry || '行业待确认'} · {(card.concepts || []).slice(0, 5).join('、') || '概念待确认'} · {chineseLabel(card.data_quality)}</span>
               </div>
               <div className="decision-price">
                 <strong className={card.change_pct >= 0 ? 'num-up' : 'num-down'}>{card.current_price.toFixed(2)}</strong>
@@ -143,7 +144,7 @@ export default function DecisionCard() {
             <div className="decision-kpi-grid">
               <div><b>基础预期</b><span>{card.expectation.base_expectation}</span></div>
               <div><b>实际表现</b><span>{card.expectation.expectation_result}</span></div>
-              <div><b>状态变化</b><span>{card.expectation.state_transition}</span></div>
+              <div><b>状态变化</b><span>{chineseEvidence(card.expectation.state_transition)}</span></div>
               <div><b>预期差</b><span>{card.expectation.expectation_gap_score}</span></div>
               <div><b>合理开盘</b><span>{card.expectation.expected_open_low.toFixed(1)}% - {card.expectation.expected_open_high.toFixed(1)}%</span></div>
               <div><b>可信度</b><span>{(card.expectation.confidence * 100).toFixed(0)}%</span></div>
@@ -154,10 +155,10 @@ export default function DecisionCard() {
             {card.volume_price && (
               <div className="decision-section volume-price-section">
                 <b>量价快照 · {card.volume_price.stage}</b>
-                <p>{card.volume_price.pattern} · {card.volume_price.data_quality} · {card.volume_price.data_source || '行情源待确认'}</p>
+                <p>{chineseLabel(card.volume_price.pattern)} · {chineseLabel(card.volume_price.data_quality)} · {chineseLabel(card.volume_price.data_source || '行情源待确认')}</p>
                 {card.volume_price.active_flow_estimated && <p className="refresh-note">主动买卖额按分钟价格方向推导，并非逐笔盘口原始主动成交。</p>}
                 <div className="volume-price-grid">
-                  <div><b>VWAP</b><span>{card.volume_price.vwap ? card.volume_price.vwap.toFixed(2) : '--'}</span></div>
+                  <div><b>分时均价</b><span>{card.volume_price.vwap ? card.volume_price.vwap.toFixed(2) : '--'}</span></div>
                   <div><b>偏离VWAP</b><span className={card.volume_price.price_vs_vwap >= 0 ? 'num-up' : 'num-down'}>{card.volume_price.price_vs_vwap >= 0 ? '+' : ''}{card.volume_price.price_vs_vwap.toFixed(2)}%</span></div>
                   <div><b>高点回撤</b><span>{card.volume_price.high_drawdown.toFixed(2)}%</span></div>
                   <div><b>成交额</b><span>{card.volume_price.amount.toFixed(2)}亿</span></div>
@@ -203,7 +204,7 @@ export default function DecisionCard() {
             {card.execution_state && (
               <div className="decision-section execution-conclusion">
                 <b>执行结论</b>
-                <p>{card.execution_state.recommended_action} · {card.execution_state.state}</p>
+                <p>{chineseEvidence(card.execution_state.recommended_action)} · {chineseLabel(card.execution_state.state)}</p>
                 <div className="execution-status-row">
                   <span>预期 {card.execution_state.expectation_state}</span>
                   <span>量价 {card.execution_state.volume_price_state}</span>
@@ -264,7 +265,7 @@ export default function DecisionCard() {
             {card.timeline.length ? card.timeline.map(item => (
               <article key={`${item.event_type}-${item.captured_at}`}>
                 <time>{new Date(item.captured_at).toLocaleTimeString('zh-CN', { hour12: false })}</time>
-                <strong>{item.event_type}</strong>
+                <strong>{chineseLabel(item.event_type)}</strong>
                 <span>{item.severity}</span>
                 <p>{item.evidence[0] || `${item.value} / ${item.previous_value}`}</p>
               </article>

@@ -10,6 +10,7 @@ import {
   RefreshCcw,
 } from 'lucide-react'
 import { API_BASE } from '../../api'
+import { chineseEvidence, chineseLabel } from '../../labels'
 
 import type { ActionRecommendation, HoldingOut, IntradayEvidenceEvent, IntradayReview, MarketSeesaw, PositionExecutionState, ThemeRadar } from '../../types'
 
@@ -224,8 +225,8 @@ export function TodayDecisionSummary() {
             {riskStates.slice(0, 4).map(item => (
               <article key={`exec-${item.holding_id}`}>
                 <b>{item.name}</b>
-                <span>{item.recommended_action}</span>
-                <small>{item.evidence[0] ?? item.volume_price_state}</small>
+                <span>{chineseEvidence(item.recommended_action)}</span>
+                <small>{chineseEvidence(item.evidence[0] ?? chineseLabel(item.volume_price_state))}</small>
               </article>
             ))}
             {highRiskAlerts.slice(0, 4).map(item => (
@@ -265,8 +266,8 @@ export function TodayDecisionSummary() {
           realtimeEvents.map(event => (
             <article key={`${event.id}-${event.event_type}`}>
               <b>{event.target_name || event.target_code}</b>
-              <span>{event.event_type}</span>
-              <small>{event.evidence?.[0] ?? `${event.severity} / 优先级 ${event.priority}`}</small>
+              <span>{chineseLabel(event.event_type)}</span>
+              <small>{chineseEvidence(event.evidence?.[0] ?? `${chineseLabel(event.severity)} / 优先级 ${event.priority}`)}</small>
             </article>
           ))
         ) : (
@@ -279,8 +280,8 @@ export function TodayDecisionSummary() {
         {activeAlerts.length ? activeAlerts.map(alert => (
           <article key={alert.id ?? `${alert.code}-${alert.created_at}`}>
             <b>{alert.name || alert.code}</b>
-            <span>{alert.level} · {alert.action}</span>
-            <small>{alert.evidence[0] || alert.state}</small>
+            <span>{chineseLabel(alert.level)} · {chineseEvidence(alert.action)}</span>
+            <small>{chineseEvidence(alert.evidence[0] || chineseLabel(alert.state))}</small>
             <button type="button" className="alert-ack-button" onClick={() => acknowledgeAlert(alert)}>已阅读并确认</button>
           </article>
         )) : <p className="plain-text">当前没有待确认操作建议。</p>}
@@ -296,15 +297,15 @@ export function TodayDecisionSummary() {
             <article className="trajectory-card" key={review.code}>
               <div className="trajectory-head">
                 <b>{review.name || review.code}</b>
-                <span>{review.latest_action || review.latest_state}</span>
-                <small>{review.data_quality}</small>
+                <span>{chineseEvidence(review.latest_action || chineseLabel(review.latest_state))}</span>
+                <small>{chineseLabel(review.data_quality)}</small>
               </div>
               <div className="trajectory-line">
                 {review.timeline.slice(0, 4).map(event => (
                   <div className="trajectory-point" key={`${review.code}-${event.id}-${event.captured_at}`}>
                     <time>{formatEventTime(event.captured_at)}</time>
-                    <strong>{event.event_type}</strong>
-                    <small>{event.evidence?.[0] ?? `${event.severity} / ${event.confirmed ? '已确认' : '待确认'}`}</small>
+                    <strong>{chineseLabel(event.event_type)}</strong>
+                    <small>{chineseEvidence(event.evidence?.[0] ?? `${chineseLabel(event.severity)} / ${event.confirmed ? '已确认' : '待确认'}`)}</small>
                   </div>
                 ))}
               </div>

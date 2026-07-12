@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { Activity, AlertTriangle, CheckCircle2, ClipboardCheck, RefreshCcw, RotateCcw, SlidersHorizontal } from 'lucide-react'
 import { API_BASE } from '../api'
+import { chineseEvidence, chineseLabel } from '../labels'
 import type { CalibrationProposal, CalibrationRun, ReviewCalibrationSummary } from '../types'
 
 export default function ReviewCalibration() {
@@ -119,7 +120,7 @@ export default function ReviewCalibration() {
               <article className={`calibration-suggestion level-${item.level}`} key={`${item.target}-${item.suggestion}`}>
                 <div>
                   <b>{item.target}</b>
-                  <span>{item.level}</span>
+                  <span>{chineseLabel(item.level)}</span>
                 </div>
                 <p>{item.suggestion}</p>
                 <small>{item.reason} · 样本 {item.sample_count}</small>
@@ -151,10 +152,10 @@ export default function ReviewCalibration() {
             <article className={`calibration-issue level-${item.level}`} key={`${item.title}-${item.code}`}>
               <div>
                 <b>{item.title}</b>
-                <span>{item.level}</span>
+                <span>{chineseLabel(item.level)}</span>
               </div>
               <p>{item.detail}</p>
-              <small>{item.action}</small>
+              <small>{chineseEvidence(item.action)}</small>
             </article>
           )) : (
             <p className="plain-text">当前没有明显 P1 闭环缺口。</p>

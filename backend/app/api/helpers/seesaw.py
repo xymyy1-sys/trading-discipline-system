@@ -156,10 +156,10 @@ def _market_seesaw_monitor(holdings: list[Holding], force_refresh: bool = False)
     top_target = strong_targets[0].name if strong_targets else (inflow_targets[0].name if inflow_targets else "暂无")
     summary = (
         f"行业资金流当前最强吸金方向：{top_target}；"
-        f"{'已有持仓出现冲高回落/板块失血，需要保护利润。' if severe_count else '暂未触发持仓级强告警，继续观察板块排名和个股VWAP。'}"
+        f"{'已有持仓出现冲高回落/板块失血，需要保护利润。' if severe_count else '暂未触发持仓级强告警，继续观察板块排名和个股分时均价。'}"
     )
     return MarketSeesawOut(
-        source="+".join(dict.fromkeys(sources)) or "diagnostic",
+        source="+".join(dict.fromkeys(sources)) or "数据源不可用",
         updated_at=datetime.now(),
         market_mode=market_mode,
         summary=summary,

@@ -12,6 +12,8 @@ const LABELS: Record<string, string> = {
   LOW: '低', MEDIUM: '中', HIGH: '高',
   FLOW_NEW_HIGH: '资金新高', FLOW_PEAK_REVERSAL: '资金见顶回落',
   FLOW_TURN_NEGATIVE: '资金由正转负',
+  REDUCE: '减仓', PROTECT: '利润保护', EXIT: '退出', HOLD: '持有', OBSERVE: '观察',
+  REDUCE_ALL: '全面减仓', BLOCK_NEW_POSITION: '禁止新开仓',
   NO_T: '禁止做T', INTRADAY_T: '日内做T', ROLLING_T: '滚动做T',
   PRICE: '价格', EXPECTATION: '预期', VOLUME_PRICE: '量价', ACTION: '动作',
 }

@@ -20,5 +20,5 @@ def risk_position(payload: RiskPositionIn) -> RiskPositionOut:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 @router.get("/intel/daily", response_model=InformationDifferentialOut)
-def information_differential(date: str | None = None) -> InformationDifferentialOut:
-    return market_provider.information_differential(date=date)
+def information_differential(date: str | None = None, force_refresh: bool = False) -> InformationDifferentialOut:
+    return market_provider.information_differential(date=date, force_refresh=force_refresh)

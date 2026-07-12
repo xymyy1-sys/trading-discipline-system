@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
-import { AlertCircle, CheckCircle2, ExternalLink, RadioTower, Search, TrendingUp, XCircle } from 'lucide-react'
+import { AlertCircle, CheckCircle2, ExternalLink, RadioTower, RefreshCcw, Search, TrendingUp, XCircle } from 'lucide-react'
 import { API_BASE } from '../api'
 
 import type { InformationDifferentialOut as IntelData } from '../types'
@@ -15,13 +15,23 @@ export default function IntelDesk() {
   const [filter, setFilter] = useState<string>('全部')
   const [query, setQuery] = useState('')
   const [expanded, setExpanded] = useState<Set<string>>(new Set())
+  const [loading, setLoading] = useState(false)
+  const [error, setError] = useState('')
 
-  useEffect(() => {
-    fetch(`${API_BASE}/api/intel/daily`)
-      .then(r => r.json())
+  const load = (force = false) => {
+    setLoading(true)
+    setError('')
+    fetch(`${API_BASE}/api/intel/daily${force ? '?force_refresh=true' : ''}`)
+      .then(async r => {
+        if (!r.ok) throw new Error(`资讯接口返回 ${r.status}`)
+        return r.json()
+      })
       .then(setIntel)
-      .catch(() => {})
-  }, [])
+      .catch(reason => setError(reason instanceof Error ? reason.message : '行业要闻加载失败'))
+      .finally(() => setLoading(false))
+  }
+
+  useEffect(() => { load() }, [])
 
   const items = useMemo(() => intel?.items ?? [], [intel])
   const filtered = useMemo(() => {
@@ -49,8 +59,12 @@ export default function IntelDesk() {
         <div className="intel-meta">
           <span>更新：{intel?.date ?? '--'}</span>
           <span>源：{intel?.source ?? '--'}</span>
+          <button className="refresh-btn inline" type="button" disabled={loading} onClick={() => load(true)}>
+            <RefreshCcw size={14} />{loading ? '获取中' : '获取最新要闻'}
+          </button>
         </div>
       </header>
+      {error && <p className="error-msg">{error}。系统不会使用模拟新闻填充。</p>}
 
       <div className="intel-stats-bar">
         <button className={`stat-chip ${filter === '全部' ? 'active' : ''}`} onClick={() => setFilter('全部')}>

@@ -66,7 +66,7 @@ export default function FlowDesk() {
       .then(({ data, fetchedAt }) => {
         setHotThemes(data)
         setFetchedAt(fetchedAt)
-        setApiNote(data.source.includes('fallback') ? '东方财富热点 · 资金补充受限' : '东方财富热点题材')
+        setApiNote(data.items.length ? '东方财富热点题材' : '东方财富热点数据源不可用')
       })
       .catch(() => setApiNote('后端未启动'))
       .finally(() => setLoading(false))
@@ -372,7 +372,7 @@ function KV({ label, value, tone }: { label: string; value: string; tone?: 'up' 
 }
 
 function sourceLabel(source: string, notes: string[]) {
-  if (source.includes('diagnostic')) return '诊断数据'
+  if (source.includes('unavailable')) return '真实资金数据源不可用'
   if (source.includes('sina')) return '新浪资金流兜底'
   if (source.includes('eastmoney-fflow')) return '东方财富板块资金 · 分时'
   if (source.includes('snapshots')) {

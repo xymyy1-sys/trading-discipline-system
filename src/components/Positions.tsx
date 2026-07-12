@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { CheckCircle2, Pencil, Plus, RefreshCcw, Save, ShieldAlert, Trash2, X } from 'lucide-react'
 import { API_BASE } from '../api'
+import { chineseEvidence, chineseLabel } from '../labels'
 
 import type {
   HoldingOut as Holding,
@@ -453,7 +454,7 @@ export default function Positions() {
           </button>
         </div>
         {accountRisk && <div className="account-risk-summary">
-          <strong>账户风险 {accountRisk.level}</strong>
+          <strong>账户风险 {chineseLabel(accountRisk.level)}</strong>
           <span className={accountRisk.daily_profit_ratio >= 0 ? 'num-up' : 'num-down'}>{accountRisk.data_complete ? `${accountRisk.daily_profit_ratio.toFixed(2)}%` : '待设置期初资产'}</span>
           <p>{accountRisk.recommended_action}</p>
           {accountRisk.evidence.map(item => <small key={item}>{item}</small>)}
@@ -717,9 +718,9 @@ export default function Positions() {
                 <div className="execution-card-head">
                   <div>
                     <strong>{item.name}</strong>
-                    <small>{item.code} · {item.volume_price_state} · {item.data_quality}</small>
+                    <small>{item.code} · {chineseLabel(item.volume_price_state)} · {chineseLabel(item.data_quality)}</small>
                   </div>
-                  <span style={{ color: actionColor(item.state) }}>{item.recommended_action}</span>
+                  <span style={{ color: actionColor(item.state) }}>{chineseEvidence(item.recommended_action)}</span>
                 </div>
                 <div className="execution-line-grid">
                   <div><b>最大浮盈</b><span>{item.profit_snapshot ? `${item.profit_snapshot.maximum_profit_pct.toFixed(2)}%` : '--'}</span></div>
@@ -750,7 +751,7 @@ export default function Positions() {
                     {(item.events?.length ? item.events.slice(0, 3) : []).map(event => (
                       <p key={event.id ?? `${event.captured_at}-${event.event_type}`}>
                         <span>{timeLabel(event.captured_at)}</span>
-                        {event.event_type} · {event.confirmed ? '已确认' : '观察'} · {event.evidence?.[0] ?? event.severity}
+                        {chineseLabel(event.event_type)} · {event.confirmed ? '已确认' : '观察'} · {chineseEvidence(event.evidence?.[0] ?? chineseLabel(event.severity))}
                       </p>
                     ))}
                     {!item.events?.length && <p><span>--</span>暂无新事件</p>}
@@ -849,8 +850,8 @@ export default function Positions() {
                     {execution ? (
                       <div className="execution-cell-box">
                         <div className="execution-cell-head">
-                          <b style={{ color: actionColor(execution.state) }}>{execution.recommended_action}</b>
-                          <span>{execution.state}</span>
+                          <b style={{ color: actionColor(execution.state) }}>{chineseEvidence(execution.recommended_action)}</b>
+                          <span>{chineseLabel(execution.state)}</span>
                         </div>
                         <div className="execution-cell-lines">
                           <span>最大浮盈 {execution.profit_snapshot?.maximum_profit_pct.toFixed(2) ?? '--'}%</span>

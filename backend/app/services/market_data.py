@@ -4,7 +4,6 @@ import uuid
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
-from random import Random
 from typing import Any
 
 from app.schemas.trading import (
@@ -81,23 +80,10 @@ def _safe_int(value: Any, default: int = 0) -> int:
 def _money_yuan_to_yi(value: Any) -> float:
     return round(_safe_float(value) / 1e8, 2)
 
-def _synthetic_timeline_points(label_times: list[str], final_value: float) -> list[SectorFlowPoint]:
-    if abs(final_value) < 0.01:
-        return [SectorFlowPoint(time=label, value=0.0) for label in label_times]
-    sign = 1 if final_value >= 0 else -1
-    mag = abs(final_value)
-    wave_profile = [0.0, 0.08, -0.04, 0.06, -0.09, 0.05, 0.11, -0.06, 0.0]
-    progress = [0.08, 0.16, 0.28, 0.35, 0.48, 0.56, 0.72, 0.84, 1.0]
-    amplitude = min(0.24, max(0.06, 2.8 / (mag + 8)))
-    pts: list[SectorFlowPoint] = []
-    rng = Random(int(abs(hash(str(final_value))) % 10000))
-    for i, label in enumerate(label_times):
-        jitter = rng.uniform(-0.028, 0.028)
-        shaped = progress[i] + wave_profile[i] * amplitude + jitter
-        shaped = max(0.02, min(1.08, shaped))
-        pts.append(SectorFlowPoint(time=label, value=round(sign * mag * shaped, 2)))
-    pts[-1].value = round(final_value, 2)
-    return pts
+def _snapshot_only_timeline(final_value: float) -> list[SectorFlowPoint]:
+    # A single real snapshot must stay a single point.  Never fabricate an
+    # intraday curve for a trading decision UI.
+    return _current_timeline_point(final_value)
 
 def _current_timeline_point(final_value: float) -> list[SectorFlowPoint]:
     return [SectorFlowPoint(time="当前", value=round(float(final_value or 0), 2))]
@@ -119,7 +105,7 @@ def _sanitize_flow_timeline(points: list[SectorFlowPoint], final_value: float) -
 
 class MarketDataProvider:
     def __init__(self) -> None:
-        self.random = Random(20260704)
+        pass
 
     def theme_radar(self, force_refresh: bool = False) -> ThemeRadarOut:
         cache_key = "theme-radar"
@@ -165,11 +151,7 @@ class MarketDataProvider:
                         source_parts.append(f"{cached_source}-cached-{theme_type}")
 
         if not raw_items:
-            raw_items = self._fallback_sector_flow_raw()
-            for row in raw_items:
-                row["theme_type"] = "诊断"
-            source_parts.append("diagnostic")
-            notes.append("外部板块数据不可用，显示诊断样例")
+            notes.append("外部板块数据不可用；不生成模拟题材、模拟核心股或模拟资金")
 
         deduped: dict[str, dict[str, Any]] = {}
         for row in raw_items:
@@ -382,10 +364,7 @@ class MarketDataProvider:
             stock_count=int(raw.get("stock_count") or len(constituents) or 0),
             leader_names=leader_names[:4] or ["待识别"],
             core_stocks=roles[:8],
-            timeline=self._theme_timeline(raw) if include_timeline else _synthetic_timeline_points(
-                ["09:30", "10:00", "10:30", "11:00", "11:30", "13:30", "14:00", "14:30", "15:00"],
-                float(raw.get("net_inflow") or 0),
-            ),
+            timeline=self._theme_timeline(raw) if include_timeline else _snapshot_only_timeline(float(raw.get("net_inflow") or 0)),
             resonance_tags=tags,
             action=action,
             risk=risk,
@@ -594,8 +573,7 @@ class MarketDataProvider:
             if len(points) >= 2:
                 return points
 
-        label_times = ["09:30", "10:00", "10:30", "11:00", "11:30", "13:30", "14:00", "14:30", "15:00"]
-        return _synthetic_timeline_points(label_times, float(raw.get("net_inflow") or 0))
+        return _snapshot_only_timeline(float(raw.get("net_inflow") or 0))
 
     def _fetch_sina_sector_flow_raw(self, flow_type: str, period: str) -> list[dict[str, Any]]:
         if period != "今日":
@@ -744,8 +722,8 @@ class MarketDataProvider:
                             data_date = _last_trading_day()
                         source = f"{source}+cached"
                     else:
-                        raw_items = self._fallback_sector_flow_raw()
-                        source = "diagnostic-fallback"
+                        raw_items = []
+                        source = "unavailable"
 
         snapshot_recorded = _is_trading_time()
         if snapshot_recorded:
@@ -1014,26 +992,10 @@ class MarketDataProvider:
                 ))
 
         if not items:
-            fallback = self._fallback_sector_flow_raw()
-            items = [
-                HotThemeItem(
-                    name=str(row.get("name") or "未知题材"),
-                    board_code=str(row.get("board_code") or "") or None,
-                    period="今日",
-                    rank=idx,
-                    change_pct=round(float(row.get("change_pct") or 0), 2),
-                    net_inflow=round(float(row.get("net_inflow") or 0), 2),
-                    main_inflow=round(float(row.get("main_inflow") or 0), 2),
-                    source="diagnostic-fallback",
-                    reason="外部热点接口不可用，使用诊断样例",
-                    leaders=[str(x) for x in row.get("leaders", []) if str(x).strip()],
-                )
-                for idx, row in enumerate(fallback[:12], start=1)
-            ]
-            notes.append("热点题材外部源不可用，显示诊断样例")
+            notes.append("热点题材外部源不可用；不展示模拟热点")
 
         result = HotThemesOut(
-            source="eastmoney-hotmarket" if not notes else "eastmoney-hotmarket+fallback",
+            source="东方财富市场热点" if items else "数据源不可用",
             updated_at=datetime.utcnow(),
             items=items[:45],
             notes=notes or ["东方财富市场热点榜已同步；资金字段按板块资金榜补充"],
@@ -1110,8 +1072,8 @@ class MarketDataProvider:
                     raw_items, source, _ = cached
                     source = f"{source}+cached"
                 else:
-                    raw_items = self._fallback_sector_flow_raw()
-                    source = "diagnostic-fallback"
+                    raw_items = []
+                    source = "unavailable"
 
         target = self._match_sector_raw(raw_items, name=name, board_code=board_code)
         if target is None:
@@ -1141,9 +1103,7 @@ class MarketDataProvider:
                 notes.append(f"成分股暂不可用: {exc.__class__.__name__}")
 
         if not constituents_raw:
-            constituents_raw = self._fallback_sector_constituents_raw(str(target.get("name") or name))
-            if "diagnostic" not in source:
-                notes.append("使用诊断成分股样例，等待外部成分股接口恢复")
+            notes.append("外部成分股接口不可用；不展示模拟成分股")
 
         constituents = [self._build_constituent(item, target) for item in constituents_raw]
         constituents.sort(key=lambda item: (item.change_pct, item.amount), reverse=True)
@@ -1199,8 +1159,9 @@ class MarketDataProvider:
             raw_items = self._fetch_limit_up_pool_raw(target_date)
         except Exception as exc:
             notes.append(f"涨停池暂不可用: {exc.__class__.__name__}")
-            raw_items = self._fallback_limit_up_pool_raw()
-            source = "diagnostic-fallback"
+            raw_items = []
+            source = "unavailable"
+            notes.append("不生成模拟涨停股票")
 
         stocks = [self._build_limit_up_stock(item) for item in raw_items]
         stocks.sort(key=lambda item: (item.consecutive_limit_days, item.sealed_amount, item.amount), reverse=True)
@@ -1274,24 +1235,6 @@ class MarketDataProvider:
                 mainline,
             ]))[:4],
         )
-
-    def _fallback_sector_constituents_raw(self, sector_name: str) -> list[dict[str, Any]]:
-        bases = ["龙头股份", "容量核心", "趋势前排", "补涨一号", "补涨二号", "中军标的", "辨识度股", "低位首板"]
-        rows: list[dict[str, Any]] = []
-        for idx, label in enumerate(bases, start=1):
-            change = round(10.02 - idx * 0.72 + self.random.uniform(-0.25, 0.35), 2)
-            rows.append({
-                "code": f"60{idx:04d}",
-                "name": f"{sector_name[:2]}{label}",
-                "price": round(8 + idx * 1.7, 2),
-                "change_pct": change,
-                "amount": round(12 - idx * 0.9, 2),
-                "turnover": round(4 + idx * 0.8, 2),
-                "main_inflow": round(1.8 - idx * 0.12, 2),
-                "net_inflow": round(1.2 - idx * 0.1, 2),
-                "float_cap": round(80 + idx * 15, 2),
-            })
-        return rows
 
     def _fetch_limit_up_pool_raw(self, trade_date: str) -> list[dict[str, Any]]:
         date_text = trade_date.replace("-", "")
@@ -1482,36 +1425,6 @@ class MarketDataProvider:
         if break_count >= 2:
             return "封板反复，明日先看弱转强确认"
         return "首板观察，重点看是否带出同板块补涨"
-
-    def _fallback_limit_up_pool_raw(self) -> list[dict[str, Any]]:
-        themes = [
-            ("机器人", "机器人 / 物理AI", 3),
-            ("PCB", "PCB / 玻璃基板", 2),
-            ("创新药", "创新药", 2),
-            ("黄金", "贵金属 / 黄金", 1),
-            ("算力", "AI应用 / 算力", 1),
-        ]
-        rows: list[dict[str, Any]] = []
-        seq = 1
-        for industry, _, count in themes:
-            for i in range(count + 1):
-                level = max(1, count - i + 1)
-                rows.append({
-                    "代码": f"00{seq:04d}",
-                    "名称": f"{industry[:2]}涨停{seq}",
-                    "最新价": round(7.5 + seq * 1.3, 2),
-                    "涨跌幅": 10.0,
-                    "成交额": (6 + seq * 0.7) * 1e8,
-                    "换手率": round(5 + i * 1.8, 2),
-                    "封板资金": (1.8 - i * 0.18) * 1e8,
-                    "首次封板时间": f"09{35 + i:02d}00",
-                    "最后封板时间": f"14{20 + i:02d}00",
-                    "炸板次数": i % 2,
-                    "连板数": level,
-                    "所属行业": industry,
-                })
-                seq += 1
-        return rows
 
     def _normalize_board_type(self, board_type: str) -> str:
         text = str(board_type or "").strip()
@@ -1935,54 +1848,36 @@ class MarketDataProvider:
             })
         return results
 
-    def _fallback_sector_flow_raw(self) -> list[dict[str, Any]]:
-        names = [
-            "机器人", "半导体", "证券", "算力", "电力设备", "创新药", "低空经济",
-            "消费电子", "有色金属", "煤炭", "房地产", "传媒", "白酒", "光伏",
-            "国防军工", "汽车零部件", "中药", "化学制药", "银行", "保险",
-        ]
-        items: list[dict[str, Any]] = []
-        for i, name in enumerate(names):
-            net = round(18 - i * 1.8 + self.random.uniform(-2.5, 2.5), 2)
-            chg = round(net / 8 + self.random.uniform(-1.5, 1.5), 2)
-            items.append({
-                "name": name,
-                "board_code": "",
-                "change_pct": chg,
-                "net_inflow": net,
-                "main_inflow": round(net * self.random.uniform(0.45, 0.8), 2),
-                "strength": max(0, min(100, int(55 + net * 2))),
-                "leaders": ["龙头候选", "容量核心", "前排强势"],
-            })
-        return items
-
-    def information_differential(self, date: str | None = None) -> InformationDifferentialOut:
+    def information_differential(self, date: str | None = None, force_refresh: bool = False) -> InformationDifferentialOut:
         if date:
             target_date = date
         elif _is_trading_day():
             target_date = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
         else:
             target_date = _last_trading_day()
+        cache_key = f"information-differential|{target_date}"
+        if not force_refresh:
+            cached = _get_response_cache(cache_key)
+            if cached is not None:
+                return cached
         raw_items: list[dict[str, object]] = []
         notes: list[str] = []
         sources: list[str] = []
 
         try:
             raw_items.extend(self._fetch_eastmoney_fast_news())
-            sources.append("eastmoney")
+            sources.append("东方财富快讯")
         except Exception as exc:
             notes.append(f"东方财富快讯暂不可用: {exc.__class__.__name__}")
 
         try:
             raw_items.extend(self._fetch_cctv_news(target_date))
-            sources.append("cctv")
+            sources.append("央视新闻")
         except Exception as exc:
             notes.append(f"新闻联播暂不可用: {exc.__class__.__name__}")
 
         if not raw_items:
-            raw_items = self._fallback_information_items(target_date)
-            sources.append("diagnostic")
-            notes.append("外部资讯源不可用，显示诊断样例")
+            notes.append("外部资讯源不可用；不展示诊断样例或虚构要闻")
 
         try:
             flow = self.sector_flow()
@@ -1991,19 +1886,15 @@ class MarketDataProvider:
 
         scored = [self._score_information_item(item, flow) for item in raw_items]
         scored = [item for item in scored if item.sectors or item.keywords]
-        if not scored:
-            scored = [
-                self._score_information_item(item, flow)
-                for item in self._fallback_information_items(target_date)
-            ]
-            notes.append("本批外部资讯暂未命中 A 股信息差关键词，显示诊断样例")
+        if raw_items and not scored:
+            notes.append("本批真实资讯暂未命中 A 股行业关键词")
 
         scored.sort(key=lambda item: item.strength_score, reverse=True)
         watchlist: list[str] = []
         for item in scored:
             if item.fund_status == "资金已验证":
                 watchlist.extend(item.sectors[:2])
-        return InformationDifferentialOut(
+        result = InformationDifferentialOut(
             source="+".join(dict.fromkeys(sources)),
             date=target_date,
             updated_at=datetime.utcnow(),
@@ -2011,10 +1902,12 @@ class MarketDataProvider:
             watchlist=list(dict.fromkeys(watchlist))[:8],
             data_notes=notes or ["东方财富快讯与新闻联播已同步"],
         )
+        _set_response_cache(cache_key, result)
+        return result
 
     def _fetch_eastmoney_fast_news(self) -> list[dict[str, object]]:
         resp = requests.get(
-            "https://np-listapi.eastmoney.com/comm/web/getFastNewsList",
+            "https://np-weblist.eastmoney.com/comm/web/getFastNewsList",
             params={
                 "client": "web",
                 "biz": "web_724",
@@ -2162,30 +2055,3 @@ class MarketDataProvider:
             url=str(item.get("url")) if item.get("url") else None,
         )
 
-    def _fallback_information_items(self, target_date: str) -> list[dict[str, object]]:
-        return [
-            {
-                "title": "工信部推进量子信息标准化工作",
-                "summary": "围绕量子计算、量子通信、量子精密测量等方向完善行业标准。",
-                "source": "诊断样例",
-                "published_at": target_date,
-                "url": None,
-                "related_stocks": [],
-            },
-            {
-                "title": "国务院部署循环经济与能源结构优化",
-                "summary": "到 2030 年资源循环利用产业规模提升，新能源电力消费比重提高。",
-                "source": "诊断样例",
-                "published_at": target_date,
-                "url": None,
-                "related_stocks": [],
-            },
-            {
-                "title": "金融关键基础设施安全保护征求意见",
-                "summary": "金融、数据安全、网络安全基础设施获得政策关注。",
-                "source": "诊断样例",
-                "published_at": target_date,
-                "url": None,
-                "related_stocks": [],
-            },
-        ]
