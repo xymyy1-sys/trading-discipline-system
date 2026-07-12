@@ -9,12 +9,16 @@ import { CanvasRenderer } from 'echarts/renderers'
 
 import type { ExpectationRule, HoldingOut, StockDecisionCard } from '../types'
 
+type DecisionCardMode = 'watchlist' | 'holding'
+type WatchlistStock = { code: string; name: string; score: number; tier: string }
+
 echarts.use([LineChart, BarChart, ScatterChart, GridComponent, LegendComponent, TooltipComponent, CanvasRenderer])
 
-export default function DecisionCard() {
+export default function DecisionCard({ mode = 'watchlist' }: { mode?: DecisionCardMode }) {
   const [code, setCode] = useState('')
   const [card, setCard] = useState<StockDecisionCard | null>(null)
   const [holdings, setHoldings] = useState<HoldingOut[]>([])
+  const [watchlist, setWatchlist] = useState<WatchlistStock[]>([])
   const [loading, setLoading] = useState(false)
   const [message, setMessage] = useState('')
   const [rules, setRules] = useState<ExpectationRule[]>([])
@@ -42,10 +46,11 @@ export default function DecisionCard() {
   }
 
   useEffect(() => {
-    fetch(`${API_BASE}/api/holdings`)
+    fetch(mode === 'holding' ? `${API_BASE}/api/holdings` : `${API_BASE}/api/watchlist-recommendations`)
       .then(r => r.json())
-      .then((data: HoldingOut[]) => {
-        setHoldings(data)
+      .then((data: HoldingOut[] | WatchlistStock[]) => {
+        if (mode === 'holding') setHoldings(data as HoldingOut[])
+        else setWatchlist((data as WatchlistStock[]).slice(0, 10))
         if (data[0]) {
           setCode(data[0].code)
           loadCard(data[0].code)
@@ -56,7 +61,7 @@ export default function DecisionCard() {
       .then(r => r.json())
       .then((data: ExpectationRule[]) => setRules(data))
       .catch(() => setRules([]))
-  }, [])
+  }, [mode])
 
   const updateRule = (id: number, patch: Partial<ExpectationRule>) => {
     setRules(current => current.map(rule => rule.id === id ? { ...rule, ...patch } : rule))
@@ -117,11 +122,21 @@ export default function DecisionCard() {
         </div>}
       </section>
 
-      {holdings.length > 0 && (
+      {mode === 'holding' && holdings.length > 0 && (
         <div className="decision-holding-strip">
           {holdings.slice(0, 10).map(item => (
             <button key={item.id} className={card?.code === item.code ? 'active' : ''} type="button" onClick={() => loadCard(item.code)}>
               {item.name}<span>{item.code}</span>
+            </button>
+          ))}
+        </div>
+      )}
+
+      {mode === 'watchlist' && watchlist.length > 0 && (
+        <div className="decision-holding-strip">
+          {watchlist.map(item => (
+            <button key={item.code} className={card?.code === item.code ? 'active' : ''} type="button" onClick={() => loadCard(item.code)}>
+              {item.name}<span>{item.code} · {item.score}分</span>
             </button>
           ))}
         </div>
@@ -150,9 +165,11 @@ export default function DecisionCard() {
               <div><b>可信度</b><span>{(card.expectation.confidence * 100).toFixed(0)}%</span></div>
             </div>
 
-            <DecisionMinuteChart card={card} />
+            <ExpectationJourney card={card} />
 
-            {card.volume_price && (
+            {mode === 'holding' && <DecisionMinuteChart card={card} />}
+
+            {mode === 'holding' && card.volume_price && (
               <div className="decision-section volume-price-section">
                 <b>量价快照 · {card.volume_price.stage}</b>
                 <p>{chineseLabel(card.volume_price.pattern)} · {chineseLabel(card.volume_price.data_quality)} · {chineseLabel(card.volume_price.data_source || '行情源待确认')}</p>
@@ -183,7 +200,7 @@ export default function DecisionCard() {
               </div>
             )}
 
-            {card.consensus_risk && (
+            {mode === 'holding' && card.consensus_risk && (
               <div className="decision-section">
                 <b>获利盘与一致性风险 · {card.consensus_risk.level} · {card.consensus_risk.score}</b>
                 <ul>
@@ -201,7 +218,7 @@ export default function DecisionCard() {
               </ul>
             </div>
 
-            {card.execution_state && (
+            {mode === 'holding' && card.execution_state && (
               <div className="decision-section execution-conclusion">
                 <b>执行结论</b>
                 <p>{chineseEvidence(card.execution_state.recommended_action)} · {chineseLabel(card.execution_state.state)}</p>
@@ -235,7 +252,7 @@ export default function DecisionCard() {
             )}
           </section>
 
-          <aside className="panel decision-side">
+          {mode === 'holding' && <aside className="panel decision-side">
             <h3>允许 / 禁止动作</h3>
             <div className="decision-action-lists">
               <div>
@@ -258,9 +275,9 @@ export default function DecisionCard() {
                 </ul>
               </div>
             ) : <p className="plain-text">非持仓股不生成做T计划。</p>}
-          </aside>
+          </aside>}
 
-          <section className="panel decision-timeline">
+          {mode === 'holding' && <section className="panel decision-timeline">
             <h3>证据时间线</h3>
             {card.timeline.length ? card.timeline.map(item => (
               <article key={`${item.event_type}-${item.captured_at}`}>
@@ -270,11 +287,38 @@ export default function DecisionCard() {
                 <p>{chineseEvidence(item.evidence[0] || `${item.value} / ${item.previous_value}`)}</p>
               </article>
             )) : <p className="plain-text">暂无盘中事件，刷新持仓执行后会自动沉淀。</p>}
-          </section>
+          </section>}
         </div>
       ) : (
         <div className="panel"><p className="plain-text">输入股票代码后生成个股决策卡。</p></div>
       )}
+    </section>
+  )
+}
+
+function ExpectationJourney({ card }: { card: StockDecisionCard }) {
+  const expectation = card.expectation
+  const actualOpen = expectation.actual_open_pct
+  const openingText = actualOpen === 0 && expectation.state_transition === 'WAITING_VALIDATION'
+    ? '等待下一交易日集合竞价'
+    : `${actualOpen >= 0 ? '+' : ''}${actualOpen.toFixed(2)}%`
+  const gapText = expectation.state_transition === 'WAITING_VALIDATION'
+    ? '尚未验证'
+    : `${chineseEvidence(expectation.state_transition)}（预期差 ${expectation.expectation_gap_score >= 0 ? '+' : ''}${expectation.expectation_gap_score}）`
+
+  return (
+    <section className="expectation-journey">
+      <div className="expectation-journey-head">
+        <div><strong>预期管理链</strong><span>收盘形成基准，竞价、开盘和盘中逐阶段验证并修正。</span></div>
+        <span className="expectation-date">验证日 {expectation.trade_date}</span>
+      </div>
+      <div className="expectation-journey-grid">
+        <article><small>① 收盘基准</small><b>{chineseLabel(expectation.base_expectation)}</b><p>{expectation.evidence[0] || '根据收盘量价、题材和资金证据自动推演。'}</p></article>
+        <article><small>② 次日合理开盘</small><b>{expectation.expected_open_low.toFixed(1)}% ～ {expectation.expected_open_high.toFixed(1)}%</b><p>区间外才构成显著预期差，不只看涨跌颜色。</p></article>
+        <article><small>③ 集合竞价 / 开盘</small><b>{openingText}</b><p>{expectation.stage === '次日盘前预期' ? '等待真实竞价后更新。' : `当前阶段：${expectation.stage}`}</p></article>
+        <article><small>④ 实际与预期差</small><b>{gapText}</b><p>当前涨幅 {expectation.actual_change_pct >= 0 ? '+' : ''}{expectation.actual_change_pct.toFixed(2)}%</p></article>
+        <article><small>⑤ 执行修正</small><b>{chineseLabel(expectation.expectation_result)}</b><p>{expectation.suggestion}</p></article>
+      </div>
     </section>
   )
 }

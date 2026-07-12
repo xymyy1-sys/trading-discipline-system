@@ -30,6 +30,7 @@ import HistoricalReplay from './components/HistoricalReplay'
 
 const PositionOverview = () => <Positions mode="overview" />
 const PositionDiscipline = () => <Positions mode="discipline" />
+const HoldingExpectationCockpit = () => <DecisionCard mode="holding" />
 const LimitPlans = () => <NextDayPlans mode="limit" />
 const HoldingPlans = () => <NextDayPlans mode="holding" />
 
@@ -247,6 +248,7 @@ function PositionExecutionWorkspace() {
       forbidden={['预期证伪后补仓', '用做T掩盖止损', '利润保护失效仍等待回本']}
       modules={[
         { key: 'positions', label: '持仓总览', description: '数量、成本、现价、盈亏和仓位事实', Component: PositionOverview },
+        { key: 'expectation', label: '持仓预期驾驶舱', description: '次日基准、竞价验证、分钟量价、事件轨迹与预期差', Component: HoldingExpectationCockpit },
         { key: 'discipline', label: '执行纪律', description: '状态机、时间止损、利润保护和做T约束', Component: PositionDiscipline },
         { key: 'next-plan', label: '持仓次日计划', description: '仅针对普通持仓的下一交易日操作计划', Component: HoldingPlans },
       ]}

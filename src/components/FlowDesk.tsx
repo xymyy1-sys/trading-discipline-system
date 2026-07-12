@@ -114,7 +114,7 @@ export default function FlowDesk() {
         <div className="flow-header">
           <div className="flow-title-block">
             <h2>资金流证据</h2>
-            <p>东方财富板块资金、热点题材、暗盘资金分开展示；没有连续分时数据时只给榜单，不画假曲线。</p>
+            <p>东方财富板块资金、热点题材、成交拆单估算分开展示；没有连续分时数据时只给榜单，不画假曲线。</p>
           </div>
 
           <div className="segmented">
@@ -125,7 +125,7 @@ export default function FlowDesk() {
               <Flame size={14} /> 热点题材
             </button>
             <button className={tab === 'dark' ? 'selected' : ''} type="button" onClick={() => setTab('dark')}>
-              <MoonStar size={14} /> 暗盘资金
+              <MoonStar size={14} /> 成交拆单估算
             </button>
           </div>
 
@@ -225,9 +225,9 @@ export default function FlowDesk() {
           )}
           {tab === 'dark' && darkTop && (
             <>
-              <KV label="暗盘第一" value={darkTop.name} />
-              <KV label="暗盘资金" value={`${fmtYi(darkTop.dark_amount)}亿`} tone={darkTop.dark_amount >= 0 ? 'up' : 'down'} />
-              <KV label="含暗盘主力" value={`${fmtYi(darkTop.main_net_inflow_with_dark)}亿`} tone={darkTop.main_net_inflow_with_dark >= 0 ? 'up' : 'down'} />
+              <KV label="拆单估算第一" value={darkTop.name} />
+              <KV label="隐性资金估算" value={`${fmtYi(darkTop.dark_amount)}亿`} tone={darkTop.dark_amount >= 0 ? 'up' : 'down'} />
+              <KV label="合计主力估算" value={`${fmtYi(darkTop.main_net_inflow_with_dark)}亿`} tone={darkTop.main_net_inflow_with_dark >= 0 ? 'up' : 'down'} />
             </>
           )}
         </Panel>
@@ -244,7 +244,7 @@ export default function FlowDesk() {
           <div className="rule-list">
             <span>主力资金：东方财富板块资金流，失败才回落新浪</span>
             <span>热点题材：东方财富市场热点榜，资金字段按板块资金补充</span>
-            <span>暗盘资金：东方财富算法口径，非 A 股真实暗盘交易</span>
+            <span>成交拆单估算：东方财富算法榜单，非夜市委托、非交易所真实暗盘</span>
           </div>
         </Panel>
       </section>
@@ -299,16 +299,16 @@ function HotThemePanel({ data, loading }: { data: HotThemesOut | null; loading: 
 }
 
 function DarkTradePanel({ data, loading, query }: { data: DarkTradeOut | null; loading: boolean; query: string }) {
-  if (loading && !data) return <EmptyState title="暗盘资金同步中" body="正在读取东方财富暗盘资金榜。" />
-  if (!data?.items.length) return <EmptyState title="暂无暗盘资金" body="东方财富暗盘接口暂未返回数据。" />
+  if (loading && !data) return <EmptyState title="成交拆单估算同步中" body="正在读取东方财富算法榜单。" />
+  if (!data?.items.length) return <EmptyState title="暂无成交拆单估算" body="东方财富算法接口暂未返回数据。" />
 
   const keyword = query.trim().toLowerCase()
   const items = keyword ? data.items.filter(item => item.name.toLowerCase().includes(keyword) || item.code.toLowerCase().includes(keyword)) : data.items
   return (
     <div className="flow-data-panel">
       <div className="dark-table-head">
-        <strong>{data.scope}暗盘资金榜</strong>
-        <span>交易日 {data.trade_date}</span>
+        <strong>{data.scope}成交拆单估算榜</strong>
+        <span>共 {data.items.length} 条 · 交易日 {data.trade_date}</span>
       </div>
       <div className="drawer-table-wrap dark-table-wrap">
         <table className="pos-table detail-table dark-flow-table">
@@ -317,9 +317,9 @@ function DarkTradePanel({ data, loading, query }: { data: DarkTradeOut | null; l
               <th>排名</th>
               <th>名称</th>
               <th>涨幅</th>
-              <th className="num">暗盘资金</th>
-              <th className="num">明盘资金</th>
-              <th className="num">主力净流入含暗盘</th>
+              <th className="num">隐性资金估算</th>
+              <th className="num">显性资金估算</th>
+              <th className="num">合计主力估算</th>
               <th className="num">活跃度</th>
               <th className="num">流入比例</th>
               <th>领涨/行业</th>

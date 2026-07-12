@@ -365,6 +365,7 @@ def build_expectation_snapshot(
         evidence_json=_json_dumps(evidence),
         counter_evidence_json=_json_dumps(counter),
         suggestion=suggestion,
+        created_at=datetime.now(),
     )
     if persist:
         db.add(row)
@@ -433,7 +434,27 @@ def decision_card(db: Session, code: str) -> StockDecisionCardOut:
     now = datetime.now()
     stage = current_expectation_stage(now)
     during_market = now.weekday() < 5 and time(9, 15) <= now.time() <= time(15, 0)
-    expectation = build_expectation_snapshot(db, code, name=name, stage=stage, quote=quote, base_hint=base_hint)
+    baseline = (
+        db.query(ExpectationSnapshot)
+        .filter(
+            ExpectationSnapshot.code.in_([code, code.lstrip("0")]),
+            ExpectationSnapshot.stage == "次日盘前预期",
+            ExpectationSnapshot.trade_date >= _today(),
+        )
+        .order_by(ExpectationSnapshot.trade_date.asc(), ExpectationSnapshot.created_at.desc())
+        .first()
+    )
+    if during_market:
+        expectation = build_expectation_snapshot(
+            db, code, name=name, stage=stage, quote=quote,
+            base_hint=(baseline.base_expectation if baseline else base_hint), persist=True,
+        )
+    elif baseline:
+        expectation = _expectation_out(baseline)
+    else:
+        expectation = build_expectation_snapshot(
+            db, code, name=name, stage=stage, quote=quote, base_hint=base_hint, persist=False,
+        )
     daily_metrics = _daily_history_metrics(code)
     volume_price = build_volume_price_snapshot(db, code, name=name, stage=stage, quote=quote, daily_metrics=daily_metrics, persist=during_market)
     consensus_risk = build_consensus_risk(quote, expectation, volume_price, daily_metrics)

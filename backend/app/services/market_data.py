@@ -1018,6 +1018,7 @@ class MarketDataProvider:
         try:
             rows, remote_date = self._fetch_eastmoney_dark_trade_raw(normalized, date_text)
             items = [self._build_dark_trade_item(row, normalized) for row in rows]
+            notes.append(f"接口本次返回 {len(items)} 条；仅代表东方财富该算法榜单覆盖范围，不代表全市场股票总数")
         except Exception as exc:
             notes.append(f"东方财富暗盘资金接口暂不可用: {exc.__class__.__name__}")
             rows = []
@@ -1029,7 +1030,7 @@ class MarketDataProvider:
             trade_date=str(remote_date or date_text),
             updated_at=datetime.utcnow(),
             scope=normalized,
-            items=items[:60],
+            items=items,
             notes=notes,
         )
         _set_response_cache(cache_key, result)
@@ -1554,32 +1555,51 @@ class MarketDataProvider:
             "cver": 100,
             "date": date_text,
             "StartPage": 1,
-            "NumPerPage": 80,
+            "NumPerPage": 200,
             "sortflag": 6,
             "desc": 1,
             "market": market,
             "datetype": datetype,
         }
-        resp = requests.get(
-            "https://quotederivates.eastmoney.com/datacenter/darktrade",
-            params=params,
-            headers={
-                "User-Agent": "Mozilla/5.0",
-                "Referer": "https://emrnweb.eastmoney.com/graymarket/home?appfenxiang=1",
-                "Accept": "application/json,text/plain,*/*",
-                "gtoken": "",
-                "rnProjectId": "emrn.GrayMarketRank",
-            },
-            timeout=8,
-        )
-        resp.raise_for_status()
-        payload = resp.json()
-        if int(payload.get("errid") or 0) != 0:
-            raise ValueError(str(payload.get("errmsg") or "darktrade error"))
-        rows = payload.get("data") or []
+        headers = {
+            "User-Agent": "Mozilla/5.0",
+            "Referer": "https://emrnweb.eastmoney.com/graymarket/home?appfenxiang=1",
+            "Accept": "application/json,text/plain,*/*",
+            "gtoken": "",
+            "rnProjectId": "emrn.GrayMarketRank",
+        }
+        rows: list[dict[str, Any]] = []
+        remote_date = date_text
+        seen: set[tuple[str, str]] = set()
+        for page in range(1, 51):
+            params["StartPage"] = page
+            resp = requests.get(
+                "https://quotederivates.eastmoney.com/datacenter/darktrade",
+                params=params,
+                headers=headers,
+                timeout=8,
+            )
+            resp.raise_for_status()
+            payload = resp.json()
+            if int(payload.get("errid") or 0) != 0:
+                raise ValueError(str(payload.get("errmsg") or "darktrade error"))
+            remote_date = str(payload.get("1") or remote_date)
+            page_rows = payload.get("data") or []
+            if not page_rows:
+                break
+            added = 0
+            for row in page_rows:
+                key = (str(row.get("3") or ""), str(row.get("4") or ""))
+                if key in seen:
+                    continue
+                seen.add(key)
+                rows.append(row)
+                added += 1
+            if len(page_rows) < int(params["NumPerPage"]) or added == 0:
+                break
         if not rows:
             raise ValueError("empty dark trade")
-        return rows, str(payload.get("1") or date_text)
+        return rows, remote_date
 
     def _build_dark_trade_item(self, row: dict[str, Any], scope: str) -> DarkTradeItem:
         market_raw = str(row.get("3") or "")
