@@ -308,6 +308,18 @@ export interface VolumePriceSnapshot {
   active_sell_amount: number;
   active_flow_source: string;
   active_flow_estimated: boolean;
+  ma5: number;
+  ma10: number;
+  ma20: number;
+  return_5d: number;
+  return_10d: number;
+  distance_recent_high_pct: number;
+  historical_volume_ratio: number;
+  chip_profit_ratio: number;
+  chip_avg_cost: number;
+  chip_70_concentration: number;
+  chip_90_concentration: number;
+  chip_metrics_estimated: boolean;
   attack_efficiency: number;
   volume_acceleration: number;
   attack_amount: number;

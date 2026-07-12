@@ -166,7 +166,14 @@ export default function DecisionCard() {
                   <div><b>上攻段</b><span>{card.volume_price.attack_amount.toFixed(2)}亿</span></div>
                   <div><b>回落段</b><span>{card.volume_price.pullback_amount.toFixed(2)}亿</span></div>
                   <div><b>回落卖出</b><span>{card.volume_price.pullback_sell_ratio.toFixed(1)}%</span></div>
+                  <div><b>MA5 / 10 / 20</b><span>{card.volume_price.ma5.toFixed(2)} / {card.volume_price.ma10.toFixed(2)} / {card.volume_price.ma20.toFixed(2)}</span></div>
+                  <div><b>5日 / 10日涨幅</b><span>{card.volume_price.return_5d.toFixed(1)}% / {card.volume_price.return_10d.toFixed(1)}%</span></div>
+                  <div><b>距20日高点</b><span>{card.volume_price.distance_recent_high_pct.toFixed(1)}%</span></div>
+                  <div><b>历史量比</b><span>{card.volume_price.historical_volume_ratio ? card.volume_price.historical_volume_ratio.toFixed(2) : '--'}</span></div>
+                  <div><b>获利筹码估算</b><span>{card.volume_price.chip_profit_ratio.toFixed(1)}%</span></div>
+                  <div><b>筹码平均成本</b><span>{card.volume_price.chip_avg_cost ? card.volume_price.chip_avg_cost.toFixed(2) : '--'}</span></div>
                 </div>
+                {card.volume_price.chip_metrics_estimated && <p className="refresh-note">筹码指标按近30日日线成交量加权估算，不冒充行情源官方筹码分布。</p>}
                 <ul>
                   {(card.volume_price.evidence.length ? card.volume_price.evidence : ['暂无明确量价偏离。']).slice(0, 5).map(item => <li key={item}>{item}</li>)}
                 </ul>

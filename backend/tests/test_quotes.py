@@ -1,6 +1,6 @@
 import pandas as pd
 
-from app.api.helpers.quotes import _attach_minute_bars, _eastmoney_minute_bars, _eastmoney_secid, _sina_minute_bars
+from app.api.helpers.quotes import _attach_minute_bars, _daily_history_metrics, _eastmoney_minute_bars, _eastmoney_secid, _sina_minute_bars
 
 
 def test_eastmoney_secid_handles_a_share_and_etf_markets():
@@ -98,3 +98,25 @@ def test_attach_minute_bars_falls_back_to_sina_and_marks_degraded(monkeypatch):
     assert quotes["600584"]["minute_amount_estimated"] is True
     assert "新浪1分钟" in quotes["600584"]["minute_bar_source"]
     assert "primary down" in quotes["600584"]["minute_fetch_error"]
+
+
+def test_daily_history_metrics_include_ma_returns_and_estimated_chip_distribution(monkeypatch):
+    rows = []
+    for index in range(30):
+        close = 10 + index * 0.1
+        rows.append([f"2026-06-{index + 1:02d}", close - .05, close, close + .1, close - .1, 1000 + index])
+
+    class FakeResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"data": {"sh600584": {"day": rows}}}
+
+    monkeypatch.setattr("app.api.helpers.quotes.requests.get", lambda *_args, **_kwargs: FakeResponse())
+    metrics = _daily_history_metrics("600584")
+    assert metrics["ma20"] > 0
+    assert metrics["return_10d"] > 0
+    assert 0 <= metrics["chip_profit_ratio"] <= 100
+    assert metrics["chip_avg_cost"] > 0
+    assert metrics["chip_90_concentration"] >= metrics["chip_70_concentration"]

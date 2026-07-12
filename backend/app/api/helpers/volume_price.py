@@ -230,6 +230,13 @@ def _snapshot_out(row: VolumePriceSnapshot) -> VolumePriceSnapshotOut:
         active_sell_amount=row.active_sell_amount,
         active_flow_source=getattr(row, "active_flow_source", "unavailable"),
         active_flow_estimated=bool(getattr(row, "active_flow_estimated", False)),
+        ma5=getattr(row, "ma5", 0), ma10=getattr(row, "ma10", 0), ma20=getattr(row, "ma20", 0),
+        return_5d=getattr(row, "return_5d", 0), return_10d=getattr(row, "return_10d", 0),
+        distance_recent_high_pct=getattr(row, "distance_recent_high_pct", 0),
+        historical_volume_ratio=getattr(row, "historical_volume_ratio", 0),
+        chip_profit_ratio=getattr(row, "chip_profit_ratio", 0), chip_avg_cost=getattr(row, "chip_avg_cost", 0),
+        chip_70_concentration=getattr(row, "chip_70_concentration", 0), chip_90_concentration=getattr(row, "chip_90_concentration", 0),
+        chip_metrics_estimated=bool(getattr(row, "chip_metrics_estimated", True)),
         attack_efficiency=row.attack_efficiency,
         volume_acceleration=row.volume_acceleration,
         attack_amount=getattr(row, "attack_amount", 0),
@@ -250,11 +257,14 @@ def build_volume_price_snapshot(
     name: str = "",
     stage: str = "盘中状态",
     quote: dict[str, Any] | None = None,
+    daily_metrics: dict[str, float] | None = None,
     persist: bool = True,
 ) -> VolumePriceSnapshotOut:
     from app.api.helpers.decision import quote_for_code
 
+    from app.api.helpers.quotes import _daily_history_metrics
     quote = quote or quote_for_code(code)
+    daily = daily_metrics if daily_metrics is not None else _daily_history_metrics(code)
     lookup_code = _quote_lookup_code(code, {code: quote}) if quote else code
     price = _safe_float(quote.get("price"))
     change_pct = _safe_float(quote.get("change_pct"))
@@ -299,6 +309,12 @@ def build_volume_price_snapshot(
     )
     active_flow_source = "provider_tick_direction" if has_explicit_active_flow else ("minute_price_direction_estimate" if minute_rows else "unavailable")
     active_flow_estimated = bool(minute_rows) and not has_explicit_active_flow
+    recent_high = _safe_float(daily.get("recent_high"))
+    distance_recent_high_pct = (price / recent_high - 1) * 100 if price > 0 and recent_high > 0 else 0
+    historical_volume_ratio = (
+        (_safe_float(quote.get("volume")) / 100) / _safe_float(daily.get("five_day_avg_volume"))
+        if _safe_float(quote.get("volume")) > 0 and _safe_float(daily.get("five_day_avg_volume")) > 0 else 0
+    )
     note = str(quote.get("note") or "")
     data_quality = "realtime" if quote and _is_realtime_note(note) else ("degraded" if quote else "manual")
     if quote and not vwap_reliable:
@@ -348,6 +364,12 @@ def build_volume_price_snapshot(
         active_sell_amount=round(active_sell_amount, 2),
         active_flow_source=active_flow_source,
         active_flow_estimated=active_flow_estimated,
+        ma5=round(_safe_float(daily.get("ma5")), 4), ma10=round(_safe_float(daily.get("ma10")), 4), ma20=round(_safe_float(daily.get("ma20")), 4),
+        return_5d=round(_safe_float(daily.get("return_5d")), 2), return_10d=round(_safe_float(daily.get("return_10d")), 2),
+        distance_recent_high_pct=round(distance_recent_high_pct, 2), historical_volume_ratio=round(historical_volume_ratio, 2),
+        chip_profit_ratio=round(_safe_float(daily.get("chip_profit_ratio")), 2), chip_avg_cost=round(_safe_float(daily.get("chip_avg_cost")), 4),
+        chip_70_concentration=round(_safe_float(daily.get("chip_70_concentration")), 2), chip_90_concentration=round(_safe_float(daily.get("chip_90_concentration")), 2),
+        chip_metrics_estimated=True,
         attack_efficiency=round(attack_efficiency, 2),
         volume_acceleration=round(volume_acceleration, 2),
         attack_amount=round(attack_amount, 2),

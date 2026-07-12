@@ -370,6 +370,24 @@ def _daily_history_metrics(code: str) -> dict[str, float]:
             if len(closes) <= days or closes[-days - 1] <= 0:
                 return 0.0
             return (closes[-1] / closes[-days - 1] - 1) * 100
+        weighted = sorted(zip(closes[-30:], volumes[-30:]), key=lambda item: item[0])
+        total_weight = sum(weight for _, weight in weighted if weight > 0)
+        def weighted_quantile(ratio: float) -> float:
+            target = total_weight * ratio
+            running = 0.0
+            for value, weight in weighted:
+                running += max(0, weight)
+                if running >= target:
+                    return value
+            return weighted[-1][0] if weighted else 0.0
+        current_close = closes[-1] if closes else 0.0
+        chip_profit_ratio = (
+            sum(weight for close, weight in weighted if close <= current_close) / total_weight * 100
+            if total_weight > 0 else 0.0
+        )
+        chip_avg_cost = sum(close * weight for close, weight in weighted) / total_weight if total_weight > 0 else 0.0
+        q15, q85 = weighted_quantile(.15), weighted_quantile(.85)
+        q05, q95 = weighted_quantile(.05), weighted_quantile(.95)
         return {
             "five_day_avg_volume": sum(prev_volumes[-5:]) / len(prev_volumes[-5:]) if prev_volumes else 0,
             "ma5": sum(closes[-5:]) / len(closes[-5:]) if closes else 0,
@@ -379,7 +397,13 @@ def _daily_history_metrics(code: str) -> dict[str, float]:
             "return_2d": cumulative_return(2),
             "return_3d": cumulative_return(3),
             "return_5d": cumulative_return(5),
+            "return_10d": cumulative_return(10),
             "recent_high": max(highs[-20:], default=0),
+            "latest_volume": volumes[-1] if volumes else 0,
+            "chip_profit_ratio": chip_profit_ratio,
+            "chip_avg_cost": chip_avg_cost,
+            "chip_70_concentration": (q85 - q15) / (q85 + q15) * 100 if q85 + q15 > 0 else 0,
+            "chip_90_concentration": (q95 - q05) / (q95 + q05) * 100 if q95 + q05 > 0 else 0,
         }
     except Exception:
         return {}

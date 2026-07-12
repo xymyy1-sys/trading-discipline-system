@@ -340,8 +340,9 @@ def decision_card(db: Session, code: str) -> StockDecisionCardOut:
     base_hint = holding.position_type if holding else ""
     stage = current_expectation_stage()
     expectation = build_expectation_snapshot(db, code, name=name, stage=stage, quote=quote, base_hint=base_hint)
-    volume_price = build_volume_price_snapshot(db, code, name=name, stage=stage, quote=quote)
-    consensus_risk = build_consensus_risk(quote, expectation, volume_price, _daily_history_metrics(code))
+    daily_metrics = _daily_history_metrics(code)
+    volume_price = build_volume_price_snapshot(db, code, name=name, stage=stage, quote=quote, daily_metrics=daily_metrics)
+    consensus_risk = build_consensus_risk(quote, expectation, volume_price, daily_metrics)
     cumulative_amount = 0.0
     cumulative_volume = 0.0
     minute_chart = []
