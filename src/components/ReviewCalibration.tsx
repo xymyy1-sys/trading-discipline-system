@@ -42,9 +42,10 @@ export default function ReviewCalibration() {
           <h2>执行校准概览</h2>
           <p>{summary.focus}</p>
         </div>
-        <button className="refresh-btn inline" type="button" onClick={load} disabled={loading}>
-          <RefreshCcw size={14} />刷新
-        </button>
+        <div className="header-actions">
+          <button className="refresh-btn inline" type="button" onClick={() => { window.location.href = `${API_BASE}/api/acceptance/report?download=true` }}><ClipboardCheck size={14} />导出验收报告</button>
+          <button className="refresh-btn inline" type="button" onClick={load} disabled={loading}><RefreshCcw size={14} />刷新</button>
+        </div>
       </header>
 
       <div className="calibration-metrics">

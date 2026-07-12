@@ -299,3 +299,12 @@ def test_effectiveness_endpoints_require_sample_gate(client):
         assert response.status_code == 200
         assert response.json()["auto_calibration_allowed"] is False
         assert "sample_count" in response.json()["metric"]
+
+
+def test_acceptance_report_contains_security_sse_and_t1(client):
+    response = client.get("/api/acceptance/report")
+    assert response.status_code == 200
+    report = response.json()
+    assert report["security"]["authentication_required"] is True
+    assert report["sse"]["authenticated"] is True
+    assert "t_plus_one_validations" in report
