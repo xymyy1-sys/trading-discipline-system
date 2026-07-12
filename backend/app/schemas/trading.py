@@ -452,6 +452,31 @@ class IntradayCollectorStatusOut(BaseModel):
     last_run: CollectionRunOut | None = None
 
 
+class TimeStopRuleUpdate(BaseModel):
+    confirmation_deadline: str | None = None
+    below_vwap_minutes: int | None = None
+    below_vwap_min_bars: int | None = None
+    recent_window_minutes: int | None = None
+    failed_limit_reseal_pct: float | None = None
+    enabled: bool | None = None
+
+
+class TimeStopRuleOut(BaseModel):
+    id: int | None = None
+    script_type: str
+    display_name: str
+    confirmation_deadline: str
+    below_vwap_minutes: int
+    below_vwap_min_bars: int
+    recent_window_minutes: int
+    failed_limit_reseal_pct: float
+    enabled: bool = True
+    updated_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
 class TradeLogCreate(BaseModel):
     code: str
     name: str

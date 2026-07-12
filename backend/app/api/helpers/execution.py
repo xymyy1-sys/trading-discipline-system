@@ -29,6 +29,7 @@ from app.models.trading import (
     PositionStateHistory,
     ProfitProtectionSnapshot,
     TradeLog,
+    TimeStopRule,
     VolumePriceSnapshot,
 )
 from app.schemas.trading import (
@@ -43,6 +44,36 @@ from app.schemas.trading import (
 
 WEAK_EXPECTATION_RESULTS = {"WEAKER", "INVALID", "SLIGHTLY_WEAKER"}
 STRONG_EXPECTATION_RESULTS = {"STRONGER", "SLIGHTLY_STRONGER"}
+
+DEFAULT_TIME_STOP_RULES: dict[str, dict[str, Any]] = {
+    "default": {
+        "display_name": "默认剧本",
+        "confirmation_deadline": "10:00",
+        "below_vwap_minutes": 5,
+        "below_vwap_min_bars": 5,
+        "recent_window_minutes": 15,
+        "failed_limit_reseal_pct": 0.985,
+        "enabled": True,
+    },
+    "breakout": {
+        "display_name": "打板/冲板",
+        "confirmation_deadline": "09:45",
+        "below_vwap_minutes": 3,
+        "below_vwap_min_bars": 3,
+        "recent_window_minutes": 10,
+        "failed_limit_reseal_pct": 0.99,
+        "enabled": True,
+    },
+    "trend": {
+        "display_name": "趋势/容量",
+        "confirmation_deadline": "10:30",
+        "below_vwap_minutes": 8,
+        "below_vwap_min_bars": 6,
+        "recent_window_minutes": 20,
+        "failed_limit_reseal_pct": 0.985,
+        "enabled": True,
+    },
+}
 
 
 def _json_dumps(value: Any) -> str:
@@ -285,13 +316,56 @@ def _structured_stop_levels(db: Session, holding: Holding, current_stop: float, 
     return structure_stop, hard_stop_price, evidence, sources
 
 
-def _confirmation_deadline(holding: Holding) -> time:
+def _script_type_for_holding(holding: Holding) -> str:
+    text = f"{holding.position_type or ''} {holding.next_discipline or ''}"
+    if "打板" in text or "冲板" in text or "连板" in text:
+        return "breakout"
+    if "趋势" in text or "容量" in text:
+        return "trend"
+    return "default"
+
+
+def _time_stop_rule_for(db: Session | None, holding: Holding) -> dict[str, Any]:
+    script_type = _script_type_for_holding(holding)
+    base = dict(DEFAULT_TIME_STOP_RULES.get(script_type) or DEFAULT_TIME_STOP_RULES["default"])
+    base["script_type"] = script_type
+    if db is None:
+        return base
+    row = db.query(TimeStopRule).filter(TimeStopRule.script_type == script_type, TimeStopRule.enabled.is_(True)).first()
+    if row is None and script_type != "default":
+        row = db.query(TimeStopRule).filter(TimeStopRule.script_type == "default", TimeStopRule.enabled.is_(True)).first()
+    if row is None:
+        return base
+    return {
+        "script_type": row.script_type,
+        "display_name": row.display_name,
+        "confirmation_deadline": row.confirmation_deadline,
+        "below_vwap_minutes": row.below_vwap_minutes,
+        "below_vwap_min_bars": row.below_vwap_min_bars,
+        "recent_window_minutes": row.recent_window_minutes,
+        "failed_limit_reseal_pct": row.failed_limit_reseal_pct,
+        "enabled": row.enabled,
+    }
+
+
+def _parse_deadline(value: str, fallback: time) -> time:
+    match = re.match(r"^(\d{1,2})[:：](\d{2})$", str(value or "").strip())
+    if not match:
+        return fallback
+    hour = min(14, max(9, int(match.group(1))))
+    minute = min(59, max(0, int(match.group(2))))
+    return time(hour, minute)
+
+
+def _confirmation_deadline(holding: Holding, rule: dict[str, Any] | None = None) -> time:
     text = f"{holding.position_type or ''} {holding.next_discipline or ''}"
     match = re.search(r"(\d{1,2})[:：](\d{2})\s*(?:确认|截止|不修复|未修复)", text)
     if match:
         hour = min(14, max(9, int(match.group(1))))
         minute = min(59, max(0, int(match.group(2))))
         return time(hour, minute)
+    if rule:
+        return _parse_deadline(str(rule.get("confirmation_deadline") or ""), time(10, 0))
     if "打板" in text or "冲板" in text or "连板" in text:
         return time(9, 45)
     if "趋势" in text or "容量" in text:
@@ -598,19 +672,27 @@ def _time_stop_reasons(
     now: datetime,
 ) -> list[str]:
     reasons: list[str] = []
-    deadline = _confirmation_deadline(holding)
+    rule = _time_stop_rule_for(db, holding)
+    deadline = _confirmation_deadline(holding, rule)
+    below_vwap_min_bars = max(1, int(rule.get("below_vwap_min_bars") or 5))
+    below_vwap_minutes = max(1, int(rule.get("below_vwap_minutes") or 5))
+    recent_window_minutes = max(below_vwap_minutes, int(rule.get("recent_window_minutes") or 15))
+    failed_limit_reseal_pct = min(1.0, max(0.9, float(rule.get("failed_limit_reseal_pct") or 0.985)))
     if vwap_reliable and vwap > 0 and current < vwap:
         rows = quote.get("minute_bars") or quote.get("minutes") or []
         below_rows = []
         if isinstance(rows, list):
-            for row in rows[-8:]:
+            for row in rows[-max(8, below_vwap_min_bars + 2):]:
                 if not isinstance(row, dict):
                     continue
                 price = _safe_float(row.get("price") or row.get("close"))
                 if price > 0 and price < vwap:
                     below_rows.append(row)
-        if len(below_rows) >= 5:
-            reasons.append(f"真实分钟数据连续 {len(below_rows)} 根低于VWAP {vwap:.2f}，触发时间止损观察。")
+        if len(below_rows) >= below_vwap_min_bars:
+            reasons.append(
+                f"{rule.get('display_name')}规则：真实分钟数据连续 {len(below_rows)} 根低于VWAP {vwap:.2f}，"
+                f"满足{below_vwap_minutes}分钟时间止损观察。"
+            )
         else:
             normalized = _normalize_code(holding.code)
             candidates = {holding.code, normalized, normalized.lstrip("0")}
@@ -619,21 +701,24 @@ def _time_stop_reasons(
                 .filter(
                     VolumePriceSnapshot.code.in_(list(candidates)),
                     VolumePriceSnapshot.trade_date == _trade_date(),
-                    VolumePriceSnapshot.captured_at >= now - timedelta(minutes=15),
+                    VolumePriceSnapshot.captured_at >= now - timedelta(minutes=recent_window_minutes),
                     VolumePriceSnapshot.vwap_reliable.is_(True),
                 )
                 .order_by(VolumePriceSnapshot.captured_at.asc(), VolumePriceSnapshot.id.asc())
                 .all()
             )
             below = [row for row in recent if float(row.price or 0) < float(row.vwap or 0)]
-            if len(below) >= 3 and (below[-1].captured_at - below[0].captured_at) >= timedelta(minutes=5):
-                reasons.append("15分钟窗口内多次低于真实VWAP且持续超过5分钟，确认持续低于VWAP。")
+            if len(below) >= 3 and (below[-1].captured_at - below[0].captured_at) >= timedelta(minutes=below_vwap_minutes):
+                reasons.append(f"{recent_window_minutes}分钟窗口内多次低于真实VWAP且持续超过{below_vwap_minutes}分钟，确认持续低于VWAP。")
 
     prev_close = _safe_float(quote.get("prev_close"))
     high = _safe_float(quote.get("high"))
     limit_up_price = _safe_float(quote.get("limit_up_price")) or (round(prev_close * 1.1, 2) if prev_close else 0)
-    if limit_up_price and high >= limit_up_price * 0.995 and current < limit_up_price * 0.985:
-        reasons.append(f"盘中冲击涨停价 {limit_up_price:.2f} 后未回封，当前 {current:.2f} 已明显脱离封板区。")
+    if limit_up_price and high >= limit_up_price * 0.995 and current < limit_up_price * failed_limit_reseal_pct:
+        reasons.append(
+            f"{rule.get('display_name')}规则：盘中冲击涨停价 {limit_up_price:.2f} 后未回封，"
+            f"当前 {current:.2f} 低于回封阈值 {failed_limit_reseal_pct:.3f}。"
+        )
 
     if now.time() >= deadline and expectation_result in WEAK_EXPECTATION_RESULTS and volume_state not in {"REPAIR_CONFIRMED", "VWAP_STRONG"}:
         reasons.append(f"{deadline.strftime('%H:%M')}确认截止后预期仍偏弱且量价未修复，触发时间止损确认。")

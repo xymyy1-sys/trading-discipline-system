@@ -226,6 +226,23 @@ class PositionStateHistory(Base):
     evidence_json: Mapped[str] = mapped_column(Text, default="[]")
 
 
+class TimeStopRule(Base):
+    __tablename__ = "time_stop_rules"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    script_type: Mapped[str] = mapped_column(String(32), unique=True, index=True)
+    display_name: Mapped[str] = mapped_column(String(64), default="")
+    confirmation_deadline: Mapped[str] = mapped_column(String(8), default="10:00")
+    below_vwap_minutes: Mapped[int] = mapped_column(Integer, default=5)
+    below_vwap_min_bars: Mapped[int] = mapped_column(Integer, default=5)
+    recent_window_minutes: Mapped[int] = mapped_column(Integer, default=15)
+    failed_limit_reseal_pct: Mapped[float] = mapped_column(Float, default=0.985)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc)
+    )
+
+
 class ProfitProtectionSnapshot(Base):
     __tablename__ = "profit_protection_snapshots"
 

@@ -25,6 +25,28 @@ def test_intraday_collector_status(client):
     assert "running" in data
 
 
+def test_time_stop_rules_can_be_listed_and_updated(client):
+    response = client.get("/api/time-stop-rules")
+
+    assert response.status_code == 200
+    rules = response.json()
+    assert any(rule["script_type"] == "breakout" for rule in rules)
+
+    update = client.put("/api/time-stop-rules/breakout", json={
+        "confirmation_deadline": "09:50",
+        "below_vwap_minutes": 4,
+        "below_vwap_min_bars": 4,
+        "recent_window_minutes": 12,
+        "failed_limit_reseal_pct": 0.992,
+    })
+
+    assert update.status_code == 200
+    data = update.json()
+    assert data["confirmation_deadline"] == "09:50"
+    assert data["below_vwap_minutes"] == 4
+    assert data["failed_limit_reseal_pct"] == 0.992
+
+
 def test_intraday_review_route_returns_current_evidence(client, db_session):
     from app.models.trading import Holding
 

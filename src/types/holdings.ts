@@ -353,3 +353,16 @@ export interface IntradayReview {
   counter_evidence: string[];
   next_actions: string[];
 }
+
+export interface TimeStopRule {
+  id: number | null;
+  script_type: string;
+  display_name: string;
+  confirmation_deadline: string;
+  below_vwap_minutes: number;
+  below_vwap_min_bars: number;
+  recent_window_minutes: number;
+  failed_limit_reseal_pct: number;
+  enabled: boolean;
+  updated_at: string;
+}

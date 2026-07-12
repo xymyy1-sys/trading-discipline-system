@@ -7,6 +7,7 @@ import type {
   SectorRotationItem as RotationItem,
   MarketSeesaw as SeesawMonitor,
   PositionExecutionState,
+  TimeStopRule,
   TTradePlan,
 } from '../types'
 
@@ -14,8 +15,10 @@ export default function Positions() {
   const [holdings, setHoldings] = useState<Holding[]>([])
   const [seesaw, setSeesaw] = useState<SeesawMonitor | null>(null)
   const [executionStates, setExecutionStates] = useState<PositionExecutionState[]>([])
+  const [timeStopRules, setTimeStopRules] = useState<TimeStopRule[]>([])
   const [feedbackMessage, setFeedbackMessage] = useState('')
   const [tPlanMessage, setTPlanMessage] = useState('')
+  const [ruleMessage, setRuleMessage] = useState('')
   const [accountAsset, setAccountAsset] = useState('')
   const [assetSaving, setAssetSaving] = useState(false)
   const [assetMessage, setAssetMessage] = useState('')
@@ -46,6 +49,13 @@ export default function Positions() {
       .then(r => r.json())
       .then((data: PositionExecutionState[]) => setExecutionStates(data))
       .catch(() => setExecutionStates([]))
+  }
+
+  const fetchTimeStopRules = () => {
+    fetch(`${API_BASE}/api/time-stop-rules`)
+      .then(r => r.json())
+      .then((data: TimeStopRule[]) => setTimeStopRules(data))
+      .catch(() => setTimeStopRules([]))
   }
 
   const fetchHoldings = () => {
@@ -117,6 +127,7 @@ export default function Positions() {
     refreshQuotes()
     fetchSeesaw()
     fetchExecutionStates()
+    fetchTimeStopRules()
     const timer = window.setInterval(() => {
       refreshQuotes()
       fetchSeesaw()
@@ -273,6 +284,34 @@ export default function Positions() {
       })
       .catch(() => setTPlanMessage('做T计划生成失败'))
   }
+  const updateTimeStopRule = (rule: TimeStopRule, patch: Partial<TimeStopRule>) => {
+    const next = { ...rule, ...patch }
+    setTimeStopRules(prev => prev.map(item => item.script_type === rule.script_type ? next : item))
+  }
+  const saveTimeStopRule = (rule: TimeStopRule) => {
+    setRuleMessage('')
+    fetch(`${API_BASE}/api/time-stop-rules/${rule.script_type}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        confirmation_deadline: rule.confirmation_deadline,
+        below_vwap_minutes: rule.below_vwap_minutes,
+        below_vwap_min_bars: rule.below_vwap_min_bars,
+        recent_window_minutes: rule.recent_window_minutes,
+        failed_limit_reseal_pct: rule.failed_limit_reseal_pct,
+        enabled: rule.enabled,
+      }),
+    })
+      .then(async r => {
+        if (!r.ok) throw new Error(await r.text())
+        return r.json()
+      })
+      .then((saved: TimeStopRule) => {
+        setTimeStopRules(prev => prev.map(item => item.script_type === saved.script_type ? saved : item))
+        setRuleMessage(`${saved.display_name} 时间止损规则已保存`)
+      })
+      .catch(() => setRuleMessage('时间止损规则保存失败'))
+  }
 
   return (
     <div className="pos-layout">
@@ -326,6 +365,88 @@ export default function Positions() {
           {assetMessage && <span className="asset-message">{assetMessage}</span>}
         </div>
       </section>
+
+      {timeStopRules.length > 0 && (
+        <section className="panel time-stop-rules-panel">
+          <div className="selected-theme-head">
+            <div>
+              <strong>时间止损规则</strong>
+              <span>按剧本类型控制确认截止、持续低于VWAP和冲板未回封阈值。</span>
+            </div>
+            {ruleMessage && <span className="asset-message">{ruleMessage}</span>}
+          </div>
+          <div className="time-stop-rule-grid">
+            {timeStopRules.map(rule => (
+              <article key={rule.script_type} className="time-stop-rule-card">
+                <header>
+                  <b>{rule.display_name}</b>
+                  <label>
+                    <input
+                      type="checkbox"
+                      checked={rule.enabled}
+                      onChange={event => updateTimeStopRule(rule, { enabled: event.target.checked })}
+                    />
+                    启用
+                  </label>
+                </header>
+                <div className="time-stop-rule-fields">
+                  <label>
+                    <span>确认截止</span>
+                    <input
+                      value={rule.confirmation_deadline}
+                      onChange={event => updateTimeStopRule(rule, { confirmation_deadline: event.target.value })}
+                    />
+                  </label>
+                  <label>
+                    <span>低于VWAP分钟</span>
+                    <input
+                      type="number"
+                      min="1"
+                      max="60"
+                      value={rule.below_vwap_minutes}
+                      onChange={event => updateTimeStopRule(rule, { below_vwap_minutes: Number(event.target.value) })}
+                    />
+                  </label>
+                  <label>
+                    <span>确认K数</span>
+                    <input
+                      type="number"
+                      min="1"
+                      max="30"
+                      value={rule.below_vwap_min_bars}
+                      onChange={event => updateTimeStopRule(rule, { below_vwap_min_bars: Number(event.target.value) })}
+                    />
+                  </label>
+                  <label>
+                    <span>观察窗口</span>
+                    <input
+                      type="number"
+                      min="1"
+                      max="90"
+                      value={rule.recent_window_minutes}
+                      onChange={event => updateTimeStopRule(rule, { recent_window_minutes: Number(event.target.value) })}
+                    />
+                  </label>
+                  <label>
+                    <span>未回封阈值</span>
+                    <input
+                      type="number"
+                      min="0.9"
+                      max="1"
+                      step="0.001"
+                      value={rule.failed_limit_reseal_pct}
+                      onChange={event => updateTimeStopRule(rule, { failed_limit_reseal_pct: Number(event.target.value) })}
+                    />
+                  </label>
+                </div>
+                <button className="refresh-btn inline" type="button" onClick={() => saveTimeStopRule(rule)}>
+                  <Save size={14} />保存规则
+                </button>
+              </article>
+            ))}
+          </div>
+        </section>
+      )}
 
       {showForm && (
         <div className="pos-form panel">

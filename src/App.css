@@ -2280,6 +2280,68 @@ h4 {
   margin-right: 6px;
 }
 
+.time-stop-rules-panel {
+  display: grid;
+  gap: 12px;
+}
+
+.time-stop-rule-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.time-stop-rule-card {
+  border: 1px solid var(--border-dim);
+  background: var(--bg-surface);
+  border-radius: 8px;
+  padding: 12px;
+  display: grid;
+  gap: 10px;
+  min-width: 0;
+}
+
+.time-stop-rule-card header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.time-stop-rule-card header b {
+  color: var(--ink);
+  font-size: 14px;
+}
+
+.time-stop-rule-card header label {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--ink-muted);
+  font-size: 12px;
+}
+
+.time-stop-rule-fields {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.time-stop-rule-fields label {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.time-stop-rule-fields span {
+  color: var(--ink-dim);
+  font-size: 11px;
+}
+
+.time-stop-rule-fields input {
+  min-width: 0;
+}
+
 .execution-feedback {
   display: flex;
   flex-wrap: wrap;
@@ -4973,6 +5035,7 @@ h3 {
   }
   .execution-card-grid,
   .execution-mini-sections,
+  .time-stop-rule-grid,
   .trajectory-line {
     grid-template-columns: 1fr;
   }

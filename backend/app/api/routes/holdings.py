@@ -1,5 +1,6 @@
 import asyncio
 import json
+import re
 from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
@@ -22,6 +23,8 @@ from app.schemas.trading import (
     CollectionRunOut,
     ProfitProtectionSnapshotOut,
     StopLevelsOut,
+    TimeStopRuleOut,
+    TimeStopRuleUpdate,
     TEligibilityOut,
     TTradePlanIn,
     TTradePlanOut,
@@ -47,6 +50,7 @@ from app.models.trading import (
     ProfitProtectionSnapshot,
     RecommendationFeedback,
     TTradePlan,
+    TimeStopRule,
 )
 from app.services.intraday_collector import (
     collection_notes,
@@ -55,6 +59,12 @@ from app.services.intraday_collector import (
 )
 
 router = APIRouter()
+
+DEFAULT_TIME_STOP_RULE_ROWS = [
+    ("default", "默认剧本", "10:00", 5, 5, 15, 0.985),
+    ("breakout", "打板/冲板", "09:45", 3, 3, 10, 0.99),
+    ("trend", "趋势/容量", "10:30", 8, 6, 20, 0.985),
+]
 
 
 def _collection_run_out(row: IntradayCollectionRun | None) -> CollectionRunOut | None:
@@ -72,6 +82,29 @@ def _collection_run_out(row: IntradayCollectionRun | None) -> CollectionRunOut |
         notes=collection_notes(row),
         error_message=row.error_message,
     )
+
+
+def _ensure_time_stop_rules(db: Session) -> list[TimeStopRule]:
+    existing = {row.script_type: row for row in db.query(TimeStopRule).all()}
+    changed = False
+    for script_type, display_name, deadline, minutes, bars, window, reseal_pct in DEFAULT_TIME_STOP_RULE_ROWS:
+        if script_type in existing:
+            continue
+        row = TimeStopRule(
+            script_type=script_type,
+            display_name=display_name,
+            confirmation_deadline=deadline,
+            below_vwap_minutes=minutes,
+            below_vwap_min_bars=bars,
+            recent_window_minutes=window,
+            failed_limit_reseal_pct=reseal_pct,
+            enabled=True,
+        )
+        db.add(row)
+        changed = True
+    if changed:
+        db.commit()
+    return db.query(TimeStopRule).order_by(TimeStopRule.id.asc()).all()
 
 @router.get("/account/asset", response_model=AccountAssetOut)
 def get_account_asset(db: Session = Depends(get_db)) -> AccountAssetOut:
@@ -298,6 +331,42 @@ def get_intraday_collector_status() -> IntradayCollectorStatusOut:
 def trigger_intraday_collector() -> CollectionRunOut:
     row = run_intraday_collection_once("manual")
     return _collection_run_out(row)  # type: ignore[return-value]
+
+
+@router.get("/time-stop-rules", response_model=list[TimeStopRuleOut])
+def list_time_stop_rules(db: Session = Depends(get_db)) -> list[TimeStopRuleOut]:
+    return _ensure_time_stop_rules(db)
+
+
+@router.put("/time-stop-rules/{script_type}", response_model=TimeStopRuleOut)
+def update_time_stop_rule(
+    script_type: str,
+    payload: TimeStopRuleUpdate,
+    db: Session = Depends(get_db),
+) -> TimeStopRuleOut:
+    _ensure_time_stop_rules(db)
+    row = db.query(TimeStopRule).filter(TimeStopRule.script_type == script_type).first()
+    if row is None:
+        raise HTTPException(status_code=404, detail="time stop rule not found")
+    if payload.confirmation_deadline is not None:
+        if not re.match(r"^\d{1,2}[:：]\d{2}$", payload.confirmation_deadline):
+            raise HTTPException(status_code=400, detail="confirmation_deadline must be HH:MM")
+        row.confirmation_deadline = payload.confirmation_deadline.replace("：", ":")
+    if payload.below_vwap_minutes is not None:
+        row.below_vwap_minutes = min(60, max(1, int(payload.below_vwap_minutes)))
+    if payload.below_vwap_min_bars is not None:
+        row.below_vwap_min_bars = min(30, max(1, int(payload.below_vwap_min_bars)))
+    if payload.recent_window_minutes is not None:
+        row.recent_window_minutes = min(90, max(1, int(payload.recent_window_minutes)))
+    if payload.failed_limit_reseal_pct is not None:
+        row.failed_limit_reseal_pct = min(1.0, max(0.9, float(payload.failed_limit_reseal_pct)))
+    if payload.enabled is not None:
+        row.enabled = bool(payload.enabled)
+    row.updated_at = datetime.now()
+    db.add(row)
+    db.commit()
+    db.refresh(row)
+    return row
 
 
 @router.get("/intraday-events/stream")

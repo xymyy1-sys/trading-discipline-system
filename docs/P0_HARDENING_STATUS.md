@@ -51,12 +51,15 @@ Deferred by request:
   - Eastmoney 1-minute bars now filter by latest trading day instead of calendar today, so weekends/non-trading days can still use the latest valid intraday bars.
   - Quote metadata now records `minute_bar_status`, `minute_bar_trade_date`, and fetch errors, making missing minute data an explicit downgrade reason.
   - Shanghai/Shenzhen ETF secid mapping is covered by tests.
+- V2.2 editable time-stop rules batch:
+  - Added `time_stop_rules` with default, breakout, and trend templates.
+  - Time-stop execution now reads editable confirmation deadline, sustained VWAP-break minutes, confirming bar count, observation window, and failed reseal threshold.
+  - Added `/api/time-stop-rules` list/update APIs and a Positions workspace rule editor.
 
 ## Still Open
 
 - Enable CI in GitHub after the PAT gets `workflow` scope. The workflow file exists locally at `.github/workflows/ci.yml` but cannot be pushed by the current token.
 - Continue minute-bar production monitoring: retries/backoff metrics, provider health history, and alternate provider support beyond Eastmoney.
-- Expand time-stop thresholds into editable user-facing rule templates by script type and stage.
 - Persist attack/pullback segment metrics into dedicated columns if later analytics need filtering and aggregation.
 - Strengthen cross-sector migration scoring with original theme outflow, new theme inflow, stock weakening, and leader-switch evidence.
 - Add a front-end SSE connection health indicator and recovery notification UX beyond the current event list.

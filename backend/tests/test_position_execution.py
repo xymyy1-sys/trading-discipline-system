@@ -9,6 +9,7 @@ from app.models.trading import (
     IntradayEvidenceEvent,
     NextDayPlan,
     PositionStateHistory,
+    TimeStopRule,
     TradeLog,
     VolumePriceSnapshot,
 )
@@ -490,6 +491,16 @@ def test_time_stop_triggers_on_sustained_reliable_vwap_break(db_session):
         next_discipline="持续低于VWAP退出",
     )
     db_session.add(holding)
+    db_session.add(TimeStopRule(
+        script_type="trend",
+        display_name="趋势/容量",
+        confirmation_deadline="10:30",
+        below_vwap_minutes=5,
+        below_vwap_min_bars=5,
+        recent_window_minutes=15,
+        failed_limit_reseal_pct=0.985,
+        enabled=True,
+    ))
     db_session.commit()
     db_session.refresh(holding)
     volume = VolumePriceSnapshot(
@@ -535,6 +546,54 @@ def test_time_stop_triggers_on_sustained_reliable_vwap_break(db_session):
     )
 
     assert any("真实分钟数据连续" in item for item in state.evidence)
+    assert any(event.event_type == "TIME_STOP_TRIGGERED" for event in state.events)
+
+
+def test_time_stop_rule_can_tighten_breakout_threshold(db_session):
+    holding = Holding(
+        code="600023",
+        name="规则时间止损",
+        quantity=1000,
+        cost_price=10,
+        current_price=10.2,
+        total_asset=100000,
+        position_type="打板仓",
+        next_discipline="冲板未回封按规则处理",
+    )
+    db_session.add(holding)
+    db_session.add(TimeStopRule(
+        script_type="breakout",
+        display_name="打板/冲板",
+        confirmation_deadline="09:45",
+        below_vwap_minutes=2,
+        below_vwap_min_bars=2,
+        recent_window_minutes=8,
+        failed_limit_reseal_pct=0.995,
+        enabled=True,
+    ))
+    db_session.commit()
+    db_session.refresh(holding)
+
+    state = build_position_execution_state(
+        db_session,
+        holding,
+        quote={
+            "price": 10.9,
+            "high": 11.0,
+            "low": 10.8,
+            "open": 10.9,
+            "prev_close": 10,
+            "vwap": 10.95,
+            "minute_bars": [
+                {"price": 10.96, "volume": 1000, "amount": 10960},
+                {"price": 10.94, "volume": 1000, "amount": 10940},
+                {"price": 10.93, "volume": 1000, "amount": 10930},
+            ],
+            "note": "实时行情",
+        },
+    )
+
+    assert any("打板/冲板规则" in item for item in state.evidence)
     assert any(event.event_type == "TIME_STOP_TRIGGERED" for event in state.events)
 
 
