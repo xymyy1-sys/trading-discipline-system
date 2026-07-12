@@ -1278,6 +1278,9 @@ class InformationItem(BaseModel):
     fund_status: str
     action: str
     url: str | None = None
+    sentiment: str = "中性"
+    sentiment_reason: str = "需结合资金与价格验证"
+    related_holdings: list[str] = Field(default_factory=list)
 
 
 class InformationDifferentialOut(BaseModel):

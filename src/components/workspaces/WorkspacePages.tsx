@@ -12,7 +12,7 @@ import {
 import { API_BASE } from '../../api'
 import { chineseEvidence, chineseLabel } from '../../labels'
 
-import type { ActionRecommendation, HoldingOut, IntradayEvidenceEvent, IntradayReview, MarketSeesaw, PositionExecutionState, StockDecisionCard, ThemeRadar } from '../../types'
+import type { ActionRecommendation, HoldingOut, InformationItem, IntradayEvidenceEvent, IntradayReview, MarketSeesaw, PositionExecutionState, StockDecisionCard, ThemeRadar } from '../../types'
 
 type WorkspaceModule = {
   key: string
@@ -114,6 +114,7 @@ export function TodayDecisionSummary() {
   const [seesaw, setSeesaw] = useState<MarketSeesaw | null>(null)
   const [theme, setTheme] = useState<ThemeRadar | null>(null)
   const [loading, setLoading] = useState(false)
+  const [holdingNews, setHoldingNews] = useState<InformationItem[]>([])
 
   const load = () => {
     setLoading(true)
@@ -123,8 +124,9 @@ export function TodayDecisionSummary() {
       fetchJsonWithTimeout(`${API_BASE}/api/market/seesaw-monitor`, 8000),
       fetchJsonWithTimeout(`${API_BASE}/api/market/theme-radar`, 8000),
       fetchJsonWithTimeout(`${API_BASE}/api/alerts/active`),
+      fetchJsonWithTimeout(`${API_BASE}/api/intel/daily`, 12000),
     ]).then(results => {
-      const [holdingRes, executionRes, seesawRes, themeRes, alertRes] = results
+      const [holdingRes, executionRes, seesawRes, themeRes, alertRes, intelRes] = results
       if (holdingRes.status === 'fulfilled' && Array.isArray(holdingRes.value)) {
         setHoldings(holdingRes.value)
         setSelectedCode(current => current || holdingRes.value[0]?.code || '')
@@ -135,6 +137,7 @@ export function TodayDecisionSummary() {
       if (seesawRes.status === 'fulfilled') setSeesaw(seesawRes.value)
       if (themeRes.status === 'fulfilled') setTheme(themeRes.value)
       if (alertRes.status === 'fulfilled' && Array.isArray(alertRes.value)) setActiveAlerts(alertRes.value)
+      if (intelRes.status === 'fulfilled' && Array.isArray(intelRes.value?.items)) setHoldingNews(intelRes.value.items.filter((item: InformationItem) => item.related_holdings?.length).slice(0, 6))
     }).finally(() => setLoading(false))
   }
 
@@ -153,6 +156,13 @@ export function TodayDecisionSummary() {
   }
 
   useEffect(() => {
+    const now = new Date()
+    const minutes = now.getHours() * 60 + now.getMinutes()
+    if (now.getDay() === 0 || now.getDay() === 6 || minutes < 9 * 60 + 15 || minutes > 15 * 60 + 5) {
+      setStreamState('非交易时段，实时推送待机')
+      setStreamNotice('盘中交易时段将自动连接；盘外无需保持风险推送长连接。')
+      return
+    }
     const source = new EventSource(`${API_BASE}/api/intraday-events/stream`, { withCredentials: true })
     source.onopen = () => {
       setStreamState('实时推送已连接')
@@ -198,6 +208,7 @@ export function TodayDecisionSummary() {
   const selectedReview = selectedHolding ? intradayReviews[selectedHolding.code] ?? null : null
   const marketCycle = inferMarketCycle(theme?.market_temperature, seesaw?.market_mode)
   const earningEffect = inferEarningEffect(theme, seesaw)
+  const marketLive = isMarketSession()
 
   return (
     <section className="decision-command">
@@ -215,13 +226,13 @@ export function TodayDecisionSummary() {
       </div>
       <div className="command-card">
         <span>市场温度</span>
-        <strong>{theme?.market_temperature ?? '--'}</strong>
-        <small>最强题材：{theme?.strongest_theme?.name ?? '--'}</small>
+        <strong>{theme?.market_temperature ?? (marketLive ? '行情源待恢复' : '盘外静态')}</strong>
+        <small>最强题材：{theme?.strongest_theme?.name ?? (marketLive ? '等待盘中同步' : '沿用上一交易日基线')}</small>
       </div>
       <div className="command-card">
         <span>资金迁移</span>
-        <strong>{seesaw?.market_mode ?? '--'}</strong>
-        <small>{seesaw?.summary ?? '等待资金跷跷板数据'}</small>
+        <strong>{seesaw?.market_mode ?? (marketLive ? '等待盘中同步' : '盘外不更新')}</strong>
+        <small>{seesaw?.summary ?? (marketLive ? '等待资金跷跷板数据' : '下个交易日开盘后重新计算')}</small>
       </div>
 
       <div className="panel command-list">
@@ -264,7 +275,7 @@ export function TodayDecisionSummary() {
             <small>{item.evidence}</small>
           </article>
         ))}
-        {!seesaw?.inflow_targets?.length && <p className="plain-text">暂无资金迁移证据。</p>}
+        {!seesaw?.inflow_targets?.length && <p className="plain-text">{marketLive ? '暂无已确认的资金迁移证据。' : '非交易时段不产生新的资金迁移证据；开盘后根据板块资金曲线更新。'}</p>}
       </div>
 
       <div className="panel command-list realtime-events">
@@ -375,33 +386,34 @@ export function TodayDecisionSummary() {
         )) : <p className="plain-text">当前没有待确认操作建议。</p>}
       </div>
 
+      <div className="panel command-list holding-news-alerts">
+        <header><h3><AlertTriangle size={16} />持仓资讯提醒</h3><span className="stream-state">公告、突发新闻与政策关联</span></header>
+        {holdingNews.length ? holdingNews.map(item => <article key={item.id}>
+          <b>{item.related_holdings.join('、')}</b><span className={item.sentiment === '利好' ? 'num-up' : item.sentiment === '利空' ? 'num-down' : ''}>{item.sentiment} · {item.title}</span>
+          <small>{item.sentiment_reason}；{item.action}</small>
+          {item.url && <a href={item.url} target="_blank" rel="noreferrer">查看原文</a>}
+        </article>) : <p className="plain-text">暂未发现与当前持仓直接关联的新公告或突发新闻。</p>}
+      </div>
+
       <div className="panel command-list evidence-trajectory">
         <header>
-          <h3><Activity size={16} />盘中证据轨迹</h3>
-          <span className="stream-state">覆盖全部持仓 · {holdings.length} 只</span>
+          <h3><Activity size={16} />全持仓证据摘要</h3>
+          <span className="stream-state">点击持仓切换上方完整时间线 · {holdings.length} 只</span>
         </header>
         {trackedReviews.length ? (
           trackedReviews.map(({ holding, review }) => (
-            <article className={`trajectory-card ${review ? '' : 'trajectory-empty'}`} key={holding.code}>
+            <button type="button" className={`trajectory-card trajectory-summary ${review ? '' : 'trajectory-empty'}`} key={holding.code} onClick={() => setSelectedCode(holding.code)}>
               <div className="trajectory-head">
                 <b>{holding.name || holding.code}</b>
                 <span>{review ? chineseEvidence(review.latest_action || chineseLabel(review.latest_state)) : '等待盘中采样'}</span>
                 <small>{review ? chineseLabel(review.data_quality) : `${holding.code} · 当前无证据快照`}</small>
               </div>
-              {review && <div className="trajectory-line">
-                {review.timeline.slice(0, 4).map(event => (
-                  <div className="trajectory-point" key={`${holding.code}-${event.id}-${event.captured_at}`}>
-                    <time>{formatEventTime(event.captured_at)}</time>
-                    <strong>{chineseLabel(event.event_type)}</strong>
-                    <small>{chineseEvidence(event.evidence?.[0] ?? `${chineseLabel(event.severity)} / ${event.confirmed ? '已确认' : '待确认'}`)}</small>
-                  </div>
-                ))}
-              </div>}
-              {review && !review.timeline.length && (
-                <p className="plain-text">暂无盘中采样；等待后台采集器生成证据快照。</p>
-              )}
-              {!review && <p className="plain-text">该持仓尚未生成盘中证据。非交易时段、分钟行情源暂不可用或首次采集未完成时会出现此状态；持仓本身没有丢失。</p>}
-            </article>
+              <div className="trajectory-summary-latest">
+                <strong>{review?.timeline[0] ? chineseLabel(review.timeline[0].event_type) : '暂无事件'}</strong>
+                <span>{review?.timeline[0] ? formatEventTime(review.timeline[0].captured_at) : '--:--'}</span>
+                <small>{review ? `共 ${review.timeline.length} 个关键证据点` : '等待行情源'}</small>
+              </div>
+            </button>
           ))
         ) : (
           <p className="plain-text">暂无盘中证据轨迹。后台采集器运行后会展示价格、分时均价、预期状态和动作建议的时间线。</p>
@@ -471,6 +483,12 @@ function inferMarketCycle(temperature?: string, marketMode?: string) {
   if (/高潮|过热|加速/.test(text)) return '高潮分歧'
   if (/强|活跃|主升/.test(text)) return '主升活跃'
   return '轮动分歧'
+}
+
+function isMarketSession() {
+  const now = new Date()
+  const minutes = now.getHours() * 60 + now.getMinutes()
+  return now.getDay() >= 1 && now.getDay() <= 5 && minutes >= 9 * 60 + 15 && minutes <= 15 * 60
 }
 
 function inferEarningEffect(theme: ThemeRadar | null, seesaw: MarketSeesaw | null) {

@@ -42,6 +42,8 @@ const LABELS: Record<string, string> = {
   OPENING_CONFIRMATION: '开盘确认', INTRADAY_HIGH_CONFIRMED: '日内高点确认',
   CLOSE_CONFIRMATION: '收盘确认', INTRADAY_EVIDENCE_SNAPSHOT: '盘中证据快照',
   WAITING_VALIDATION: '等待次日验证',
+  UPSIDE_BREAKOUT: '向上突破', PULLBACK_SUPPORT_HELD: '回踩支撑有效',
+  INTRADAY_LOW_CONFIRMED: '日内低点确认', SUPPORT_CONFIRMED: '支撑确认',
 }
 
 export function chineseLabel(value?: string | null) {

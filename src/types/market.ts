@@ -256,6 +256,9 @@ export interface InformationItem {
   fund_status: string;
   action: string;
   url: string | null;
+  sentiment: string;
+  sentiment_reason: string;
+  related_holdings: string[];
 }
 
 export interface InformationDifferentialOut {

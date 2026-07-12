@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from 'react'
 import { AlertCircle, CheckCircle2, ExternalLink, RadioTower, RefreshCcw, Search, TrendingUp, XCircle } from 'lucide-react'
 import { API_BASE } from '../api'
 
-import type { InformationDifferentialOut as IntelData } from '../types'
+import type { HoldingOut, InformationDifferentialOut as IntelData } from '../types'
 
 const statusConfig: Record<string, { icon: typeof CheckCircle2; cls: string; label: string }> = {
   '资金已验证': { icon: CheckCircle2, cls: 'verified', label: '资金已验证' },
@@ -17,6 +17,8 @@ export default function IntelDesk() {
   const [expanded, setExpanded] = useState<Set<string>>(new Set())
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
+  const [view, setView] = useState<'综合资讯' | '持仓相关'>('综合资讯')
+  const [holdings, setHoldings] = useState<HoldingOut[]>([])
 
   const load = (force = false) => {
     setLoading(true)
@@ -31,17 +33,24 @@ export default function IntelDesk() {
       .finally(() => setLoading(false))
   }
 
-  useEffect(() => { load() }, [])
+  useEffect(() => {
+    load()
+    fetch(`${API_BASE}/api/holdings`).then(r => r.ok ? r.json() : []).then(data => setHoldings(Array.isArray(data) ? data : [])).catch(() => undefined)
+  }, [])
 
   const items = useMemo(() => intel?.items ?? [], [intel])
   const filtered = useMemo(() => {
     const keyword = query.trim()
-    return items.filter(item => {
+    const scoped = view === '综合资讯' ? items : items.filter(item => {
+      const text = `${item.title}${item.summary}${item.related_stocks.join('')}${item.related_holdings?.join('') || ''}`
+      return holdings.some(holding => text.includes(holding.code) || text.includes(holding.name))
+    })
+    return scoped.filter(item => {
       const hitStatus = filter === '全部' || item.fund_status === filter
       const hitKeyword = !keyword || `${item.title}${item.summary}${item.sectors.join('')}${item.keywords.join('')}`.includes(keyword)
       return hitStatus && hitKeyword
     })
-  }, [filter, items, query])
+  }, [filter, holdings, items, query, view])
 
   const verifiedCnt = items.filter(i => i.fund_status === '资金已验证').length
   const waitingCnt = items.filter(i => i.fund_status === '等资金确认').length
@@ -65,6 +74,11 @@ export default function IntelDesk() {
         </div>
       </header>
       {error && <p className="error-msg">{error}。系统不会使用模拟新闻填充。</p>}
+
+      <div className="intel-view-tabs">
+        <button type="button" className={view === '综合资讯' ? 'active' : ''} onClick={() => setView('综合资讯')}>综合资讯</button>
+        <button type="button" className={view === '持仓相关' ? 'active' : ''} onClick={() => setView('持仓相关')}>持仓相关 <strong>{items.filter(item => item.related_holdings?.length).length}</strong></button>
+      </div>
 
       <div className="intel-stats-bar">
         <button className={`stat-chip ${filter === '全部' ? 'active' : ''}`} onClick={() => setFilter('全部')}>
@@ -123,6 +137,7 @@ export default function IntelDesk() {
                     <div className="intel-card-body">
                       <p className="intel-summary">{item.summary}</p>
                       <div className="intel-tags">
+                        <span className={`tag-sentiment sentiment-${item.sentiment}`}>{item.sentiment}</span>
                         {item.sectors.slice(0, 8).map(s => <span className="tag-sector" key={s}>{s}</span>)}
                         {item.keywords.slice(0, 8).map(k => <span className="tag-keyword" key={k}>{k}</span>)}
                       </div>
@@ -132,6 +147,8 @@ export default function IntelDesk() {
                           {item.related_stocks.map(s => <span className="stock-tag" key={s}>{s}</span>)}
                         </div>
                       )}
+                      {item.related_holdings?.length > 0 && <div className="intel-stocks"><span className="label">关联持仓</span>{item.related_holdings.map(name => <span className="stock-tag" key={name}>{name}</span>)}</div>}
+                      <p className="refresh-note">情绪判断：{item.sentiment_reason}</p>
                       <div className="intel-judgment">{item.action}</div>
                       {item.url && (
                         <a href={item.url} target="_blank" rel="noopener noreferrer" className="intel-link">

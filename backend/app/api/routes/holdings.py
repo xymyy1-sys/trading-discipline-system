@@ -458,6 +458,7 @@ def update_time_stop_rule(
 async def stream_intraday_events(replay: bool = False) -> StreamingResponse:
     async def event_generator():
         last_id: int | None = 0 if replay else None
+        heartbeat = 0
         while True:
             db = SessionLocal()
             try:
@@ -487,11 +488,18 @@ async def stream_intraday_events(replay: bool = False) -> StreamingResponse:
                         "evidence": json.loads(row.evidence_json or "[]"),
                     }
                     yield f"event: intraday-risk\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
+                heartbeat += 1
+                if heartbeat % 3 == 0:
+                    yield f": heartbeat {datetime.now().isoformat()}\n\n"
             finally:
                 db.close()
             await asyncio.sleep(5)
 
-    return StreamingResponse(event_generator(), media_type="text/event-stream")
+    return StreamingResponse(event_generator(), media_type="text/event-stream", headers={
+        "Cache-Control": "no-cache, no-transform",
+        "X-Accel-Buffering": "no",
+        "Connection": "keep-alive",
+    })
 
 @router.post("/recommendations/{recommendation_id}/execution-feedback", response_model=RecommendationFeedbackOut)
 def create_recommendation_feedback(

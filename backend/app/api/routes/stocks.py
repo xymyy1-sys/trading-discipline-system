@@ -207,7 +207,7 @@ def watchlist_recommendations(db: Session = Depends(get_db)) -> list[WatchlistRe
             source=" + ".join(sorted(row["sources"])),
             updated_at=max([value for value in (radar.updated_at if radar else None, ladder.updated_at if ladder else None) if value is not None], default=None),
         ))
-    return sorted(outputs, key=lambda item: (-item.score, item.code))[:30]
+    return sorted(outputs, key=lambda item: (-item.score, item.code))[:10]
 
 
 def _infer_limit_up_expectation(row: dict) -> tuple[str, float | None, list[str]]:

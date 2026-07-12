@@ -54,9 +54,14 @@ def minute_evidence_timeline(code: str, name: str, quote: dict[str, Any]) -> lis
     cumulative_volume = 0.0
     peak = 0.0
     was_above = False
+    was_below = False
     break_added = False
+    recovery_added = False
+    breakout_added = False
+    pullback_hold_added = False
     drawdown_added = False
-    for row in rows:
+    processed: list[dict[str, Any]] = []
+    for index, row in enumerate(rows):
         price = _safe_float(row.get("price") or row.get("close"))
         volume = _safe_float(row.get("volume"))
         amount = _safe_float(row.get("amount")) or price * volume
@@ -67,17 +72,32 @@ def minute_evidence_timeline(code: str, name: str, quote: dict[str, Any]) -> lis
         vwap = cumulative_amount / cumulative_volume if cumulative_volume else 0
         peak = max(peak, _safe_float(row.get("high")) or price)
         point = {"row": row, "price": price, "vwap": vwap, "peak": peak}
+        processed.append(point)
         if not points:
             points.append({**point, "type": "OPENING_CONFIRMATION", "severity": "info", "text": f"开盘分钟价格 {price:.2f}，分时均价 {vwap:.2f}。"})
         if price >= vwap:
+            if was_below and not recovery_added:
+                points.append({**point, "type": "VWAP_RECOVERED", "severity": "info", "text": f"{row.get('time')} 收复分时均价线，价格 {price:.2f}，VWAP {vwap:.2f}。"})
+                recovery_added = True
             was_above = True
         elif was_above and not break_added:
             points.append({**point, "type": "VWAP_BROKEN", "severity": "warning", "text": f"{row.get('time')} 首次由分时均价线上方跌破，价格 {price:.2f}，VWAP {vwap:.2f}。"})
             break_added = True
+            was_below = True
+        elif price < vwap:
+            was_below = True
+        if index >= 5:
+            prior_high = max(_safe_float(item.get("high") or item.get("price") or item.get("close")) for item in rows[:index])
+            if prior_high > 0 and price >= prior_high * 1.002 and not breakout_added:
+                points.append({**point, "type": "UPSIDE_BREAKOUT", "severity": "info", "text": f"{row.get('time')} 向上突破此前日内高点 {prior_high:.2f}，价格 {price:.2f}。"})
+                breakout_added = True
         drawdown = (peak - price) / peak * 100 if peak else 0
         if drawdown >= 3 and not drawdown_added:
             points.append({**point, "type": "PROFIT_DRAWDOWN_WARNING", "severity": "warning", "text": f"相对日内高点首次回撤达到 {drawdown:.2f}%，价格 {price:.2f}。"})
             drawdown_added = True
+        if breakout_added and not pullback_hold_added and 0.8 <= drawdown <= 2.5 and price >= vwap:
+            points.append({**point, "type": "PULLBACK_SUPPORT_HELD", "severity": "info", "text": f"突破后回踩未破分时均价 {vwap:.2f}，价格 {price:.2f}，承接暂时有效。"})
+            pullback_hold_added = True
     if not rows or not points:
         return []
     valid_rows = [row for row in rows if _safe_float(row.get("price") or row.get("close")) > 0]
@@ -85,6 +105,14 @@ def minute_evidence_timeline(code: str, name: str, quote: dict[str, Any]) -> lis
         high_row = max(valid_rows, key=lambda row: _safe_float(row.get("high") or row.get("price") or row.get("close")))
         high_price = _safe_float(high_row.get("high") or high_row.get("price") or high_row.get("close"))
         points.append({"row": high_row, "price": high_price, "vwap": 0, "peak": high_price, "type": "INTRADAY_HIGH_CONFIRMED", "severity": "info", "text": f"日内高点 {high_price:.2f} 在 {high_row.get('time')} 形成。"})
+        low_index, low_row = min(enumerate(valid_rows), key=lambda pair: _safe_float(pair[1].get("low") or pair[1].get("price") or pair[1].get("close")))
+        low_price = _safe_float(low_row.get("low") or low_row.get("price") or low_row.get("close"))
+        points.append({"row": low_row, "price": low_price, "vwap": 0, "peak": high_price, "type": "INTRADAY_LOW_CONFIRMED", "severity": "info", "text": f"日内低点 {low_price:.2f} 在 {low_row.get('time')} 形成，作为盘中支撑参考。"})
+        for later in valid_rows[low_index + 1:]:
+            later_price = _safe_float(later.get("price") or later.get("close"))
+            if low_price > 0 and later_price >= low_price * 1.01:
+                points.append({"row": later, "price": later_price, "vwap": low_price, "peak": high_price, "type": "SUPPORT_CONFIRMED", "severity": "info", "text": f"日内低点后反弹超过1%，{low_price:.2f}附近支撑得到初步确认。"})
+                break
         last = valid_rows[-1]
         last_price = _safe_float(last.get("price") or last.get("close"))
         points.append({"row": last, "price": last_price, "vwap": 0, "peak": peak, "type": "CLOSE_CONFIRMATION", "severity": "info", "text": f"收盘前最后分钟价格 {last_price:.2f}，用于盘后次日预期校准。"})

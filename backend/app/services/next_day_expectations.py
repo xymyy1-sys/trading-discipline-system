@@ -6,7 +6,7 @@ from datetime import date, datetime, timedelta
 from sqlalchemy.orm import Session
 
 from app.api.helpers.decision import EXPECTATION_DEFAULTS
-from app.models.trading import ExpectationSnapshot, Holding, NextDayPlan, VolumePriceSnapshot
+from app.models.trading import ExpectationSnapshot, Holding, VolumePriceSnapshot
 
 
 def next_trading_date(value: date | None = None) -> str:
@@ -17,40 +17,34 @@ def next_trading_date(value: date | None = None) -> str:
 
 
 def generate_next_day_expectations(db: Session) -> int:
-    """Upsert a closing baseline for holdings, plans, limit-up stocks and theme leaders."""
-    from app.services.market_data import MarketDataProvider
+    """Upsert baselines only for current holdings and the top ten automatic watchlist names."""
+    from app.api.routes.stocks import watchlist_recommendations
 
     targets: dict[str, dict] = {}
     for holding in db.query(Holding).all():
         targets[holding.code] = {"name": holding.name, "hint": holding.position_type or "持仓股", "evidence": ["来源：当前持仓"]}
-    for plan in db.query(NextDayPlan).order_by(NextDayPlan.updated_at.desc()).limit(500).all():
-        targets.setdefault(plan.code, {"name": plan.name, "hint": plan.holding_category or plan.plan_type or "计划股", "evidence": ["来源：次日计划"]})
-    provider = MarketDataProvider()
     try:
-        ladder = provider.limit_up_ladder()
+        recommendations = watchlist_recommendations(db)
     except Exception:
-        ladder = None
-    for group in (ladder.groups if ladder else []):
-        for stock in group.stocks:
-            hint = "强预期" if stock.consecutive_limit_days >= 2 and stock.break_count == 0 else "修复" if stock.break_count >= 2 else "主线前排"
-            targets[stock.code] = {
-                "name": stock.name, "hint": hint,
-                "evidence": [f"收盘封板：{stock.consecutive_limit_days}板、封单{stock.sealed_amount:.2f}亿、炸板{stock.break_count}次、换手{stock.turnover:.1f}%"],
-            }
-    try:
-        radar = provider.theme_radar()
-    except Exception:
-        radar = None
-    for theme in (radar.themes[:20] if radar else []):
-        for stock in theme.core_stocks:
-            if stock.code:
-                targets.setdefault(stock.code, {"name": stock.name, "hint": "主线前排", "evidence": [f"{theme.name}排名第{theme.rank}，强度{theme.score}分"]})
+        recommendations = []
+    holding_codes = set(targets)
+    for item in [row for row in recommendations if row.code not in holding_codes][:10]:
+        targets[item.code] = {
+            "name": item.name, "hint": "强预期" if item.score >= 75 else "主线前排",
+            "evidence": [f"来源：自动观察池前10；评分{item.score}，{item.theme}，{item.limit_quality}"] + item.reasons[:2],
+        }
 
     latest_volume: dict[str, VolumePriceSnapshot] = {}
     if targets:
         for row in db.query(VolumePriceSnapshot).filter(VolumePriceSnapshot.code.in_(targets)).order_by(VolumePriceSnapshot.captured_at.desc()).all():
             latest_volume.setdefault(row.code, row)
     trade_date = next_trading_date()
+    if targets:
+        db.query(ExpectationSnapshot).filter(
+            ExpectationSnapshot.trade_date == trade_date,
+            ExpectationSnapshot.stage == "次日盘前预期",
+            ~ExpectationSnapshot.code.in_(list(targets)),
+        ).delete(synchronize_session=False)
     count = 0
     for code, target in targets.items():
         hint = str(target["hint"])

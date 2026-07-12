@@ -1832,14 +1832,15 @@ class MarketDataProvider:
             })
         return results
 
-    def information_differential(self, date: str | None = None, force_refresh: bool = False) -> InformationDifferentialOut:
+    def information_differential(self, date: str | None = None, force_refresh: bool = False, related_stocks: dict[str, str] | None = None) -> InformationDifferentialOut:
         if date:
             target_date = date
         elif _is_trading_day():
             target_date = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
         else:
             target_date = _last_trading_day()
-        cache_key = f"information-differential|{target_date}"
+        related_stocks = related_stocks or {}
+        cache_key = f"information-differential|{target_date}|{','.join(sorted(related_stocks))}"
         if not force_refresh:
             cached = _get_response_cache(cache_key)
             if cached is not None:
@@ -1848,11 +1849,13 @@ class MarketDataProvider:
         notes: list[str] = []
         sources: list[str] = []
 
-        with ThreadPoolExecutor(max_workers=2) as executor:
+        with ThreadPoolExecutor(max_workers=3) as executor:
             tasks = {
                 executor.submit(self._fetch_eastmoney_fast_news): "东方财富快讯",
                 executor.submit(self._fetch_cctv_news, target_date): "央视新闻",
             }
+            if related_stocks:
+                tasks[executor.submit(self._fetch_eastmoney_announcements, list(related_stocks))] = "东方财富持仓公告"
             for future, source_name in tasks.items():
                 try:
                     raw_items.extend(future.result())
@@ -1867,7 +1870,7 @@ class MarketDataProvider:
         # confirmation instead of launching another full external request.
         flow = _get_response_cache("sector-flow|行业资金流|今日")
 
-        scored = [self._score_information_item(item, flow) for item in raw_items]
+        scored = [self._score_information_item(item, flow, related_stocks) for item in raw_items]
         scored = [item for item in scored if item.sectors or item.keywords]
         if raw_items and not scored:
             notes.append("本批真实资讯暂未命中 A 股行业关键词")
@@ -1887,6 +1890,30 @@ class MarketDataProvider:
         )
         _set_response_cache(cache_key, result)
         return result
+
+    def _fetch_eastmoney_announcements(self, codes: list[str]) -> list[dict[str, object]]:
+        resp = requests.get(
+            "https://np-anotice-stock.eastmoney.com/api/security/ann",
+            params={"sr": "-1", "page_size": "50", "page_index": "1", "ann_type": "A", "client_source": "web", "stock_list": ",".join(codes)},
+            headers={"User-Agent": "Mozilla/5.0", "Referer": "https://data.eastmoney.com/notices/"}, timeout=10,
+        )
+        resp.raise_for_status()
+        rows = (resp.json().get("data") or {}).get("list") or []
+        items: list[dict[str, object]] = []
+        for row in rows:
+            title = str(row.get("title") or "").strip()
+            art_code = str(row.get("art_code") or "")
+            stock_codes = [str(item.get("stock_code") or "") for item in (row.get("codes") or []) if isinstance(item, dict)]
+            if not title:
+                continue
+            primary = stock_codes[0] if stock_codes else ""
+            items.append({
+                "title": title, "summary": title, "source": "东方财富持仓公告",
+                "published_at": str(row.get("display_time") or row.get("notice_date") or ""),
+                "url": f"https://data.eastmoney.com/notices/detail/{primary}/{art_code}.html" if primary and art_code else None,
+                "related_stocks": stock_codes,
+            })
+        return items
 
     def _fetch_eastmoney_fast_news(self) -> list[dict[str, object]]:
         resp = requests.get(
@@ -1968,7 +1995,7 @@ class MarketDataProvider:
         return items
 
     def _score_information_item(
-        self, item: dict[str, object], flow: SectorFlowOut | None
+        self, item: dict[str, object], flow: SectorFlowOut | None, holding_map: dict[str, str] | None = None
     ) -> InformationItem:
         text = f"{item.get('title', '')} {item.get('summary', '')}"
         sector_map: dict[str, tuple[str, ...]] = {
@@ -2029,6 +2056,19 @@ class MarketDataProvider:
         if has_outflow:
             score -= 12
 
+        positive_words = ("中标", "增持", "回购", "预增", "突破", "获批", "签订", "上调", "扶持", "利好")
+        negative_words = ("减持", "立案", "处罚", "亏损", "下调", "终止", "退市", "风险", "诉讼", "利空")
+        positive_hits = [word for word in positive_words if word in text]
+        negative_hits = [word for word in negative_words if word in text]
+        sentiment = "利好" if len(positive_hits) > len(negative_hits) else "利空" if len(negative_hits) > len(positive_hits) else "中性"
+        sentiment_reason = "命中：" + "、".join((positive_hits if sentiment == "利好" else negative_hits)[:3]) if sentiment != "中性" else "未命中明确利好/利空词，等待资金与价格验证"
+        holding_map = holding_map or {}
+        item_codes = [str(s) for s in item.get("related_stocks", [])]
+        related_holding_names = [holding_map[code] for code in item_codes if code in holding_map]
+        for code, holding_name in holding_map.items():
+            if holding_name and holding_name in text and holding_name not in related_holding_names:
+                related_holding_names.append(holding_name)
+                item_codes.append(code)
         return InformationItem(
             id=str(abs(hash((item.get("title"), item.get("published_at"))))),
             title=str(item.get("title") or "").strip(),
@@ -2037,11 +2077,13 @@ class MarketDataProvider:
             published_at=str(item.get("published_at") or ""),
             keywords=keywords[:6],
             sectors=sectors[:6],
-            related_stocks=[str(s) for s in item.get("related_stocks", [])][:6],
+            related_stocks=list(dict.fromkeys(item_codes))[:6],
             strength_score=max(0, min(100, score)),
             credibility="高" if source == "新闻联播" else "中高",
             fund_status=fund_status,
             action=action,
             url=str(item.get("url")) if item.get("url") else None,
+            sentiment=sentiment, sentiment_reason=sentiment_reason,
+            related_holdings=related_holding_names[:6],
         )
 
