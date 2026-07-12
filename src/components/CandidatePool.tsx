@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { RefreshCcw } from 'lucide-react'
+import { Plus, RefreshCcw, Trash2 } from 'lucide-react'
 import { API_BASE } from '../api'
 import { chineseEvidence, chineseLabel } from '../labels'
 
@@ -22,6 +22,7 @@ export default function CandidatePool() {
   const [recommendations, setRecommendations] = useState<Recommendation[]>([])
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
+  const [manual, setManual] = useState({ code: '', name: '' })
   const load = () => {
     setLoading(true)
     setError('')
@@ -50,11 +51,24 @@ export default function CandidatePool() {
     }).finally(() => setLoading(false))
   }
   useEffect(load, [])
+  const addManual = () => {
+    if (!manual.code.trim()) return
+    fetch(`${API_BASE}/api/watchlist`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(manual) })
+      .then(r => { if (!r.ok) throw new Error('加入失败'); setManual({ code: '', name: '' }); load() })
+      .catch(() => setError('手动加入观察池失败'))
+  }
+  const removeItem = (code: string) => {
+    fetch(`${API_BASE}/api/watchlist/${code}`, { method: 'DELETE' })
+      .then(r => { if (!r.ok) throw new Error('剔除失败'); load() })
+      .catch(() => setError('剔除观察标的失败'))
+  }
   return <section className="candidate-pool">
     <header className="pos-header"><div><h2>自动观察池</h2><p>从主线题材核心股和涨停梯队中自动发现，不再只给已有持仓打分。</p></div><button className="refresh-btn inline" onClick={load} disabled={loading}><RefreshCcw size={14} />{loading ? '分析中' : '重新分析'}</button></header>
+    <div className="watchlist-editor panel"><input value={manual.code} onChange={e => setManual(value => ({ ...value, code: e.target.value }))} placeholder="6位股票代码"/><input value={manual.name} onChange={e => setManual(value => ({ ...value, name: e.target.value }))} placeholder="股票名称（可选）"/><button type="button" className="grade-btn" onClick={addManual}><Plus size={14}/>加入观察池</button><span>自动推荐最多10只；手动加入和明确剔除会持久保存。</span></div>
     {error && <p className="error-msg">{error}；这不是“暂无数据”，请检查网络或行情源。</p>}
     <div className="candidate-grid">{recommendations.map(item => <article className={`candidate-card ${item.tier === '重点观察' ? 'pool-A' : item.tier === '等待确认' ? 'pool-B' : 'pool-D'}`} key={`auto-${item.code}`}>
       <div className="candidate-head"><strong>{item.tier} · {item.name || item.code}</strong><b>{item.score}</b></div>
+      <button type="button" className="candidate-remove" onClick={() => removeItem(item.code)} title="从观察池剔除"><Trash2 size={14}/>剔除</button>
       <small>{item.code} · {item.theme || '题材待确认'} · {item.role || '角色待确认'}</small>
       {item.limit_level > 0 && <p className="candidate-positive">+ {item.limit_level}板 · {item.limit_quality}</p>}
       <div className="candidate-gates">

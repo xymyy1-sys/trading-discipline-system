@@ -492,6 +492,18 @@ class CandidateOut(BaseModel):
     updated_at: datetime | None = None
 
 
+class WatchlistEntryIn(BaseModel):
+    code: str
+    name: str = ""
+
+
+class WatchlistEntryOut(BaseModel):
+    code: str
+    name: str
+    status: str
+    source: str
+
+
 class WatchlistRecommendationOut(BaseModel):
     code: str
     name: str

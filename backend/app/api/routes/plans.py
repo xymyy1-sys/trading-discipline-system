@@ -63,6 +63,28 @@ def generate_next_day_plans(db: Session = Depends(get_db)) -> list[NextDayPlanOu
     plans: list[NextDayPlan] = []
     seen_keys: set[tuple[str, str, str]] = set()
     for holding in holdings:
+        quote = _latest_quote_for_holding(holding)
+        change_pct = float(quote.get("change_pct") or 0)
+        if change_pct >= 9.5:
+            for stale in db.query(NextDayPlan).filter(
+                NextDayPlan.plan_date == plan_date, NextDayPlan.code == holding.code, NextDayPlan.plan_type == "holding",
+            ).all():
+                db.delete(stale)
+            existing_limit = db.query(NextDayPlan).filter(
+                NextDayPlan.plan_date == plan_date, NextDayPlan.code == holding.code, NextDayPlan.plan_type == "limit_up_auction",
+            ).first()
+            payload = LimitUpPlanCreate(
+                code=holding.code, name=holding.name, price=float(quote.get("price") or holding.current_price or 0),
+                level=max(1, int(quote.get("consecutive_limit_days") or 1)), industry=str(quote.get("industry") or ""),
+                concepts=list(quote.get("concepts") or []), sealed_amount=float(quote.get("sealed_amount") or 0),
+                amount=float(quote.get("amount") or 0), turnover=float(quote.get("turnover") or 0),
+                break_count=int(quote.get("break_count") or 0), expectation="持仓股当日涨停，自动进入打板预期验证",
+            )
+            plan = _limit_up_next_day_plan(payload, plan_date, existing_limit)
+            if existing_limit is None:
+                db.add(plan)
+            plans.append(plan)
+            continue
         key = (plan_date, holding.code, "holding")
         existing_plans = (
             db.query(NextDayPlan)
@@ -77,7 +99,6 @@ def generate_next_day_plans(db: Session = Depends(get_db)) -> list[NextDayPlanOu
         existing = existing_plans[0] if existing_plans else None
         for duplicate in existing_plans[1:]:
             db.delete(duplicate)
-        quote = _latest_quote_for_holding(holding)
         plan = _default_next_day_plan(holding, plan_date, account_total_asset, quote)
         if existing:
             _sync_holding_plan(existing, plan)

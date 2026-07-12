@@ -20,7 +20,7 @@ from app.api.helpers.decision import (
 )
 from app.api.helpers.volume_price import build_volume_price_snapshot
 from app.core.database import get_db
-from app.models.trading import DataCaptureSnapshot, ExpectationRule, ExpectationSnapshot, Holding, IntradayEvidenceEvent, NextDayPlan, PositionExecutionState, VolumePriceSnapshot
+from app.models.trading import DataCaptureSnapshot, ExpectationRule, ExpectationSnapshot, Holding, IntradayEvidenceEvent, NextDayPlan, PositionExecutionState, VolumePriceSnapshot, WatchlistEntry
 from app.schemas.trading import (
     ExpectationSnapshotIn,
     ExpectationSnapshotOut,
@@ -33,6 +33,8 @@ from app.schemas.trading import (
     VolumePriceSnapshotOut,
     CandidateOut,
     WatchlistRecommendationOut,
+    WatchlistEntryIn,
+    WatchlistEntryOut,
     ReplayReportOut,
 )
 
@@ -63,6 +65,7 @@ def watchlist_recommendations(db: Session = Depends(get_db)) -> list[WatchlistRe
         raise HTTPException(status_code=503, detail="主线题材与涨停行情源暂不可用，请稍后重试；已有观察池和持仓数据未受影响")
 
     holding_codes = {row.code for row in db.query(Holding.code).all()}
+    overrides = {row.code: row for row in db.query(WatchlistEntry).all()}
     rows: dict[str, dict] = {}
     theme_source = radar.source if radar else "题材数据不可用"
     for theme in (radar.themes[:20] if radar else []):
@@ -137,6 +140,16 @@ def watchlist_recommendations(db: Session = Depends(get_db)) -> list[WatchlistRe
             row["sources"].add(ladder_source)
 
     codes = list(rows)
+    for entry in overrides.values():
+        if entry.status == "active" and entry.code not in rows:
+            rows[entry.code] = {
+                "code": entry.code, "name": entry.name or entry.code, "theme_score": 70, "limit_score": 15,
+                "theme": "手动观察", "role": "用户加入", "limit_level": 0, "limit_quality": "等待行情验证",
+                "fund_signal": "", "current_price": 0.0, "sealed_amount": 0.0, "turnover": 0.0,
+                "break_count": 0, "first_limit_time": "", "last_limit_time": "",
+                "reasons": ["用户手动加入观察池"], "risks": [], "sources": {"用户维护"},
+            }
+    codes = list(rows)
     expectations: dict[str, ExpectationSnapshot] = {}
     volumes: dict[str, VolumePriceSnapshot] = {}
     plans: dict[str, NextDayPlan] = {}
@@ -150,6 +163,8 @@ def watchlist_recommendations(db: Session = Depends(get_db)) -> list[WatchlistRe
 
     outputs: list[WatchlistRecommendationOut] = []
     for row in rows.values():
+        if overrides.get(row["code"]) and overrides[row["code"]].status == "excluded":
+            continue
         score_value = row["theme_score"] + row["limit_score"]
         expectation = expectations.get(row["code"])
         volume = volumes.get(row["code"])
@@ -208,6 +223,34 @@ def watchlist_recommendations(db: Session = Depends(get_db)) -> list[WatchlistRe
             updated_at=max([value for value in (radar.updated_at if radar else None, ladder.updated_at if ladder else None) if value is not None], default=None),
         ))
     return sorted(outputs, key=lambda item: (-item.score, item.code))[:10]
+
+
+@router.post("/watchlist", response_model=WatchlistEntryOut)
+def add_watchlist_entry(payload: WatchlistEntryIn, db: Session = Depends(get_db)) -> WatchlistEntryOut:
+    code = payload.code.strip()
+    if not code:
+        raise HTTPException(status_code=422, detail="股票代码不能为空")
+    row = db.query(WatchlistEntry).filter(WatchlistEntry.code == code).first()
+    if row is None:
+        row = WatchlistEntry(code=code, name=payload.name.strip() or code, status="active", source="manual")
+    else:
+        row.name = payload.name.strip() or row.name or code
+        row.status = "active"
+        row.source = "manual"
+        row.updated_at = datetime.now()
+    db.add(row); db.commit(); db.refresh(row)
+    return WatchlistEntryOut(code=row.code, name=row.name, status=row.status, source=row.source)
+
+
+@router.delete("/watchlist/{code}", response_model=WatchlistEntryOut)
+def exclude_watchlist_entry(code: str, db: Session = Depends(get_db)) -> WatchlistEntryOut:
+    row = db.query(WatchlistEntry).filter(WatchlistEntry.code == code).first()
+    if row is None:
+        row = WatchlistEntry(code=code, name=code, status="excluded", source="manual")
+    else:
+        row.status = "excluded"; row.updated_at = datetime.now()
+    db.add(row); db.commit(); db.refresh(row)
+    return WatchlistEntryOut(code=row.code, name=row.name, status=row.status, source=row.source)
 
 
 def _infer_limit_up_expectation(row: dict) -> tuple[str, float | None, list[str]]:

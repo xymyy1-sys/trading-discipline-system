@@ -11,7 +11,7 @@ import type {
 
 const categories = ['超预期', '强预期', '符合预期', '弱转强', '弱于预期', '分歧转弱']
 
-export default function NextDayPlans() {
+export default function NextDayPlans({ mode = 'holding' }: { mode?: 'holding' | 'limit' }) {
   const [plans, setPlans] = useState<Plan[]>([])
   const [selectedId, setSelectedId] = useState<number | null>(null)
   const [draft, setDraft] = useState<Plan | null>(null)
@@ -26,24 +26,27 @@ export default function NextDayPlans() {
     fetch(`${API_BASE}/api/next-day-plans${refresh ? '?refresh=true' : ''}`)
       .then(r => r.json())
       .then((data: Plan[]) => {
-        setPlans(data)
+        const scoped = data.filter(item => mode === 'limit' ? item.plan_type === 'limit_up_auction' : item.plan_type === 'holding')
+        setPlans(scoped)
         const now = new Date().toLocaleTimeString('zh-CN', { hour12: false })
         setStatusText(`${now} ${refresh ? '已刷新盘中现状' : '已读取计划卡'}`)
         const currentSelectedId = selectedIdRef.current
-        if (!currentSelectedId && data[0]) {
-          selectedIdRef.current = data[0].id
-          setSelectedId(data[0].id)
-          setDraft(structuredClone(data[0]))
+        if (!currentSelectedId && scoped[0]) {
+          selectedIdRef.current = scoped[0].id
+          setSelectedId(scoped[0].id)
+          setDraft(structuredClone(scoped[0]))
         } else if (currentSelectedId) {
-          const refreshed = data.find(item => item.id === currentSelectedId)
+          const refreshed = scoped.find(item => item.id === currentSelectedId)
           if (refreshed) setDraft(refreshed)
         }
       })
       .finally(() => setLoading(false))
-  }, [])
+  }, [mode])
 
   useEffect(() => {
-    loadPlans()
+    if (mode === 'limit') {
+      fetch(`${API_BASE}/api/next-day-plans/generate`, { method: 'POST' }).finally(() => loadPlans())
+    } else loadPlans()
     const loadSeesaw = () => {
       fetch(`${API_BASE}/api/market/seesaw-monitor`)
         .then(r => r.json())
@@ -51,7 +54,7 @@ export default function NextDayPlans() {
         .catch(() => {})
     }
     loadSeesaw()
-  }, [loadPlans])
+  }, [loadPlans, mode])
 
   const selected = useMemo(() => plans.find(p => p.id === selectedId) ?? null, [plans, selectedId])
   const selectedSeesaw = useMemo(
@@ -95,9 +98,10 @@ export default function NextDayPlans() {
     fetch(`${API_BASE}/api/next-day-plans/generate`, { method: 'POST' })
       .then(r => r.json())
       .then((data: Plan[]) => {
-        setPlans(data)
+        const scoped = data.filter(item => item.plan_type === 'holding')
+        setPlans(scoped)
         setStatusText('已同步：已有持仓计划刷新，新仓才新增')
-        if (data[0]) selectPlan(data[0])
+        if (scoped[0]) selectPlan(scoped[0])
       })
       .finally(() => setLoading(false))
   }
@@ -173,18 +177,18 @@ export default function NextDayPlans() {
     <section className="plan-page">
       <header className="pos-header">
         <div>
-          <h2>次日计划卡</h2>
-          <p>盘后给每只持仓分类，写清三套剧本；同步时更新已有持仓计划，只为新仓新增计划卡。</p>
+          <h2>{mode === 'limit' ? '打板预案' : '持仓次日计划'}</h2>
+          <p>{mode === 'limit' ? '只展示从涨停天梯生成的打板预案，以及当日涨停的持仓股。' : '只管理普通持仓的下一交易日剧本，涨停持仓自动转入打板预案。'}</p>
         </div>
         <div className="header-actions">
           <button className="refresh-btn inline" type="button" onClick={refreshPlanStatus} disabled={loading}>
             <RefreshCcw size={16} />
             {loading ? '刷新中' : '刷新现状'}
           </button>
-          <button className="grade-btn" type="button" onClick={generatePlans} disabled={loading}>
+          {mode === 'holding' && <button className="grade-btn" type="button" onClick={generatePlans} disabled={loading}>
             <RefreshCcw size={16} />
             {loading ? '同步中' : '生成/同步计划卡'}
-          </button>
+          </button>}
         </div>
       </header>
       {statusText && <p className="refresh-note">{statusText}</p>}

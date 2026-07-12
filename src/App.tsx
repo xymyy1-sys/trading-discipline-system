@@ -28,6 +28,11 @@ import CandidatePool from './components/CandidatePool'
 import StrategyTemplates from './components/StrategyTemplates'
 import HistoricalReplay from './components/HistoricalReplay'
 
+const PositionOverview = () => <Positions mode="overview" />
+const PositionDiscipline = () => <Positions mode="discipline" />
+const LimitPlans = () => <NextDayPlans mode="limit" />
+const HoldingPlans = () => <NextDayPlans mode="holding" />
+
 const navItems = [
   ['今日决策', Activity, '/今日决策'],
   ['选股中心', Target, '/选股中心'],
@@ -225,7 +230,8 @@ function LimitExpectationWorkspace() {
       allowed={['强预期且量价确认', '前排助攻充分', '封板质量可解释']}
       forbidden={['竞价严重低于预期仍买入', '炸板后无修复继续幻想', '弱预期不降仓']}
       modules={[
-        { key: 'plans', label: '预期与执行预案', description: '合理开盘、竞价验证、三套剧本和失效条件', Component: NextDayPlans },
+        { key: 'ladder', label: '涨停天梯', description: '从真实涨停梯队直接生成打板预案', Component: LimitUpLadder },
+        { key: 'plans', label: '打板预案', description: '仅管理涨停股、涨停持仓及其竞价与打板剧本', Component: LimitPlans },
       ]}
     />
   )
@@ -236,11 +242,13 @@ function PositionExecutionWorkspace() {
     <WorkspacePage
       title="持仓执行中心"
       subtitle="盘中持仓与风险执行"
-      objective="围绕原始买入逻辑、当前预期、利润保护、止损线、资金跷跷板和做T计划管理持仓。"
+      objective="把持仓事实、执行纪律和次日计划分开管理，避免在同一张表重复堆叠。"
       allowed={['继续持有有证据', '按状态机减仓', '只在逻辑成立时做T']}
       forbidden={['预期证伪后补仓', '用做T掩盖止损', '利润保护失效仍等待回本']}
       modules={[
-        { key: 'positions', label: '持仓与执行', description: '盈亏、状态机、止损、减仓和做T约束', Component: Positions },
+        { key: 'positions', label: '持仓总览', description: '数量、成本、现价、盈亏和仓位事实', Component: PositionOverview },
+        { key: 'discipline', label: '执行纪律', description: '状态机、时间止损、利润保护和做T约束', Component: PositionDiscipline },
+        { key: 'next-plan', label: '持仓次日计划', description: '仅针对普通持仓的下一交易日操作计划', Component: HoldingPlans },
       ]}
     />
   )

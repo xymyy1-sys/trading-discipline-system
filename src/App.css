@@ -5283,6 +5283,17 @@ h3 {
 .intel-view-tabs button.active { border-color: var(--accent); color: var(--ink); background: color-mix(in srgb, var(--accent) 9%, var(--panel)); }
 .tag-sentiment { font-weight: 700; }
 .sentiment-利好 { color: var(--up); }.sentiment-利空 { color: var(--down); }.sentiment-中性 { color: var(--ink-muted); }
+.legacy-position-table, .seesaw-panel { display: none; }
+.mode-overview .time-stop-rules-panel, .mode-overview .execution-panel { display: none; }
+.mode-discipline .account-asset-panel, .mode-discipline .pos-summary, .mode-discipline .pos-form, .mode-discipline .simple-holdings-table { display: none; }
+.mode-discipline .header-actions button:nth-child(n+3) { display: none; }
+.watchlist-editor { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; }
+.watchlist-editor input { min-width: 150px; padding: 9px 11px; border: 1px solid var(--line); border-radius: 7px; background: var(--panel); color: var(--ink); }
+.watchlist-editor span { color: var(--ink-muted); font-size: 12px; }
+.candidate-card { position: relative; }
+.candidate-remove { position: absolute; right: 12px; bottom: 10px; display: flex; align-items: center; gap: 4px; border: 0; background: transparent; color: var(--ink-muted); cursor: pointer; }
+.candidate-remove:hover { color: var(--down); }
+@media (max-width: 680px) { .watchlist-editor { align-items: stretch; flex-direction: column; }.watchlist-editor input { width: 100%; } }
 
 @media (max-width: 1100px) {
   .cockpit-detail-grid > article { grid-column: span 6; }

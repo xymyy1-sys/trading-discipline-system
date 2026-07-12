@@ -447,6 +447,18 @@ class CalibrationRun(Base):
     rolled_back_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
 
+class WatchlistEntry(Base):
+    __tablename__ = "watchlist_entries"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    code: Mapped[str] = mapped_column(String(16), unique=True, index=True)
+    name: Mapped[str] = mapped_column(String(64), default="")
+    status: Mapped[str] = mapped_column(String(16), default="active", index=True)
+    source: Mapped[str] = mapped_column(String(16), default="manual")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc))
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
+
+
 class StrategyTemplate(Base):
     __tablename__ = "strategy_templates"
 

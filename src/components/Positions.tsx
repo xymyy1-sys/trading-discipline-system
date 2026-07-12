@@ -13,7 +13,7 @@ import type {
   AccountRisk,
 } from '../types'
 
-export default function Positions() {
+export default function Positions({ mode = 'overview' }: { mode?: 'overview' | 'discipline' }) {
   const [holdings, setHoldings] = useState<Holding[]>([])
   const [seesaw, setSeesaw] = useState<SeesawMonitor | null>(null)
   const [executionStates, setExecutionStates] = useState<PositionExecutionState[]>([])
@@ -391,11 +391,11 @@ export default function Positions() {
   }
 
   return (
-    <div className="pos-layout">
+    <div className={`pos-layout mode-${mode}`}>
       <header className="pos-header">
         <div>
-          <h2>持仓快照</h2>
-          <p>当前持仓成本、浮盈浮亏、止损价、利润保护线、仓位类型、下一步纪律。</p>
+          <h2>{mode === 'overview' ? '持仓总览' : '执行纪律'}</h2>
+          <p>{mode === 'overview' ? '只展示账户、数量、成本、现价、盈亏和仓位事实。' : '集中管理持仓执行状态机、时间止损、利润保护和做T纪律。'}</p>
         </div>
         <div className="header-actions">
           <button className="refresh-btn inline" type="button" onClick={fetchHoldings} disabled={refreshing}>
@@ -589,7 +589,7 @@ export default function Positions() {
       </div>
 
       {seesaw && (
-        <section className="panel">
+        <section className="panel seesaw-panel">
           <div className="selected-theme-head">
             <div>
               <strong>盘中资金跷跷板监控 · {seesaw.market_mode}</strong>
@@ -774,12 +774,18 @@ export default function Positions() {
         </section>
       )}
 
+      {!holdingsError && holdings.length > 0 && <div className="pos-table-wrap simple-holdings-table">
+        <table className="pos-table"><thead><tr><th>代码</th><th>名称</th><th className="num">数量</th><th className="num">成本</th><th className="num">现价</th><th className="num">市值</th><th className="num">浮动盈亏</th><th className="num">浮盈%</th><th className="num">今日盈亏</th><th>仓位类型</th><th>操作</th></tr></thead>
+          <tbody>{holdings.map(h => <tr key={`simple-${h.id}`}><td className="mono">{h.code}</td><td>{h.name}</td><td className="num">{h.quantity.toLocaleString()}</td><td className="num">{h.cost_price.toFixed(2)}</td><td className="num">{h.current_price.toFixed(2)}</td><td className="num">{h.market_value.toLocaleString()}</td><td className={h.profit_amount >= 0 ? 'num num-up' : 'num num-down'}>{money(h.profit_amount)}</td><td className={h.profit_ratio >= 0 ? 'num num-up' : 'num num-down'}>{(h.profit_ratio * 100).toFixed(2)}%</td><td className={h.today_profit_amount >= 0 ? 'num num-up' : 'num num-down'}>{money(h.today_profit_amount)}</td><td>{h.position_type}</td><td><div className="table-actions"><button type="button" onClick={() => startEdit(h)}><Pencil size={14}/></button><button type="button" onClick={() => deleteHolding(h)}><Trash2 size={14}/></button></div></td></tr>)}</tbody>
+        </table>
+      </div>}
+
       {holdingsError ? (
         <div className="panel error-msg"><p>持仓数据加载失败：{holdingsError}。请稍后重试；数据库中的原有记录未因此删除。</p></div>
       ) : holdings.length === 0 ? (
         <div className="panel"><p className="plain-text">暂无持仓，点击"添加持仓"录入。</p></div>
       ) : (
-        <div className="pos-table-wrap">
+        <div className="pos-table-wrap legacy-position-table">
           <table className="pos-table">
             <thead>
               <tr>
