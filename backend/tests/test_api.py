@@ -263,3 +263,16 @@ def test_candidate_pool_excludes_invalid_execution(client, db_session):
     assert candidate["pool"] == "D"
     assert candidate["score"] < 35
     assert candidate["exclusions"]
+
+
+def test_strategy_templates_seed_and_version(client):
+    response = client.get("/api/strategies/templates")
+    assert response.status_code == 200
+    rows = response.json()
+    assert len(rows) >= 12
+    template = rows[0]
+    template["position_limit"] = 0.3
+    updated = client.put(f"/api/strategies/templates/{template['id']}", json=template)
+    assert updated.status_code == 200
+    assert updated.json()["version"] == template["version"] + 1
+    assert updated.json()["position_limit"] == 0.3

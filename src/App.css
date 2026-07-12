@@ -5152,3 +5152,12 @@ h3 {
 .candidate-head { display: flex; justify-content: space-between; gap: 10px; }.candidate-head b { font-size: 20px; }
 .candidate-card small { color: var(--ink-muted); }.candidate-card p { margin: 7px 0 0; font-size: 12px; }
 .candidate-positive { color: var(--up); }.candidate-negative { color: var(--down); }
+.strategy-template-layout { display: grid; grid-template-columns: 210px minmax(0, 1fr); gap: 14px; }
+.strategy-template-layout > nav { display: grid; align-content: start; gap: 6px; }
+.strategy-template-layout > nav button { display: grid; gap: 3px; text-align: left; padding: 10px; border: 1px solid var(--line); border-radius: 7px; background: var(--panel); color: var(--ink); }
+.strategy-template-layout > nav button.active { border-color: var(--accent); }.strategy-template-layout > nav span { color: var(--ink-muted); font-size: 11px; }
+.strategy-editor { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }.strategy-editor-head { grid-column: 1 / -1; display: flex; justify-content: space-between; }
+.strategy-editor-head div { display: grid; }.strategy-editor label { display: grid; gap: 5px; color: var(--ink-muted); font-size: 11px; }
+.strategy-editor textarea { min-height: 84px; resize: vertical; padding: 8px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel); color: var(--ink); }
+.strategy-editor input[type='number'] { width: 90px; padding: 7px; }.strategy-enabled, .strategy-editor > button { grid-column: 1 / -1; }
+@media (max-width: 760px) { .strategy-template-layout { grid-template-columns: 1fr; }.strategy-editor { grid-template-columns: 1fr; }.strategy-editor label, .strategy-editor-head, .strategy-enabled, .strategy-editor > button { grid-column: 1; } }

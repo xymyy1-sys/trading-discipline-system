@@ -27,6 +27,8 @@ Deferred by request:
 - Stock Selection workspace now includes a candidate-pool panel with positive evidence and explicit exclusion reasons.
 - Strengthened capital-migration confirmation with weighted source outflow/pullback, target inflow, stock weakness, sector ebb, ranking, risk, and leader-switch evidence.
 - Added `/api/market/capital-rotation` with per-holding confidence and confirmation details.
+- Added 12 seeded, editable, versioned trading strategy templates with complete environment, expectation, auction, volume-price, position, stop, invalidation, holding, and forbidden-action fields.
+- Stock Selection workspace includes a strategy-template editor and versioned save workflow.
 
 - Background intraday collector with status and manual run APIs.
 - Intraday collection run records.

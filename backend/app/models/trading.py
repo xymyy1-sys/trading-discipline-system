@@ -402,6 +402,30 @@ class ExpectationRule(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
 
 
+class StrategyTemplate(Base):
+    __tablename__ = "strategy_templates"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    code: Mapped[str] = mapped_column(String(48), unique=True, index=True)
+    name: Mapped[str] = mapped_column(String(64))
+    category: Mapped[str] = mapped_column(String(32), default="general")
+    market_environment_json: Mapped[str] = mapped_column(Text, default="[]")
+    prerequisites_json: Mapped[str] = mapped_column(Text, default="[]")
+    premarket_expectation_json: Mapped[str] = mapped_column(Text, default="[]")
+    auction_conditions_json: Mapped[str] = mapped_column(Text, default="[]")
+    volume_price_conditions_json: Mapped[str] = mapped_column(Text, default="[]")
+    buy_confirmation_json: Mapped[str] = mapped_column(Text, default="[]")
+    position_limit: Mapped[float] = mapped_column(Float, default=0)
+    structure_stop_json: Mapped[str] = mapped_column(Text, default="[]")
+    invalid_conditions_json: Mapped[str] = mapped_column(Text, default="[]")
+    holding_management_json: Mapped[str] = mapped_column(Text, default="[]")
+    forbidden_actions_json: Mapped[str] = mapped_column(Text, default="[]")
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    version: Mapped[int] = mapped_column(Integer, default=1)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc))
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
+
+
 class TTradePlan(Base):
     __tablename__ = "t_trade_plans"
 

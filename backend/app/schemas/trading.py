@@ -454,6 +454,31 @@ class CandidateOut(BaseModel):
     updated_at: datetime | None = None
 
 
+class StrategyTemplateIn(BaseModel):
+    code: str
+    name: str
+    category: str = "general"
+    market_environment: list[str] = Field(default_factory=list)
+    prerequisites: list[str] = Field(default_factory=list)
+    premarket_expectation: list[str] = Field(default_factory=list)
+    auction_conditions: list[str] = Field(default_factory=list)
+    volume_price_conditions: list[str] = Field(default_factory=list)
+    buy_confirmation: list[str] = Field(default_factory=list)
+    position_limit: float = 0
+    structure_stop: list[str] = Field(default_factory=list)
+    invalid_conditions: list[str] = Field(default_factory=list)
+    holding_management: list[str] = Field(default_factory=list)
+    forbidden_actions: list[str] = Field(default_factory=list)
+    enabled: bool = True
+
+
+class StrategyTemplateOut(StrategyTemplateIn):
+    id: int
+    version: int
+    created_at: datetime
+    updated_at: datetime
+
+
 class StopLevelsOut(BaseModel):
     holding_id: int
     code: str
