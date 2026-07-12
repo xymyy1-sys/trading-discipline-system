@@ -24,7 +24,7 @@ npm run dev -- --host 127.0.0.1 --port 5173
 
 1. 复制 `.env.example` 为 `.env`。
 2. 设置独立的长密码和至少 32 位随机 `AUTH_SECRET`。
-3. 保持服务器公网 8000 端口关闭；Compose 只公开前端 5173。
+3. 保持服务器公网 8000 端口关闭；Compose 默认把前端 5173 也只绑定到 `127.0.0.1`，供宿主机 TLS 代理访问。
 4. 用云负载均衡、Caddy 或宿主机 Nginx 将 HTTPS 反向代理到 `127.0.0.1:5173`。
 5. HTTPS 生效后设置 `AUTH_COOKIE_SECURE=true`，并把 HTTPS 站点地址加入 `CORS_ORIGINS`。
 6. 执行 `docker compose up -d --build`。后端启动前会自动运行 `alembic upgrade head`，不会删除已有数据。
@@ -50,6 +50,12 @@ docker compose ps
 docker compose logs --tail=100 backend
 ```
 
+也可以直接执行带备份、数据量对比、健康检查和迁移检查的流程：
+
+```bash
+bash scripts/server_upgrade.sh
+```
+
 验收：
 
 - 打开站点时先出现登录页，未登录不能读取 `/api/holdings`。
@@ -58,11 +64,19 @@ docker compose logs --tail=100 backend
 - 新增/修改一条测试数据后，`/api/audit-log` 的 `chain_valid` 为 `true`。
 - SSE 状态为已连接，分钟线来源和降级标记符合实际。
 
+配置 HTTPS 后执行自动化生产冒烟：
+
+```bash
+BASE_URL=https://trade.example.com AUTH_USERNAME=admin AUTH_PASSWORD='你的密码' bash scripts/production_smoke.sh
+```
+
 ## HTTPS 与防火墙
 
 应用容器不负责签发公网证书。建议将域名解析到服务器，并由宿主机反向代理自动签发 Let's Encrypt 证书。没有域名时可先使用云厂商 HTTPS 负载均衡；不要为了 `Secure` Cookie 使用自签名证书给普通浏览器访问。
 
 防火墙只开放 SSH、80、443；5173 可限制为本机或反向代理来源，8000 必须保持关闭。确认 HTTPS 后启用 HSTS（应在最外层 TLS 代理配置，不在当前 HTTP 容器中伪装启用）。
+
+仓库提供 `deploy/Caddyfile.example`。替换域名后可作为最小 TLS 反向代理配置；正式启用前须确保域名已解析到服务器。
 
 ## 回滚
 
