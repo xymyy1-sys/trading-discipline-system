@@ -2221,6 +2221,16 @@ h4 {
   font-variant-numeric: tabular-nums;
 }
 
+.execution-stop-source {
+  margin: 0;
+  padding: 8px 10px;
+  border-left: 3px solid var(--accent);
+  background: var(--bg-muted);
+  color: var(--ink-muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
 .execution-evidence {
   display: grid;
   gap: 4px;

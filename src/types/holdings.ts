@@ -194,6 +194,8 @@ export interface PositionExecutionState {
   recommended_reduce_ratio: number;
   structure_stop_price: number;
   hard_stop_price: number;
+  stop_source: string;
+  stop_source_detail: string;
   trailing_stop_price: number;
   profit_protection_price: number;
   t_eligible: boolean;

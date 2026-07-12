@@ -188,9 +188,21 @@ def _script_hard_stop_ratio(position_type: str) -> float:
     return 0.96
 
 
-def _script_stop_levels(holding: Holding, current_stop: float, current_hard_stop: float) -> tuple[float, float, list[str]]:
+def _stop_source_label(source: str) -> str:
+    labels = {
+        "next_day_plan": "次日计划",
+        "sell_card": "卖出卡",
+        "text_script": "交易剧本文本",
+        "fallback_candidate": "候选价兜底",
+    }
+    parts = [labels.get(part, part) for part in str(source or "").split("+") if part]
+    return " + ".join(parts) or labels["fallback_candidate"]
+
+
+def _script_stop_levels(holding: Holding, current_stop: float, current_hard_stop: float) -> tuple[float, float, list[str], list[str]]:
     text = f"{holding.position_type or ''} {holding.next_discipline or ''}"
     evidence: list[str] = []
+    sources: list[str] = []
     hard_stop = current_hard_stop or (round(holding.cost_price * _script_hard_stop_ratio(holding.position_type), 2) if holding.cost_price else 0.0)
     structure_stop = current_stop
     price_patterns = [
@@ -207,24 +219,28 @@ def _script_stop_levels(holding: Holding, current_stop: float, current_hard_stop
         if target == "hard":
             hard_stop = round(value, 2)
             evidence.append(f"按交易剧本解析硬止损 {hard_stop:.2f}。")
+            sources.append("text_script")
         else:
             structure_stop = round(value, 2)
             evidence.append(f"按交易剧本解析结构止损 {structure_stop:.2f}。")
+            sources.append("text_script")
 
     pct_match = re.search(r"(?:止损|破位|亏损)\D{0,8}(\d+(?:\.\d+)?)\s*%", text)
     if pct_match and holding.cost_price:
         pct_stop = round(holding.cost_price * (1 - float(pct_match.group(1)) / 100), 2)
         if not evidence:
             evidence.append(f"按交易剧本解析百分比止损 {pct_stop:.2f}。")
+        sources.append("text_script")
         structure_stop = max(structure_stop, pct_stop) if structure_stop else pct_stop
 
-    return structure_stop, hard_stop, evidence
+    return structure_stop, hard_stop, evidence, sources
 
 
-def _structured_stop_levels(db: Session, holding: Holding, current_stop: float, hard_stop: float) -> tuple[float, float, list[str]]:
+def _structured_stop_levels(db: Session, holding: Holding, current_stop: float, hard_stop: float) -> tuple[float, float, list[str], list[str]]:
     normalized = _normalize_code(holding.code)
     candidates = {holding.code, normalized, normalized.lstrip("0")}
     evidence: list[str] = []
+    sources: list[str] = []
     structure_stop = current_stop
     hard_stop_price = hard_stop
     plan = (
@@ -237,6 +253,7 @@ def _structured_stop_levels(db: Session, holding: Holding, current_stop: float, 
         if float(plan.final_risk_price or 0) > 0:
             hard_stop_price = round(float(plan.final_risk_price), 2)
             evidence.append(f"按次日计划最终风险价设定硬止损 {hard_stop_price:.2f}。")
+            sources.append("next_day_plan")
         plan_candidates = [
             float(plan.reduce_price or 0),
             float(plan.trim_price or 0),
@@ -247,6 +264,7 @@ def _structured_stop_levels(db: Session, holding: Holding, current_stop: float, 
         if plan_stop > 0:
             structure_stop = round(plan_stop, 2)
             evidence.append(f"按次日计划结构位设定结构止损 {structure_stop:.2f}。")
+            sources.append("next_day_plan")
     exit_card = (
         db.query(ExitCard)
         .filter(ExitCard.code.in_(list(candidates)))
@@ -257,12 +275,14 @@ def _structured_stop_levels(db: Session, holding: Holding, current_stop: float, 
         if float(exit_card.failure_price or 0) > 0:
             hard_stop_price = round(float(exit_card.failure_price), 2)
             evidence.append(f"按卖出卡失败价设定硬止损 {hard_stop_price:.2f}。")
+            sources.append("sell_card")
         card_candidates = [float(exit_card.trim_price or 0), float(exit_card.confirm_price or 0)]
         card_stop = max([value for value in card_candidates if value > 0], default=0.0)
         if card_stop > 0 and (not structure_stop or card_stop > structure_stop):
             structure_stop = round(card_stop, 2)
             evidence.append(f"按卖出卡减仓/确认价设定结构止损 {structure_stop:.2f}。")
-    return structure_stop, hard_stop_price, evidence
+            sources.append("sell_card")
+    return structure_stop, hard_stop_price, evidence, sources
 
 
 def _confirmation_deadline(holding: Holding) -> time:
@@ -777,13 +797,23 @@ def build_position_execution_state(
     hard_stop_price = round(holding.cost_price * _script_hard_stop_ratio(holding.position_type), 2) if holding.cost_price else 0.0
     support_candidates = [value for value in [vwap, open_price, low, holding.cost_price * 0.97 if holding.cost_price else 0] if value and value > 0]
     structure_stop_price = round(max(min(support_candidates), hard_stop_price), 2) if support_candidates else hard_stop_price
-    structure_stop_price, hard_stop_price, structured_stop_evidence = _structured_stop_levels(db, holding, structure_stop_price, hard_stop_price)
-    structure_stop_price, hard_stop_price, script_stop_evidence = _script_stop_levels(holding, structure_stop_price, hard_stop_price)
+    structure_stop_price, hard_stop_price, structured_stop_evidence, structured_stop_sources = _structured_stop_levels(
+        db, holding, structure_stop_price, hard_stop_price
+    )
+    structure_stop_price, hard_stop_price, script_stop_evidence, script_stop_sources = _script_stop_levels(
+        holding, structure_stop_price, hard_stop_price
+    )
+    stop_sources = list(dict.fromkeys(structured_stop_sources + script_stop_sources))
+    stop_source = "+".join(stop_sources) if stop_sources else "fallback_candidate"
+    stop_source_detail = "；".join((structured_stop_evidence + script_stop_evidence)[:4])
+    if not stop_source_detail:
+        stop_source_detail = "按VWAP、开盘价、日内低点、成本防守位和仓位类型硬止损比例生成候选止损。"
     trailing_stop_price = round(maximum_price * 0.95, 2) if maximum_price and protection_level in {"LEVEL_2", "LEVEL_3", "LEVEL_4"} else 0.0
 
     evidence: list[str] = [
         f"当前盈亏 {current_profit_pct:+.2f}%，最大浮盈 {max_profit_pct:+.2f}%，利润回撤 {profit_drawdown_pct:.2f} 个百分点。",
         f"结构止损 {structure_stop_price:.2f}，硬止损 {hard_stop_price:.2f}，利润保护线 {profit_protection_price:.2f}。",
+        f"止损来源：{_stop_source_label(stop_source)}。{stop_source_detail}",
     ]
     evidence.extend(structured_stop_evidence)
     evidence.extend(script_stop_evidence)
@@ -989,6 +1019,8 @@ def build_position_execution_state(
     state_row.recommended_reduce_ratio = reduce_ratio
     state_row.structure_stop_price = structure_stop_price
     state_row.hard_stop_price = hard_stop_price
+    state_row.stop_source = stop_source
+    state_row.stop_source_detail = stop_source_detail
     state_row.trailing_stop_price = trailing_stop_price
     state_row.profit_protection_price = profit_protection_price
     state_row.t_eligible = t_eligible
@@ -1104,6 +1136,8 @@ def _execution_state_out(
         recommended_reduce_ratio=state.recommended_reduce_ratio,
         structure_stop_price=state.structure_stop_price,
         hard_stop_price=state.hard_stop_price,
+        stop_source=getattr(state, "stop_source", "fallback_candidate") or "fallback_candidate",
+        stop_source_detail=getattr(state, "stop_source_detail", "") or "",
         trailing_stop_price=state.trailing_stop_price,
         profit_protection_price=state.profit_protection_price,
         t_eligible=state.t_eligible,

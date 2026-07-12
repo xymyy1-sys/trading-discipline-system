@@ -194,6 +194,8 @@ class PositionExecutionState(Base):
     recommended_reduce_ratio: Mapped[float] = mapped_column(Float, default=0)
     structure_stop_price: Mapped[float] = mapped_column(Float, default=0)
     hard_stop_price: Mapped[float] = mapped_column(Float, default=0)
+    stop_source: Mapped[str] = mapped_column(String(48), default="fallback_candidate")
+    stop_source_detail: Mapped[str] = mapped_column(Text, default="")
     trailing_stop_price: Mapped[float] = mapped_column(Float, default=0)
     profit_protection_price: Mapped[float] = mapped_column(Float, default=0)
     t_eligible: Mapped[bool] = mapped_column(Boolean, default=False)

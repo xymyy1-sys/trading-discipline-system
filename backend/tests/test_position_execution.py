@@ -400,6 +400,8 @@ def test_script_stop_levels_override_candidate_stop(db_session):
 
     assert state.structure_stop_price == 10.2
     assert state.hard_stop_price == 9.8
+    assert state.stop_source == "text_script"
+    assert "交易剧本解析" in state.stop_source_detail
     assert any("交易剧本解析结构止损" in item for item in state.evidence)
 
 
@@ -449,6 +451,9 @@ def test_structured_plan_and_exit_card_stop_levels_take_priority(db_session):
 
     assert state.structure_stop_price == 10.55
     assert state.hard_stop_price == 9.85
+    assert state.stop_source == "next_day_plan+sell_card"
+    assert "次日计划" in state.stop_source_detail
+    assert "卖出卡" in state.stop_source_detail
     assert any("次日计划结构位" in item for item in state.evidence)
     assert any("卖出卡失败价" in item for item in state.evidence)
 

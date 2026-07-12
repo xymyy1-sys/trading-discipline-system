@@ -191,6 +191,8 @@ class PositionExecutionStateOut(BaseModel):
     recommended_reduce_ratio: float = 0
     structure_stop_price: float = 0
     hard_stop_price: float = 0
+    stop_source: str = "fallback_candidate"
+    stop_source_detail: str = ""
     trailing_stop_price: float = 0
     profit_protection_price: float = 0
     t_eligible: bool = False
@@ -408,6 +410,8 @@ class StopLevelsOut(BaseModel):
     name: str
     structure_stop_price: float = 0
     hard_stop_price: float = 0
+    stop_source: str = "fallback_candidate"
+    stop_source_detail: str = ""
     trailing_stop_price: float = 0
     profit_protection_price: float = 0
     data_quality: str = "manual"

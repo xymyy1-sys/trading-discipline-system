@@ -496,10 +496,12 @@ export default function Positions() {
                   <div><b>最大浮盈</b><span>{item.profit_snapshot ? `${item.profit_snapshot.maximum_profit_pct.toFixed(2)}%` : '--'}</span></div>
                   <div><b>利润回撤</b><span>{item.profit_snapshot ? `${item.profit_snapshot.profit_drawdown_pct.toFixed(2)}pct` : '--'}</span></div>
                   <div><b>结构止损</b><span>{item.structure_stop_price ? item.structure_stop_price.toFixed(2) : '--'}</span></div>
+                  <div><b>止损来源</b><span>{stopSourceLabel(item.stop_source)}</span></div>
                   <div><b>利润保护</b><span>{item.profit_protection_price ? item.profit_protection_price.toFixed(2) : '--'}</span></div>
                   <div><b>建议仓位</b><span>{(item.recommended_position_ratio * 100).toFixed(1)}%</span></div>
                   <div><b>做T</b><span>{item.t_eligible ? item.t_type : '禁止'}</span></div>
                 </div>
+                <p className="execution-stop-source">{item.stop_source_detail || '止损来源待下一次状态刷新确认。'}</p>
                 <div className="execution-evidence">
                   {(item.evidence.length ? item.evidence : ['暂无强触发证据，按原计划观察。']).slice(0, 3).map(line => <p key={line}>{line}</p>)}
                 </div>
@@ -623,6 +625,7 @@ export default function Positions() {
                           <span>最大浮盈 {execution.profit_snapshot?.maximum_profit_pct.toFixed(2) ?? '--'}%</span>
                           <span>回撤 {execution.profit_snapshot?.profit_drawdown_pct.toFixed(2) ?? '--'}pct</span>
                           <span>结构 {execution.structure_stop_price.toFixed(2)} / 硬止损 {execution.hard_stop_price.toFixed(2)}</span>
+                          <span>来源 {stopSourceLabel(execution.stop_source)}</span>
                           <span>{execution.t_eligible ? `允许${execution.t_type}` : '禁止做T'}</span>
                         </div>
                         <p>{execution.evidence[0] || '按原计划观察。'}</p>
@@ -655,4 +658,15 @@ export default function Positions() {
       )}
     </div>
   )
+}
+
+function stopSourceLabel(source: string) {
+  const labels: Record<string, string> = {
+    next_day_plan: '次日计划',
+    sell_card: '卖出卡',
+    text_script: '交易剧本',
+    fallback_candidate: '候选价兜底',
+  }
+  const parts = (source || 'fallback_candidate').split('+').filter(Boolean)
+  return parts.map(part => labels[part] ?? part).join(' + ') || labels.fallback_candidate
 }

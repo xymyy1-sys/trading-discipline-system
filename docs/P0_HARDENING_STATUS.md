@@ -43,13 +43,16 @@ Deferred by request:
   - Today Decision workspace now loads `/api/stocks/{code}/intraday-review` for current holdings and displays a compact intraday evidence trajectory.
   - SSE connection status now shows stream-ready/new-event timestamps and refreshes the matching stock review after new risk events.
   - Holding execution cards already display state transitions, intraday events, and T-trade quantity basis.
+- V2.2 stop-source traceability batch:
+  - Added `stop_source` and `stop_source_detail` to execution states and stop-level APIs.
+  - Execution state now marks whether stops came from next-day plan, sell card, text script, or fallback candidates.
+  - Positions and stock decision card UIs display the stop source and detail instead of relying only on evidence text.
 
 ## Still Open
 
 - Enable CI in GitHub after the PAT gets `workflow` scope. The workflow file exists locally at `.github/workflows/ci.yml` but cannot be pushed by the current token.
 - Make minute-bar fetching production-hardened across trading days, non-trading days, ETFs, and temporary Eastmoney outages.
 - Expand time-stop thresholds into editable user-facing rule templates by script type and stage.
-- Add explicit UI display of which stop source was used: next-day plan, sell card, text script, or fallback candidate.
 - Persist attack/pullback segment metrics into dedicated columns if later analytics need filtering and aggregation.
 - Strengthen cross-sector migration scoring with original theme outflow, new theme inflow, stock weakening, and leader-switch evidence.
 - Add a front-end SSE connection health indicator and recovery notification UX beyond the current event list.

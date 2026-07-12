@@ -133,8 +133,10 @@ export default function DecisionCard() {
                 <div className="execution-line-grid">
                   <div><b>结构止损</b><span>{card.execution_state.structure_stop_price.toFixed(2)}</span></div>
                   <div><b>硬止损</b><span>{card.execution_state.hard_stop_price.toFixed(2)}</span></div>
+                  <div><b>止损来源</b><span>{stopSourceLabel(card.execution_state.stop_source)}</span></div>
                   <div><b>利润保护</b><span>{card.execution_state.profit_protection_price ? card.execution_state.profit_protection_price.toFixed(2) : '--'}</span></div>
                 </div>
+                <p className="execution-stop-source">{card.execution_state.stop_source_detail || '止损来源待下一次状态刷新确认。'}</p>
                 <div className="execution-rule-columns">
                   <div>
                     <b>禁止条件</b>
@@ -195,4 +197,15 @@ export default function DecisionCard() {
       )}
     </section>
   )
+}
+
+function stopSourceLabel(source: string) {
+  const labels: Record<string, string> = {
+    next_day_plan: '次日计划',
+    sell_card: '卖出卡',
+    text_script: '交易剧本',
+    fallback_candidate: '候选价兜底',
+  }
+  const parts = (source || 'fallback_candidate').split('+').filter(Boolean)
+  return parts.map(part => labels[part] ?? part).join(' + ') || labels.fallback_candidate
 }
