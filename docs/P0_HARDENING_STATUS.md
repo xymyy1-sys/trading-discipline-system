@@ -29,6 +29,7 @@ Historical replay is implemented against persisted evidence. A complete 600584 a
 - Stock Selection workspace includes a strategy-template editor and versioned save workflow.
 - Added `ReplayEngine` and `/api/replay/{code}` to merge historical expectation, volume-price, event, state-transition, and recommendation evidence into a time-ordered replay.
 - Added 600584 acceptance checkpoints and a visual replay workspace under Review Calibration.
+- Added expectation, volume-price, and execution effectiveness APIs with explicit sample counts and a 20-sample auto-calibration gate.
 
 - Background intraday collector with status and manual run APIs.
 - Intraday collection run records.

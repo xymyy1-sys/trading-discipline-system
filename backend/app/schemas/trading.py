@@ -727,6 +727,12 @@ class ReviewCalibrationSummaryOut(BaseModel):
     next_actions: list[str] = Field(default_factory=list)
 
 
+class EffectivenessReportOut(BaseModel):
+    metric: CalibrationMetricOut
+    suggestions: list[CalibrationSuggestionOut] = Field(default_factory=list)
+    auto_calibration_allowed: bool = False
+
+
 class MarketGradeOut(BaseModel):
     grade: str
     total_position_limit: str

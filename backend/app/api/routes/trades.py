@@ -10,6 +10,7 @@ from app.schemas.trading import (
     TradeReviewOut,
     GrowthProfileOut,
     ReviewCalibrationSummaryOut,
+    EffectivenessReportOut,
 )
 from app.api.helpers.quotes import _normalize_code
 from app.api.helpers.holdings_calc import _account_total_asset, _rebuild_holdings_from_trades
@@ -166,3 +167,27 @@ def trade_growth_profile(db: Session = Depends(get_db)) -> GrowthProfileOut:
 @router.get("/review-calibration/summary", response_model=ReviewCalibrationSummaryOut)
 def review_calibration_summary(db: Session = Depends(get_db)) -> ReviewCalibrationSummaryOut:
     return _review_calibration_summary(db)
+
+
+def _effectiveness_report(db: Session, key: str, minimum_samples: int) -> EffectivenessReportOut:
+    summary = _review_calibration_summary(db)
+    metric = next((item for item in summary.model_metrics if item.key == key), None)
+    if metric is None:
+        raise HTTPException(status_code=404, detail="effectiveness metric not found")
+    suggestions = [item for item in summary.calibration_suggestions if item.sample_count == 0 or item.sample_count <= metric.sample_count]
+    return EffectivenessReportOut(metric=metric, suggestions=suggestions, auto_calibration_allowed=metric.sample_count >= minimum_samples)
+
+
+@router.get("/reviews/expectation-effectiveness", response_model=EffectivenessReportOut)
+def expectation_effectiveness(db: Session = Depends(get_db)) -> EffectivenessReportOut:
+    return _effectiveness_report(db, "expectation_hit", 20)
+
+
+@router.get("/reviews/volume-price-effectiveness", response_model=EffectivenessReportOut)
+def volume_price_effectiveness(db: Session = Depends(get_db)) -> EffectivenessReportOut:
+    return _effectiveness_report(db, "volume_price_risk", 20)
+
+
+@router.get("/reviews/execution-effectiveness", response_model=EffectivenessReportOut)
+def execution_effectiveness(db: Session = Depends(get_db)) -> EffectivenessReportOut:
+    return _effectiveness_report(db, "execution_adoption", 20)
