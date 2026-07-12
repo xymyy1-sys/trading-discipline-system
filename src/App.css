@@ -955,6 +955,63 @@ h4 {
   font-weight: 700;
 }
 
+.evidence-trajectory {
+  grid-column: 1 / -1;
+  border-left: 3px solid var(--accent);
+}
+
+.evidence-trajectory .trajectory-card {
+  grid-template-columns: 1fr;
+  gap: 12px;
+}
+
+.trajectory-head {
+  display: grid;
+  grid-template-columns: 140px 160px minmax(0, 1fr);
+  gap: 10px;
+  align-items: center;
+}
+
+.trajectory-head span {
+  color: var(--accent-strong);
+  font-weight: 700;
+}
+
+.trajectory-line {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.trajectory-point {
+  border: 1px solid var(--border-dim);
+  background: var(--bg-muted);
+  border-radius: 6px;
+  padding: 10px;
+  min-height: 92px;
+  display: grid;
+  gap: 5px;
+  align-content: start;
+}
+
+.trajectory-point time {
+  color: var(--ink-dim);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.trajectory-point strong {
+  color: var(--ink);
+  font-size: 13px;
+  line-height: 1.35;
+  word-break: break-word;
+}
+
+.trajectory-point small {
+  color: var(--ink-muted);
+  line-height: 1.45;
+}
+
 .workspace-tabs {
   border: 1px solid var(--border-dim);
   background: rgba(255, 255, 255, 0.02);
@@ -4905,7 +4962,12 @@ h3 {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
   .execution-card-grid,
-  .execution-mini-sections {
+  .execution-mini-sections,
+  .trajectory-line {
+    grid-template-columns: 1fr;
+  }
+
+  .trajectory-head {
     grid-template-columns: 1fr;
   }
 }

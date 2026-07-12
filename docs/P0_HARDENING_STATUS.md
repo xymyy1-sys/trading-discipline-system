@@ -39,6 +39,10 @@ Deferred by request:
   - Expanded expectation vocabulary with `EXTREME_STRONG` and `EBB`; actual result now uses V2.2 core labels `STRONGER`, `MATCHED`, `WEAKER`, and `INVALID` while old labels remain readable.
   - Execution and review calibration treat `INVALID` as expectation failure/risk evidence.
   - Cross-sector migration now requires at least three evidence criteria and outputs a confidence percentage before emitting `SECTOR_MIGRATION_CONFIRMED`.
+- V2.2 frontend traceability batch:
+  - Today Decision workspace now loads `/api/stocks/{code}/intraday-review` for current holdings and displays a compact intraday evidence trajectory.
+  - SSE connection status now shows stream-ready/new-event timestamps and refreshes the matching stock review after new risk events.
+  - Holding execution cards already display state transitions, intraday events, and T-trade quantity basis.
 
 ## Still Open
 
@@ -49,7 +53,6 @@ Deferred by request:
 - Persist attack/pullback segment metrics into dedicated columns if later analytics need filtering and aggregation.
 - Strengthen cross-sector migration scoring with original theme outflow, new theme inflow, stock weakening, and leader-switch evidence.
 - Add a front-end SSE connection health indicator and recovery notification UX beyond the current event list.
-- Add frontend state-history timeline and intraday evidence trajectory display.
 - Continue deeper TTradingEngine work: positive/reverse T execution feedback and UI guardrails.
 - Continue expectation transition UI polish and editable thresholds by script type.
 - Add formal acceptance report exports for SSE demo, full single-stock intraday timeline, and T+1 validation.

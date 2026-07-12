@@ -338,3 +338,16 @@ export interface StockDecisionCard {
   counter_evidence: string[];
   data_quality: string;
 }
+
+export interface IntradayReview {
+  code: string;
+  name: string;
+  generated_at: string;
+  latest_action: string;
+  latest_state: string;
+  data_quality: string;
+  timeline: IntradayEvidenceEvent[];
+  evidence: string[];
+  counter_evidence: string[];
+  next_actions: string[];
+}

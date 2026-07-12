@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState, type ComponentType, type ReactNode } from 'react'
 import {
+  Activity,
   AlertTriangle,
   ArrowRight,
   Ban,
@@ -10,7 +11,7 @@ import {
 } from 'lucide-react'
 import { API_BASE } from '../../api'
 
-import type { HoldingOut, IntradayEvidenceEvent, MarketSeesaw, PositionExecutionState, ThemeRadar } from '../../types'
+import type { HoldingOut, IntradayEvidenceEvent, IntradayReview, MarketSeesaw, PositionExecutionState, ThemeRadar } from '../../types'
 
 type WorkspaceModule = {
   key: string
@@ -91,7 +92,9 @@ export function TodayDecisionSummary() {
   const [holdings, setHoldings] = useState<HoldingOut[]>([])
   const [executionStates, setExecutionStates] = useState<PositionExecutionState[]>([])
   const [realtimeEvents, setRealtimeEvents] = useState<IntradayEvidenceEvent[]>([])
+  const [intradayReviews, setIntradayReviews] = useState<Record<string, IntradayReview>>({})
   const [streamState, setStreamState] = useState('连接中')
+  const [streamLastAt, setStreamLastAt] = useState<string | null>(null)
   const [seesaw, setSeesaw] = useState<MarketSeesaw | null>(null)
   const [theme, setTheme] = useState<ThemeRadar | null>(null)
   const [loading, setLoading] = useState(false)
@@ -105,7 +108,10 @@ export function TodayDecisionSummary() {
       fetchJsonWithTimeout(`${API_BASE}/api/market/theme-radar`, 8000),
     ]).then(results => {
       const [holdingRes, executionRes, seesawRes, themeRes] = results
-      if (holdingRes.status === 'fulfilled' && Array.isArray(holdingRes.value)) setHoldings(holdingRes.value)
+      if (holdingRes.status === 'fulfilled' && Array.isArray(holdingRes.value)) {
+        setHoldings(holdingRes.value)
+        loadIntradayReviews(holdingRes.value)
+      }
       if (executionRes.status === 'fulfilled' && Array.isArray(executionRes.value)) setExecutionStates(executionRes.value)
       if (seesawRes.status === 'fulfilled') setSeesaw(seesawRes.value)
       if (themeRes.status === 'fulfilled') setTheme(themeRes.value)
@@ -120,10 +126,16 @@ export function TodayDecisionSummary() {
     const source = new EventSource(`${API_BASE}/api/intraday-events/stream`)
     source.onopen = () => setStreamState('实时推送已连接')
     source.onerror = () => setStreamState('实时推送重连中')
+    source.addEventListener('stream-ready', () => {
+      setStreamState('实时推送已就绪')
+      setStreamLastAt(new Date().toLocaleTimeString('zh-CN', { hour12: false }))
+    })
     source.addEventListener('intraday-risk', event => {
       try {
         const payload = JSON.parse((event as MessageEvent).data) as IntradayEvidenceEvent
         setRealtimeEvents(prev => [payload, ...prev.filter(item => item.id !== payload.id)].slice(0, 8))
+        setStreamLastAt(new Date().toLocaleTimeString('zh-CN', { hour12: false }))
+        if (payload.target_code) loadSingleIntradayReview(payload.target_code)
       } catch {
         setStreamState('实时事件解析失败')
       }
@@ -138,6 +150,15 @@ export function TodayDecisionSummary() {
   const highRiskAlerts = (seesaw?.holding_alerts ?? []).filter(item => ['高', '中高', '中'].includes(item.risk_level))
   const totalMarketValue = holdings.reduce((sum, item) => sum + item.market_value, 0)
   const totalProfit = holdings.reduce((sum, item) => sum + item.profit_amount, 0)
+  const trackedReviews = holdings
+    .map(item => intradayReviews[item.code])
+    .filter((item): item is IntradayReview => Boolean(item))
+    .sort((a, b) => {
+      const aTime = a.timeline[0]?.captured_at ?? a.generated_at
+      const bTime = b.timeline[0]?.captured_at ?? b.generated_at
+      return new Date(bTime).getTime() - new Date(aTime).getTime()
+    })
+    .slice(0, 4)
 
   return (
     <section className="decision-command">
@@ -210,7 +231,7 @@ export function TodayDecisionSummary() {
       <div className="panel command-list realtime-events">
         <header>
           <h3><AlertTriangle size={16} />实时风险事件</h3>
-          <span className="stream-state">{streamState}</span>
+          <span className="stream-state">{streamState}{streamLastAt ? ` · ${streamLastAt}` : ''}</span>
         </header>
         {realtimeEvents.length ? (
           realtimeEvents.map(event => (
@@ -224,8 +245,71 @@ export function TodayDecisionSummary() {
           <p className="plain-text">暂无新推送事件；后台采集或手动刷新触发后会实时出现。</p>
         )}
       </div>
+
+      <div className="panel command-list evidence-trajectory">
+        <header>
+          <h3><Activity size={16} />盘中证据轨迹</h3>
+          <span className="stream-state">{trackedReviews.length ? `跟踪 ${trackedReviews.length} 只` : '等待采样'}</span>
+        </header>
+        {trackedReviews.length ? (
+          trackedReviews.map(review => (
+            <article className="trajectory-card" key={review.code}>
+              <div className="trajectory-head">
+                <b>{review.name || review.code}</b>
+                <span>{review.latest_action || review.latest_state}</span>
+                <small>{review.data_quality}</small>
+              </div>
+              <div className="trajectory-line">
+                {review.timeline.slice(0, 4).map(event => (
+                  <div className="trajectory-point" key={`${review.code}-${event.id}-${event.captured_at}`}>
+                    <time>{formatEventTime(event.captured_at)}</time>
+                    <strong>{event.event_type}</strong>
+                    <small>{event.evidence?.[0] ?? `${event.severity} / ${event.confirmed ? '已确认' : '待确认'}`}</small>
+                  </div>
+                ))}
+              </div>
+              {!review.timeline.length && (
+                <p className="plain-text">暂无盘中采样；等待后台采集器生成证据快照。</p>
+              )}
+            </article>
+          ))
+        ) : (
+          <p className="plain-text">暂无盘中证据轨迹。后台采集器运行后会展示价格、VWAP、预期状态和动作建议的时间线。</p>
+        )}
+      </div>
     </section>
   )
+
+  function loadIntradayReviews(nextHoldings: HoldingOut[]) {
+    const topHoldings = nextHoldings.slice(0, 5)
+    if (!topHoldings.length) {
+      setIntradayReviews({})
+      return
+    }
+    Promise.allSettled(
+      topHoldings.map(item =>
+        fetchJsonWithTimeout(`${API_BASE}/api/stocks/${item.code}/intraday-review`, 6000)
+          .then(review => [item.code, review] as const),
+      ),
+    ).then(results => {
+      const next: Record<string, IntradayReview> = {}
+      results.forEach(result => {
+        if (result.status === 'fulfilled') {
+          const [code, review] = result.value
+          next[code] = review as IntradayReview
+        }
+      })
+      setIntradayReviews(next)
+    })
+  }
+
+  function loadSingleIntradayReview(code: string) {
+    fetchJsonWithTimeout(`${API_BASE}/api/stocks/${code}/intraday-review`, 6000)
+      .then(review => {
+        setIntradayReviews(prev => ({ ...prev, [code]: review as IntradayReview }))
+      })
+      .catch(() => undefined)
+  }
 }
 
 function fetchJsonWithTimeout(url: string, timeoutMs = 5000) {
@@ -234,6 +318,12 @@ function fetchJsonWithTimeout(url: string, timeoutMs = 5000) {
   return fetch(url, { signal: controller.signal })
     .then(r => r.json())
     .finally(() => window.clearTimeout(timeout))
+}
+
+function formatEventTime(value: string) {
+  const time = new Date(value)
+  if (Number.isNaN(time.getTime())) return value
+  return time.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', hour12: false })
 }
 
 export function WorkspaceLinkCard({ title, desc, onClick }: { title: string; desc: string; onClick: () => void }) {
