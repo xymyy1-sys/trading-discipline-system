@@ -130,6 +130,10 @@ export interface IntradayEvidenceEvent {
 
 export interface ActionRecommendation {
   id: number | null;
+  trade_date: string;
+  holding_id: number | null;
+  code: string;
+  name: string;
   level: string;
   state: string;
   action: string;
@@ -141,6 +145,7 @@ export interface ActionRecommendation {
   created_at: string;
   expires_at: string | null;
   acknowledged_at: string | null;
+  feedback_status: string;
 }
 
 export interface ProfitProtectionSnapshot {

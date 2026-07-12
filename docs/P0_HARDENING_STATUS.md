@@ -21,6 +21,8 @@ Deferred by request:
 - T execution feedback now enforces guarded quantities and a one-way lifecycle: planned, sold waiting buyback, partial buyback, completed, or permanent reduction.
 - Positions UI now loads active T plans and records guarded sell, cumulative buyback, and permanent-reduction feedback.
 - Added editable expectation threshold rules scoped by script type, stage, and base expectation, with an editor in the stock decision workspace.
+- Added active-alert and acknowledge APIs with latest-per-holding deduplication, expiry filtering, and execution-feedback status.
+- Today Decision now shows unacknowledged operation recommendations and records explicit user acknowledgement.
 
 - Background intraday collector with status and manual run APIs.
 - Intraday collection run records.

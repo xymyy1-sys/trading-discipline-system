@@ -118,6 +118,10 @@ class IntradayEvidenceEventOut(BaseModel):
 
 class ActionRecommendationOut(BaseModel):
     id: int | None = None
+    trade_date: str = ""
+    holding_id: int | None = None
+    code: str = ""
+    name: str = ""
     level: str
     state: str
     action: str
@@ -129,6 +133,7 @@ class ActionRecommendationOut(BaseModel):
     created_at: datetime
     expires_at: datetime | None = None
     acknowledged_at: datetime | None = None
+    feedback_status: str = ""
 
     class Config:
         from_attributes = True

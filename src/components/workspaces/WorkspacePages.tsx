@@ -11,7 +11,7 @@ import {
 } from 'lucide-react'
 import { API_BASE } from '../../api'
 
-import type { HoldingOut, IntradayEvidenceEvent, IntradayReview, MarketSeesaw, PositionExecutionState, ThemeRadar } from '../../types'
+import type { ActionRecommendation, HoldingOut, IntradayEvidenceEvent, IntradayReview, MarketSeesaw, PositionExecutionState, ThemeRadar } from '../../types'
 
 type WorkspaceModule = {
   key: string
@@ -93,6 +93,7 @@ export function TodayDecisionSummary() {
   const [executionStates, setExecutionStates] = useState<PositionExecutionState[]>([])
   const [realtimeEvents, setRealtimeEvents] = useState<IntradayEvidenceEvent[]>([])
   const [intradayReviews, setIntradayReviews] = useState<Record<string, IntradayReview>>({})
+  const [activeAlerts, setActiveAlerts] = useState<ActionRecommendation[]>([])
   const [streamState, setStreamState] = useState('连接中')
   const [streamLastAt, setStreamLastAt] = useState<string | null>(null)
   const [streamNotice, setStreamNotice] = useState('')
@@ -109,8 +110,9 @@ export function TodayDecisionSummary() {
       fetchJsonWithTimeout(`${API_BASE}/api/holdings/execution-states`),
       fetchJsonWithTimeout(`${API_BASE}/api/market/seesaw-monitor`, 8000),
       fetchJsonWithTimeout(`${API_BASE}/api/market/theme-radar`, 8000),
+      fetchJsonWithTimeout(`${API_BASE}/api/alerts/active`),
     ]).then(results => {
-      const [holdingRes, executionRes, seesawRes, themeRes] = results
+      const [holdingRes, executionRes, seesawRes, themeRes, alertRes] = results
       if (holdingRes.status === 'fulfilled' && Array.isArray(holdingRes.value)) {
         setHoldings(holdingRes.value)
         loadIntradayReviews(holdingRes.value)
@@ -118,12 +120,23 @@ export function TodayDecisionSummary() {
       if (executionRes.status === 'fulfilled' && Array.isArray(executionRes.value)) setExecutionStates(executionRes.value)
       if (seesawRes.status === 'fulfilled') setSeesaw(seesawRes.value)
       if (themeRes.status === 'fulfilled') setTheme(themeRes.value)
+      if (alertRes.status === 'fulfilled' && Array.isArray(alertRes.value)) setActiveAlerts(alertRes.value)
     }).finally(() => setLoading(false))
   }
 
   useEffect(() => {
     load()
   }, [])
+
+  const acknowledgeAlert = (alert: ActionRecommendation) => {
+    if (!alert.id) return
+    fetch(`${API_BASE}/api/alerts/${alert.id}/acknowledge`, { method: 'POST' })
+      .then(response => {
+        if (!response.ok) throw new Error('acknowledge failed')
+        setActiveAlerts(current => current.filter(item => item.id !== alert.id))
+      })
+      .catch(() => setStreamNotice('提醒确认失败，请重新连接后再试'))
+  }
 
   useEffect(() => {
     const source = new EventSource(`${API_BASE}/api/intraday-events/stream`, { withCredentials: true })
@@ -259,6 +272,18 @@ export function TodayDecisionSummary() {
         ) : (
           <p className="plain-text">暂无新推送事件；后台采集或手动刷新触发后会实时出现。</p>
         )}
+      </div>
+
+      <div className="panel command-list active-recommendations">
+        <header><h3><CheckCircle2 size={16} />待确认操作建议</h3><span className="stream-state">{activeAlerts.length} 条</span></header>
+        {activeAlerts.length ? activeAlerts.map(alert => (
+          <article key={alert.id ?? `${alert.code}-${alert.created_at}`}>
+            <b>{alert.name || alert.code}</b>
+            <span>{alert.level} · {alert.action}</span>
+            <small>{alert.evidence[0] || alert.state}</small>
+            <button type="button" className="alert-ack-button" onClick={() => acknowledgeAlert(alert)}>已阅读并确认</button>
+          </article>
+        )) : <p className="plain-text">当前没有待确认操作建议。</p>}
       </div>
 
       <div className="panel command-list evidence-trajectory">

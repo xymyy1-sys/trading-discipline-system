@@ -211,3 +211,35 @@ def test_protected_api_requires_session(client):
         assert response.status_code == 401
     finally:
         app.dependency_overrides[require_auth] = override
+
+
+def test_active_alert_can_be_acknowledged(client, db_session):
+    from datetime import datetime, timedelta
+    from app.models.trading import ActionRecommendation
+
+    row = ActionRecommendation(
+        trade_date="2026-07-12",
+        holding_id=88,
+        code="600888",
+        name="alert test",
+        created_at=datetime.now(),
+        level="REDUCE",
+        state="REDUCE_REQUIRED",
+        action="reduce 25%",
+        evidence_json='["risk"]',
+        counter_evidence_json="[]",
+        invalid_conditions_json='["breakdown"]',
+        recovery_conditions_json='["recover"]',
+        expires_at=datetime.now() + timedelta(minutes=15),
+    )
+    db_session.add(row)
+    db_session.commit()
+    db_session.refresh(row)
+
+    active = client.get("/api/alerts/active")
+    assert active.status_code == 200
+    assert active.json()[0]["code"] == "600888"
+    acknowledged = client.post(f"/api/alerts/{row.id}/acknowledge")
+    assert acknowledged.status_code == 200
+    assert acknowledged.json()["acknowledged_at"] is not None
+    assert client.get("/api/alerts/active").json() == []

@@ -16,6 +16,7 @@ from app.schemas.trading import (
     AccountAssetIn,
     AccountAssetOut,
     PositionExecutionStateOut,
+    ActionRecommendationOut,
     PositionStateHistoryOut,
     RecommendationFeedbackIn,
     RecommendationFeedbackOut,
@@ -82,6 +83,53 @@ def _collection_run_out(row: IntradayCollectionRun | None) -> CollectionRunOut |
         notes=collection_notes(row),
         error_message=row.error_message,
     )
+
+
+def _recommendation_out(row: ActionRecommendation, db: Session) -> ActionRecommendationOut:
+    feedback = db.query(RecommendationFeedback).filter(RecommendationFeedback.recommendation_id == row.id).order_by(RecommendationFeedback.created_at.desc()).first()
+    return ActionRecommendationOut(
+        id=row.id,
+        trade_date=row.trade_date,
+        holding_id=row.holding_id,
+        code=row.code,
+        name=row.name,
+        level=row.level,
+        state=row.state,
+        action=row.action,
+        recommended_ratio=row.recommended_ratio,
+        evidence=json.loads(row.evidence_json or "[]"),
+        counter_evidence=json.loads(row.counter_evidence_json or "[]"),
+        invalid_conditions=json.loads(row.invalid_conditions_json or "[]"),
+        recovery_conditions=json.loads(row.recovery_conditions_json or "[]"),
+        created_at=row.created_at,
+        expires_at=row.expires_at,
+        acknowledged_at=row.acknowledged_at,
+        feedback_status=feedback.status if feedback else "",
+    )
+
+
+@router.get("/alerts/active", response_model=list[ActionRecommendationOut])
+def list_active_alerts(include_acknowledged: bool = False, db: Session = Depends(get_db)) -> list[ActionRecommendationOut]:
+    now = datetime.now()
+    rows = db.query(ActionRecommendation).filter(ActionRecommendation.expires_at.is_not(None), ActionRecommendation.expires_at >= now).order_by(ActionRecommendation.created_at.desc()).limit(500).all()
+    latest_by_target: dict[str, ActionRecommendation] = {}
+    for row in rows:
+        if not include_acknowledged and row.acknowledged_at is not None:
+            continue
+        key = str(row.holding_id or row.code)
+        latest_by_target.setdefault(key, row)
+    return [_recommendation_out(row, db) for row in latest_by_target.values()]
+
+
+@router.post("/alerts/{recommendation_id}/acknowledge", response_model=ActionRecommendationOut)
+def acknowledge_alert(recommendation_id: int, db: Session = Depends(get_db)) -> ActionRecommendationOut:
+    row = db.get(ActionRecommendation, recommendation_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="recommendation not found")
+    row.acknowledged_at = datetime.now()
+    db.commit()
+    db.refresh(row)
+    return _recommendation_out(row, db)
 
 
 def _ensure_time_stop_rules(db: Session) -> list[TimeStopRule]:
