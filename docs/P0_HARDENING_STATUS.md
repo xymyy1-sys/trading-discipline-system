@@ -15,6 +15,8 @@ Deferred by request:
   - Production frontend now uses same-origin `/api` instead of bypassing Nginx through public port 8000.
   - Docker no longer publishes backend port 8000; Nginx adds baseline browser security headers.
   - Deployment fails closed when `AUTH_PASSWORD` or `AUTH_SECRET` is missing or weak.
+- SSE recovery UX now records interruptions, automatic recovery time, and recovery count in the Today Decision workspace.
+- T execution feedback now enforces guarded quantities and a one-way lifecycle: planned, sold waiting buyback, partial buyback, completed, or permanent reduction.
 
 - Background intraday collector with status and manual run APIs.
 - Intraday collection run records.

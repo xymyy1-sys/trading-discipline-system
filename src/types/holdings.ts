@@ -320,6 +320,9 @@ export interface TTradePlan {
   actual_sell_price: number;
   actual_buyback_price: number;
   actual_quantity: number;
+  actual_sell_quantity: number;
+  actual_buyback_quantity: number;
+  execution_note: string;
   cost_reduction: number;
   evidence: string[];
   created_at: string;

@@ -458,7 +458,10 @@ def update_holding_t_plan(
     plan = db.get(TTradePlan, plan_id)
     if plan is None or plan.holding_id != holding_id:
         raise HTTPException(status_code=404, detail="t plan not found")
-    return update_t_plan(db, plan, payload)
+    try:
+        return update_t_plan(db, plan, payload)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 @router.post("/holdings/sync-from-trades", response_model=HoldingSyncOut)
 def sync_holdings_from_trades(db: Session = Depends(get_db)) -> HoldingSyncOut:

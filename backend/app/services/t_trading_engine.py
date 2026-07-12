@@ -54,6 +54,9 @@ def _t_plan_out(row: TTradePlan) -> TTradePlanOut:
         actual_sell_price=row.actual_sell_price,
         actual_buyback_price=row.actual_buyback_price,
         actual_quantity=row.actual_quantity,
+        actual_sell_quantity=row.actual_sell_quantity,
+        actual_buyback_quantity=row.actual_buyback_quantity,
+        execution_note=row.execution_note,
         cost_reduction=row.cost_reduction,
         evidence=_json_list(row.evidence_json),
         created_at=row.created_at,
@@ -191,13 +194,60 @@ class TTradingEngine:
         return _t_plan_out(row)
 
     def update_plan(self, row: TTradePlan, payload: Any) -> TTradePlanOut:
-        for key, value in payload.model_dump(exclude_unset=True).items():
+        changes = payload.model_dump(exclude_unset=True)
+        sell_quantity = int(changes.get("actual_sell_quantity", row.actual_sell_quantity) or 0)
+        buyback_quantity = int(changes.get("actual_buyback_quantity", row.actual_buyback_quantity) or 0)
+        sell_price = float(changes.get("actual_sell_price", row.actual_sell_price) or 0)
+        buyback_price = float(changes.get("actual_buyback_price", row.actual_buyback_price) or 0)
+
+        if sell_quantity < 0 or buyback_quantity < 0:
+            raise ValueError("execution quantity cannot be negative")
+        if sell_quantity > row.planned_sell_quantity:
+            raise ValueError("actual sell quantity exceeds the guarded plan quantity")
+        if buyback_quantity > sell_quantity:
+            raise ValueError("buyback quantity cannot exceed the executed sell quantity")
+        if sell_quantity and sell_price <= 0:
+            raise ValueError("actual sell price is required when a sell is recorded")
+        if buyback_quantity and buyback_price <= 0:
+            raise ValueError("actual buyback price is required when a buyback is recorded")
+
+        requested_status = changes.get("status")
+        allowed_statuses = {"planned", "sold_wait_buyback", "partially_bought_back", "completed", "cancelled", "converted_to_reduction", "forbidden"}
+        if requested_status and requested_status not in allowed_statuses:
+            raise ValueError("unsupported T plan status")
+        current_status = row.status
+        allowed_transitions = {
+            "planned": {"planned", "sold_wait_buyback", "cancelled"},
+            "sold_wait_buyback": {"sold_wait_buyback", "partially_bought_back", "completed", "converted_to_reduction"},
+            "partially_bought_back": {"partially_bought_back", "completed", "converted_to_reduction"},
+            "completed": {"completed"},
+            "cancelled": {"cancelled"},
+            "converted_to_reduction": {"converted_to_reduction"},
+            "forbidden": {"forbidden"},
+        }
+
+        inferred_status = current_status
+        if sell_quantity > 0 and buyback_quantity == 0:
+            inferred_status = "sold_wait_buyback"
+        elif sell_quantity > 0 and 0 < buyback_quantity < sell_quantity:
+            inferred_status = "partially_bought_back"
+        elif sell_quantity > 0 and buyback_quantity == sell_quantity:
+            inferred_status = "completed"
+        target_status = requested_status or inferred_status
+        if target_status not in allowed_transitions.get(current_status, {current_status}):
+            raise ValueError(f"invalid T plan transition: {current_status} -> {target_status}")
+        if target_status == "completed" and (sell_quantity <= 0 or buyback_quantity != sell_quantity):
+            raise ValueError("completed T plan requires equal executed sell and buyback quantities")
+        if target_status == "converted_to_reduction" and sell_quantity <= buyback_quantity:
+            raise ValueError("permanent reduction requires an unbought sold quantity")
+
+        changes["status"] = target_status
+        for key, value in changes.items():
             if value is not None:
                 setattr(row, key, value)
-        if row.actual_sell_price and row.actual_buyback_price and row.actual_quantity:
-            row.cost_reduction = round((row.actual_sell_price - row.actual_buyback_price) * row.actual_quantity, 2)
-            if row.status == "planned":
-                row.status = "completed"
+        if row.actual_sell_price and row.actual_buyback_price and row.actual_buyback_quantity:
+            row.actual_quantity = row.actual_buyback_quantity
+            row.cost_reduction = round((row.actual_sell_price - row.actual_buyback_price) * row.actual_buyback_quantity, 2)
         self.db.commit()
         self.db.refresh(row)
         return _t_plan_out(row)

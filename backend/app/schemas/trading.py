@@ -342,6 +342,9 @@ class TTradePlanUpdate(BaseModel):
     actual_sell_price: float | None = None
     actual_buyback_price: float | None = None
     actual_quantity: int | None = None
+    actual_sell_quantity: int | None = None
+    actual_buyback_quantity: int | None = None
+    execution_note: str | None = None
 
 
 class TTradePlanOut(BaseModel):
@@ -361,6 +364,9 @@ class TTradePlanOut(BaseModel):
     actual_sell_price: float = 0
     actual_buyback_price: float = 0
     actual_quantity: int = 0
+    actual_sell_quantity: int = 0
+    actual_buyback_quantity: int = 0
+    execution_note: str = ""
     cost_reduction: float = 0
     evidence: list[str] = Field(default_factory=list)
     created_at: datetime

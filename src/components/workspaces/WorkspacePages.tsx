@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type ComponentType, type ReactNode } from 'react'
+import { useEffect, useMemo, useRef, useState, type ComponentType, type ReactNode } from 'react'
 import {
   Activity,
   AlertTriangle,
@@ -95,6 +95,9 @@ export function TodayDecisionSummary() {
   const [intradayReviews, setIntradayReviews] = useState<Record<string, IntradayReview>>({})
   const [streamState, setStreamState] = useState('连接中')
   const [streamLastAt, setStreamLastAt] = useState<string | null>(null)
+  const [streamNotice, setStreamNotice] = useState('')
+  const [streamReconnects, setStreamReconnects] = useState(0)
+  const streamInterrupted = useRef(false)
   const [seesaw, setSeesaw] = useState<MarketSeesaw | null>(null)
   const [theme, setTheme] = useState<ThemeRadar | null>(null)
   const [loading, setLoading] = useState(false)
@@ -124,8 +127,19 @@ export function TodayDecisionSummary() {
 
   useEffect(() => {
     const source = new EventSource(`${API_BASE}/api/intraday-events/stream`, { withCredentials: true })
-    source.onopen = () => setStreamState('实时推送已连接')
-    source.onerror = () => setStreamState('实时推送重连中')
+    source.onopen = () => {
+      setStreamState('实时推送已连接')
+      if (streamInterrupted.current) {
+        setStreamReconnects(value => value + 1)
+        setStreamNotice(`连接已恢复 · ${new Date().toLocaleTimeString('zh-CN', { hour12: false })}`)
+        streamInterrupted.current = false
+      }
+    }
+    source.onerror = () => {
+      streamInterrupted.current = true
+      setStreamState('实时推送中断，自动重连中')
+      setStreamNotice(`最近中断 · ${new Date().toLocaleTimeString('zh-CN', { hour12: false })}`)
+    }
     source.addEventListener('stream-ready', () => {
       setStreamState('实时推送已就绪')
       setStreamLastAt(new Date().toLocaleTimeString('zh-CN', { hour12: false }))
@@ -233,6 +247,7 @@ export function TodayDecisionSummary() {
           <h3><AlertTriangle size={16} />实时风险事件</h3>
           <span className="stream-state">{streamState}{streamLastAt ? ` · ${streamLastAt}` : ''}</span>
         </header>
+        {streamNotice && <p className="stream-health-notice">{streamNotice}{streamReconnects ? ` · 已恢复 ${streamReconnects} 次` : ''}</p>}
         {realtimeEvents.length ? (
           realtimeEvents.map(event => (
             <article key={`${event.id}-${event.event_type}`}>

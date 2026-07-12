@@ -3,7 +3,55 @@ from types import SimpleNamespace
 from app.api.helpers.decision import build_expectation_snapshot, build_t_eligibility, create_t_plan
 from app.api.helpers.plan_calc import _default_next_day_plan, refresh_limit_expectation_stage
 from app.api.helpers.volume_price import build_volume_price_snapshot
-from app.models.trading import Holding
+from app.models.trading import Holding, TTradePlan
+from app.schemas.trading import TTradePlanUpdate
+from app.services.t_trading_engine import update_t_plan
+
+
+def _execution_plan(db_session):
+    plan = TTradePlan(
+        holding_id=1,
+        trade_date="2026-07-12",
+        code="600999",
+        name="T execution",
+        t_type="POSITIVE_T",
+        planned_sell_price=10.5,
+        planned_sell_quantity=500,
+        status="planned",
+    )
+    db_session.add(plan)
+    db_session.commit()
+    db_session.refresh(plan)
+    return plan
+
+
+def test_t_execution_feedback_enforces_quantity_guardrail(db_session):
+    plan = _execution_plan(db_session)
+    try:
+        update_t_plan(db_session, plan, TTradePlanUpdate(actual_sell_price=10.5, actual_sell_quantity=600))
+    except ValueError as exc:
+        assert "exceeds" in str(exc)
+    else:
+        raise AssertionError("selling beyond the guarded quantity must fail")
+
+
+def test_t_execution_feedback_tracks_sell_and_buyback_lifecycle(db_session):
+    plan = _execution_plan(db_session)
+    sold = update_t_plan(db_session, plan, TTradePlanUpdate(actual_sell_price=10.8, actual_sell_quantity=500))
+    assert sold.status == "sold_wait_buyback"
+    partial = update_t_plan(
+        db_session,
+        plan,
+        TTradePlanUpdate(actual_buyback_price=10.2, actual_buyback_quantity=200),
+    )
+    assert partial.status == "partially_bought_back"
+    completed = update_t_plan(
+        db_session,
+        plan,
+        TTradePlanUpdate(actual_buyback_price=10.1, actual_buyback_quantity=500),
+    )
+    assert completed.status == "completed"
+    assert completed.cost_reduction == 350
 
 
 def test_expectation_snapshot_marks_underperform(db_session):
