@@ -2,7 +2,7 @@ FROM node:22-alpine AS build
 
 WORKDIR /app
 COPY package*.json ./
-RUN npm ci
+RUN npm ci && npm install --no-save @rolldown/binding-linux-x64-musl@1.1.4
 COPY . .
 RUN npm run build
 
