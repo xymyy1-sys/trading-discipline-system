@@ -706,24 +706,19 @@ class MarketDataProvider:
             _cache_good_flow(cache_key, raw_items, "eastmoney")
         except Exception:
             try:
-                raw_items = self._fetch_akshare_sector_flow_raw(flow_type=flow_type, period=period)
-                source = "akshare/eastmoney"
-                _cache_good_flow(cache_key, raw_items, "akshare/eastmoney")
+                raw_items = self._fetch_sina_sector_flow_raw(flow_type=flow_type, period="今日")
+                source = "sina"
+                _cache_good_flow(cache_key, raw_items, "sina")
             except Exception:
-                try:
-                    raw_items = self._fetch_sina_sector_flow_raw(flow_type=flow_type, period="今日")
-                    source = "sina"
-                    _cache_good_flow(cache_key, raw_items, "sina")
-                except Exception:
-                    cached = _get_cached_flow(cache_key)
-                    if cached:
-                        raw_items, source, data_date = cached
-                        if not _is_trading_day():
-                            data_date = _last_trading_day()
-                        source = f"{source}+cached"
-                    else:
-                        raw_items = []
-                        source = "unavailable"
+                cached = _get_cached_flow(cache_key)
+                if cached:
+                    raw_items, source, data_date = cached
+                    if not _is_trading_day():
+                        data_date = _last_trading_day()
+                    source = f"{source}+cached"
+                else:
+                    raw_items = []
+                    source = "unavailable"
 
         snapshot_recorded = _is_trading_time()
         if snapshot_recorded:
@@ -1238,21 +1233,10 @@ class MarketDataProvider:
 
     def _fetch_limit_up_pool_raw(self, trade_date: str) -> list[dict[str, Any]]:
         date_text = trade_date.replace("-", "")
-        try:
-            rows = self._fetch_direct_limit_up_pool_raw(date_text)
-            if rows:
-                return rows
-        except Exception:
-            pass
-
-        import akshare as ak
-        frame = ak.stock_zt_pool_em(date=date_text)
-        if frame.empty:
+        rows = self._fetch_direct_limit_up_pool_raw(date_text)
+        if not rows:
             raise ValueError("empty limit-up pool")
-        results: list[dict[str, Any]] = []
-        for _, row in frame.iterrows():
-            results.append({str(k): row.get(k) for k in frame.columns})
-        return results
+        return rows
 
     def _fetch_direct_limit_up_pool_raw(self, date_text: str) -> list[dict[str, Any]]:
         resp = requests.get(
@@ -1864,25 +1848,24 @@ class MarketDataProvider:
         notes: list[str] = []
         sources: list[str] = []
 
-        try:
-            raw_items.extend(self._fetch_eastmoney_fast_news())
-            sources.append("东方财富快讯")
-        except Exception as exc:
-            notes.append(f"东方财富快讯暂不可用: {exc.__class__.__name__}")
-
-        try:
-            raw_items.extend(self._fetch_cctv_news(target_date))
-            sources.append("央视新闻")
-        except Exception as exc:
-            notes.append(f"新闻联播暂不可用: {exc.__class__.__name__}")
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            tasks = {
+                executor.submit(self._fetch_eastmoney_fast_news): "东方财富快讯",
+                executor.submit(self._fetch_cctv_news, target_date): "央视新闻",
+            }
+            for future, source_name in tasks.items():
+                try:
+                    raw_items.extend(future.result())
+                    sources.append(source_name)
+                except Exception as exc:
+                    notes.append(f"{source_name}暂不可用: {exc.__class__.__name__}")
 
         if not raw_items:
             notes.append("外部资讯源不可用；不展示诊断样例或虚构要闻")
 
-        try:
-            flow = self.sector_flow()
-        except Exception:
-            flow = None
+        # News must return quickly.  Use a previously verified market cache for
+        # confirmation instead of launching another full external request.
+        flow = _get_response_cache("sector-flow|行业资金流|今日")
 
         scored = [self._score_information_item(item, flow) for item in raw_items]
         scored = [item for item in scored if item.sectors or item.keywords]

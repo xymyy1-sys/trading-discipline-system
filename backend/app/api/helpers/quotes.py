@@ -90,33 +90,10 @@ def _latest_a_share_quotes(codes: list[str]) -> dict[str, dict[str, Any]]:
             return quotes
     except Exception:
         pass
-    try:
-        import akshare as ak
-        frame = ak.stock_zh_a_spot_em()
-        if frame.empty:
-            return {}
-        normalized = {candidate for code in codes for candidate in _quote_code_candidates(code)}
-        quotes: dict[str, dict[str, Any]] = {}
-        for _, row in frame.iterrows():
-            code = str(row.get("代码") or row.get("code") or "").zfill(6)
-            price = _safe_float(row.get("最新价") or row.get("price"))
-            if code not in normalized or price <= 0:
-                continue
-            quotes[code] = {
-                "price": price,
-                "change_pct": _safe_float(row.get("涨跌幅") or row.get("change_pct")),
-                "amount": round(_safe_float(row.get("成交额") or row.get("amount")) / 1e8, 2),
-                "turnover": _safe_turnover(row.get("换手率") or row.get("turnover")),
-                "open": _safe_float(row.get("今开") or row.get("open")),
-                "prev_close": _safe_float(row.get("昨收") or row.get("prev_close")),
-                "high": _safe_float(row.get("最高") or row.get("high")),
-                "low": _safe_float(row.get("最低") or row.get("low")),
-                "note": "东方财富实时行情",
-            }
-        _attach_minute_bars(quotes)
-        return quotes
-    except Exception:
-        return {}
+    # Do not fall back to a full-market snapshot here.  That call can take
+    # longer than the reverse-proxy timeout and makes existing holdings appear
+    # to vanish.  The caller retains the last verified/manual price instead.
+    return {}
 
 def _latest_a_share_quotes_sina(codes: list[str]) -> dict[str, dict[str, Any]]:
     symbols = []
