@@ -24,7 +24,7 @@ def generate_next_day_expectations(db: Session) -> int:
     for holding in db.query(Holding).all():
         targets[holding.code] = {"name": holding.name, "hint": holding.position_type or "持仓股", "evidence": ["来源：当前持仓"]}
     for plan in db.query(NextDayPlan).order_by(NextDayPlan.updated_at.desc()).limit(500).all():
-        targets.setdefault(plan.code, {"name": plan.name, "hint": plan.script_type or "计划股", "evidence": ["来源：次日计划"]})
+        targets.setdefault(plan.code, {"name": plan.name, "hint": plan.holding_category or plan.plan_type or "计划股", "evidence": ["来源：次日计划"]})
     provider = MarketDataProvider()
     try:
         ladder = provider.limit_up_ladder()
