@@ -213,7 +213,7 @@ def _latest_a_share_quotes_eastmoney(codes: list[str]) -> dict[str, dict[str, An
 
 def _eastmoney_secid(code: str) -> str:
     normalized = _quote_code_candidates(code)[0] if _quote_code_candidates(code) else _normalize_code(code)
-    market = "1" if normalized.startswith(("6", "9")) else "0"
+    market = "1" if normalized.startswith(("5", "6", "9")) else "0"
     return f"{market}.{normalized}"
 
 
@@ -222,23 +222,29 @@ def _attach_minute_bars(quotes: dict[str, dict[str, Any]]) -> None:
         try:
             bars = _eastmoney_minute_bars(code)
         except Exception as exc:
+            quote["minute_bar_status"] = "fetch_error"
             quote["minute_fetch_error"] = str(exc)
             continue
         if not bars:
+            quote["minute_bar_status"] = "no_recent_rows"
             continue
         quote["minute_bars"] = bars
         quote["minute_bar_source"] = "东方财富1分钟分时K线"
-        quote["note"] = f"{quote.get('note') or '实时行情'} + 东方财富1分钟成交"
+        quote["minute_bar_status"] = "ok"
+        quote["minute_bar_trade_date"] = bars[-1].get("trade_date") or _last_trading_day()
+        date_note = "" if quote["minute_bar_trade_date"] == datetime.now().date().isoformat() else f"({quote['minute_bar_trade_date']})"
+        quote["note"] = f"{quote.get('note') or '实时行情'} + 东方财富1分钟成交{date_note}"
 
 
 def _eastmoney_minute_bars(code: str) -> list[dict[str, Any]]:
     normalized = _quote_code_candidates(code)[0] if _quote_code_candidates(code) else _normalize_code(code)
     secid = _eastmoney_secid(normalized)
+    trade_date = _last_trading_day()
     params = {
         "secid": secid,
         "klt": "1",
         "fqt": "1",
-        "lmt": "260",
+        "lmt": "320",
         "end": "20500101",
         "iscca": "1",
         "fields1": "f1,f2,f3,f4,f5,f6",
@@ -265,16 +271,16 @@ def _eastmoney_minute_bars(code: str) -> list[dict[str, Any]]:
         if last_exc:
             raise last_exc
         return []
-    today = datetime.now().date().isoformat()
     bars: list[dict[str, Any]] = []
     for row in rows:
         parts = str(row).split(",")
         if len(parts) < 7:
             continue
         ts = parts[0]
-        if not ts.startswith(today):
+        if not ts.startswith(trade_date):
             continue
         bars.append({
+            "trade_date": trade_date,
             "time": ts[-5:],
             "open": _safe_float(parts[1]),
             "price": _safe_float(parts[2]),

@@ -47,11 +47,15 @@ Deferred by request:
   - Added `stop_source` and `stop_source_detail` to execution states and stop-level APIs.
   - Execution state now marks whether stops came from next-day plan, sell card, text script, or fallback candidates.
   - Positions and stock decision card UIs display the stop source and detail instead of relying only on evidence text.
+- V2.2 minute-bar reliability batch:
+  - Eastmoney 1-minute bars now filter by latest trading day instead of calendar today, so weekends/non-trading days can still use the latest valid intraday bars.
+  - Quote metadata now records `minute_bar_status`, `minute_bar_trade_date`, and fetch errors, making missing minute data an explicit downgrade reason.
+  - Shanghai/Shenzhen ETF secid mapping is covered by tests.
 
 ## Still Open
 
 - Enable CI in GitHub after the PAT gets `workflow` scope. The workflow file exists locally at `.github/workflows/ci.yml` but cannot be pushed by the current token.
-- Make minute-bar fetching production-hardened across trading days, non-trading days, ETFs, and temporary Eastmoney outages.
+- Continue minute-bar production monitoring: retries/backoff metrics, provider health history, and alternate provider support beyond Eastmoney.
 - Expand time-stop thresholds into editable user-facing rule templates by script type and stage.
 - Persist attack/pullback segment metrics into dedicated columns if later analytics need filtering and aggregation.
 - Strengthen cross-sector migration scoring with original theme outflow, new theme inflow, stock weakening, and leader-switch evidence.
