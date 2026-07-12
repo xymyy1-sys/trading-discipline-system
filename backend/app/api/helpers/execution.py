@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from datetime import datetime, time, timedelta
 from typing import Any
 
@@ -180,6 +181,39 @@ def _script_hard_stop_ratio(position_type: str) -> float:
     return 0.96
 
 
+def _script_stop_levels(holding: Holding, current_stop: float) -> tuple[float, float, list[str]]:
+    text = f"{holding.position_type or ''} {holding.next_discipline or ''}"
+    evidence: list[str] = []
+    hard_stop = round(holding.cost_price * _script_hard_stop_ratio(holding.position_type), 2) if holding.cost_price else 0.0
+    structure_stop = current_stop
+    price_patterns = [
+        (r"(?:结构止损|结构位|失败位|防守位|跌破|破位|止损)\D{0,8}(\d+(?:\.\d+)?)", "structure"),
+        (r"(?:硬止损|最终止损|绝对止损)\D{0,8}(\d+(?:\.\d+)?)", "hard"),
+    ]
+    for pattern, target in price_patterns:
+        match = re.search(pattern, text)
+        if not match:
+            continue
+        value = float(match.group(1))
+        if value <= 0:
+            continue
+        if target == "hard":
+            hard_stop = round(value, 2)
+            evidence.append(f"按交易剧本解析硬止损 {hard_stop:.2f}。")
+        else:
+            structure_stop = round(value, 2)
+            evidence.append(f"按交易剧本解析结构止损 {structure_stop:.2f}。")
+
+    pct_match = re.search(r"(?:止损|破位|亏损)\D{0,8}(\d+(?:\.\d+)?)\s*%", text)
+    if pct_match and holding.cost_price:
+        pct_stop = round(holding.cost_price * (1 - float(pct_match.group(1)) / 100), 2)
+        if not evidence:
+            evidence.append(f"按交易剧本解析百分比止损 {pct_stop:.2f}。")
+        structure_stop = max(structure_stop, pct_stop) if structure_stop else pct_stop
+
+    return structure_stop, hard_stop, evidence
+
+
 def _action_from_score(score: int, hard_exit: bool, has_profit: bool) -> tuple[str, str, float, str]:
     if hard_exit:
         return "EXIT_REQUIRED", "全部退出", 1.0, "EXIT"
@@ -206,6 +240,7 @@ def _build_events(
     volume_price_state: str = "",
     expectation_result: str = "",
     vwap_reliable: bool = False,
+    time_stop_reasons: list[str] | None = None,
 ) -> list[dict[str, Any]]:
     now = datetime.now()
     events: list[dict[str, Any]] = []
@@ -279,6 +314,31 @@ def _build_events(
             "group_key": "sector:flow",
             "evidence": [str(getattr(seesaw, "theme_flow_summary", "") or "板块资金从峰值回落。")],
         })
+    if (
+        seesaw
+        and str(getattr(seesaw, "external_inflow_target", "") or "")
+        and str(getattr(seesaw, "risk_level", "")) in {"高", "中高", "中"}
+        and (
+            int(getattr(seesaw, "sector_rank", 0) or 0) > 10
+            or float(getattr(seesaw, "sector_net_inflow", 0) or 0) < 0
+            or float(getattr(seesaw, "theme_flow_pullback_pct", 0) or 0) >= 20
+        )
+    ):
+        events.append({
+            "captured_at": now,
+            "scope": "sector",
+            "target_code": holding.code,
+            "target_name": str(getattr(seesaw, "holding_theme", "") or holding.name),
+            "event_type": "SECTOR_MIGRATION_CONFIRMED",
+            "severity": "warning",
+            "value": float(getattr(seesaw, "sector_net_inflow", 0) or 0),
+            "previous_value": float(getattr(seesaw, "theme_flow_peak", 0) or 0),
+            "priority": 75,
+            "group_key": "sector:migration",
+            "evidence": [
+                f"资金迁移至{getattr(seesaw, 'external_inflow_target', '')}，原持仓主线排名/资金弱化，按跨板块资金迁移处理。"
+            ],
+        })
     if seesaw and str(getattr(seesaw, "risk_level", "")) in {"高", "中高"}:
         events.append({
             "captured_at": now,
@@ -293,7 +353,113 @@ def _build_events(
             "group_key": "stock:risk",
             "evidence": evidence[:3] or [str(getattr(seesaw, "signal", "") or "持仓风险升高。")],
         })
+    for reason in time_stop_reasons or []:
+        events.append({
+            "captured_at": now,
+            "scope": "stock",
+            "target_code": holding.code,
+            "target_name": holding.name,
+            "event_type": "TIME_STOP_TRIGGERED",
+            "severity": "critical" if vwap_reliable else "warning",
+            "value": round(current, 2),
+            "previous_value": round(vwap, 2),
+            "priority": 92,
+            "group_key": "stock:time-stop",
+            "evidence": [reason],
+        })
     return events
+
+
+def _time_stop_reasons(
+    db: Session,
+    holding: Holding,
+    current: float,
+    vwap: float,
+    vwap_reliable: bool,
+    quote: dict[str, Any],
+    volume_state: str,
+    expectation_result: str,
+    now: datetime,
+) -> list[str]:
+    reasons: list[str] = []
+    if vwap_reliable and vwap > 0 and current < vwap:
+        rows = quote.get("minute_bars") or quote.get("minutes") or []
+        below_rows = []
+        if isinstance(rows, list):
+            for row in rows[-8:]:
+                if not isinstance(row, dict):
+                    continue
+                price = _safe_float(row.get("price") or row.get("close"))
+                if price > 0 and price < vwap:
+                    below_rows.append(row)
+        if len(below_rows) >= 5:
+            reasons.append(f"真实分钟数据连续 {len(below_rows)} 根低于VWAP {vwap:.2f}，触发时间止损观察。")
+        else:
+            normalized = _normalize_code(holding.code)
+            candidates = {holding.code, normalized, normalized.lstrip("0")}
+            recent = (
+                db.query(VolumePriceSnapshot)
+                .filter(
+                    VolumePriceSnapshot.code.in_(list(candidates)),
+                    VolumePriceSnapshot.trade_date == _trade_date(),
+                    VolumePriceSnapshot.captured_at >= now - timedelta(minutes=15),
+                    VolumePriceSnapshot.vwap_reliable.is_(True),
+                )
+                .order_by(VolumePriceSnapshot.captured_at.asc(), VolumePriceSnapshot.id.asc())
+                .all()
+            )
+            below = [row for row in recent if float(row.price or 0) < float(row.vwap or 0)]
+            if len(below) >= 3 and (below[-1].captured_at - below[0].captured_at) >= timedelta(minutes=5):
+                reasons.append("15分钟窗口内多次低于真实VWAP且持续超过5分钟，确认持续低于VWAP。")
+
+    prev_close = _safe_float(quote.get("prev_close"))
+    high = _safe_float(quote.get("high"))
+    limit_up_price = _safe_float(quote.get("limit_up_price")) or (round(prev_close * 1.1, 2) if prev_close else 0)
+    if limit_up_price and high >= limit_up_price * 0.995 and current < limit_up_price * 0.985:
+        reasons.append(f"盘中冲击涨停价 {limit_up_price:.2f} 后未回封，当前 {current:.2f} 已明显脱离封板区。")
+
+    if now.time() >= time(10, 0) and expectation_result in {"WEAKER", "SLIGHTLY_WEAKER"} and volume_state not in {"REPAIR_CONFIRMED", "VWAP_STRONG"}:
+        reasons.append("10:00确认截止后预期仍偏弱且量价未修复，触发时间止损确认。")
+    return reasons
+
+
+def _recovery_events(db: Session, holding: Holding, volume_state: str, current: float, vwap: float) -> list[dict[str, Any]]:
+    if volume_state not in {"REPAIR_CONFIRMED", "VWAP_STRONG"}:
+        return []
+    normalized = _normalize_code(holding.code)
+    candidates = {holding.code, normalized, normalized.lstrip("0")}
+    since = datetime.now() - timedelta(minutes=45)
+    risk_events = (
+        db.query(IntradayEvidenceEvent)
+        .filter(
+            IntradayEvidenceEvent.target_code.in_(list(candidates)),
+            IntradayEvidenceEvent.captured_at >= since,
+            IntradayEvidenceEvent.event_type.in_([
+                "VWAP_BROKEN",
+                "VOLUME_PRICE_WEAKENING",
+                "EXPECTATION_VOLUME_BREAKDOWN",
+                "TIME_STOP_TRIGGERED",
+            ]),
+        )
+        .order_by(IntradayEvidenceEvent.captured_at.desc(), IntradayEvidenceEvent.id.desc())
+        .limit(3)
+        .all()
+    )
+    if not risk_events:
+        return []
+    return [{
+        "captured_at": datetime.now(),
+        "scope": "stock",
+        "target_code": holding.code,
+        "target_name": holding.name,
+        "event_type": "RISK_RECOVERY_CONFIRMED",
+        "severity": "info",
+        "value": round(current, 2),
+        "previous_value": round(vwap, 2),
+        "priority": 35,
+        "group_key": "stock:recovery",
+        "evidence": ["前序风险事件后重新站回真实VWAP/量价修复，风险状态恢复为观察。"],
+    }]
 
 
 def _dedupe_events(db: Session, events: list[dict[str, Any]], cooldown_minutes: int = 5) -> list[dict[str, Any]]:
@@ -370,12 +536,14 @@ def build_position_execution_state(
     hard_stop_price = round(holding.cost_price * _script_hard_stop_ratio(holding.position_type), 2) if holding.cost_price else 0.0
     support_candidates = [value for value in [vwap, open_price, low, holding.cost_price * 0.97 if holding.cost_price else 0] if value and value > 0]
     structure_stop_price = round(max(min(support_candidates), hard_stop_price), 2) if support_candidates else hard_stop_price
+    structure_stop_price, hard_stop_price, script_stop_evidence = _script_stop_levels(holding, structure_stop_price)
     trailing_stop_price = round(maximum_price * 0.95, 2) if maximum_price and protection_level in {"LEVEL_2", "LEVEL_3", "LEVEL_4"} else 0.0
 
     evidence: list[str] = [
         f"当前盈亏 {current_profit_pct:+.2f}%，最大浮盈 {max_profit_pct:+.2f}%，利润回撤 {profit_drawdown_pct:.2f} 个百分点。",
         f"结构止损 {structure_stop_price:.2f}，硬止损 {hard_stop_price:.2f}，利润保护线 {profit_protection_price:.2f}。",
     ]
+    evidence.extend(script_stop_evidence)
     counter_evidence: list[str] = []
     invalid_conditions: list[str] = [
         f"放量跌破结构止损 {structure_stop_price:.2f} 且 5-15 分钟不能收回。",
@@ -395,6 +563,7 @@ def build_position_execution_state(
         high_drawdown_pct = max(high_drawdown_pct, _safe_float(getattr(volume_price, "high_drawdown", 0)))
         vwap = _safe_float(getattr(volume_price, "vwap", 0)) or vwap
     volume_state = _volume_price_state(volume_pattern, current, vwap if vwap_reliable else 0, high_drawdown_pct)
+    time_stop_reasons = _time_stop_reasons(db, holding, current, vwap, vwap_reliable, quote, volume_state, expectation_result, now)
 
     if protection_level != "NONE":
         evidence.append(f"已进入{protection_level}利润保护，不能无条件放任盈利大幅回吐。")
@@ -424,6 +593,10 @@ def build_position_execution_state(
     elif current <= structure_stop_price and structure_stop_price:
         negative_score += 2
         evidence.append(f"当前价 {current:.2f} 已接近/跌破结构止损 {structure_stop_price:.2f}。")
+    if time_stop_reasons and vwap_reliable:
+        negative_score += 2
+        evidence.extend(time_stop_reasons)
+        invalid_conditions.append("时间止损触发后，必须看到真实VWAP修复或重新回封才允许恢复计划。")
     if vwap and vwap_reliable:
         if current < vwap:
             negative_score += 1
@@ -507,7 +680,9 @@ def build_position_execution_state(
         volume_price_state=volume_price_state,
         expectation_result=expectation_result,
         vwap_reliable=vwap_reliable,
+        time_stop_reasons=time_stop_reasons,
     )
+    events.extend(_recovery_events(db, holding, volume_price_state, current, vwap))
 
     snapshot = ProfitProtectionSnapshot(
         holding_id=int(holding.id),

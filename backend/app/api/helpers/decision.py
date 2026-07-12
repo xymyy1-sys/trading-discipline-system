@@ -274,26 +274,47 @@ def build_t_eligibility(db: Session, holding: Holding) -> TEligibilityOut:
     if execution.profit_snapshot and execution.profit_snapshot.current_profit_pct < 0:
         forbidden.append("当前浮亏，做T容易演变为补仓摊低成本。")
     eligible = not forbidden and suggested_qty > 0
+    has_profit_protection = bool(execution.profit_snapshot and execution.profit_snapshot.protection_level != "NONE")
+    has_reversal_setup = any(
+        keyword in item
+        for item in execution.evidence
+        for keyword in ("高点回撤", "冲高回落", "利润回撤", "冲击涨停")
+    )
     inverse_candidate = (
         eligible
-        and execution.state in {"LOSS_OBSERVATION", "DIVERGENCE_HOLD", "DEGRADED_DATA_OBSERVATION"}
+        and execution.state in {"PROFIT_PROTECTION", "DIVERGENCE_HOLD", "PROFIT_EXPANSION", "NORMAL_HOLD"}
+        and has_profit_protection
+        and has_reversal_setup
         and execution.data_quality == "realtime"
-        and not any("跌破真实分钟VWAP" in item for item in execution.evidence)
+        and execution.volume_price_state in {"HIGH_DRAWDOWN", "VWAP_STRONG", "REPAIR_CONFIRMED", "VOLUME_PRICE_NEUTRAL"}
+        and not any("跌破真实分钟VWAP" in item or "时间止损" in item for item in execution.evidence)
     )
     if eligible:
         evidence.append("原持仓逻辑未证伪，且仍有可卖底仓。")
         if inverse_candidate:
-            evidence.append("允许倒T候选：只能先小比例低吸，确认修复后卖出昨日底仓，失败立即撤退。")
+            evidence.append("允许倒T候选：先卖出昨日可卖底仓的一小部分，只有缩量回踩并重新修复后才接回。")
         else:
             evidence.append("只允许正T小比例卖出，等待重新确认后接回。")
-    buyback_low = round(current * 0.975, 2) if current else 0
-    buyback_high = round(current * 0.99, 2) if current else 0
-    conditions = [
-        "回踩VWAP附近缩量企稳。",
-        "5分钟内重新站回VWAP。",
-        "所属板块资金停止下降或重新回流。",
-        "主动买入重新占优，不能继续创新低。",
-    ]
+    if inverse_candidate:
+        buyback_low = round(max(execution.structure_stop_price, current * 0.965), 2) if current else 0
+        buyback_high = round(current * 0.985, 2) if current else 0
+        suggested_sell_price = round(current, 2)
+        conditions = [
+            "先卖出计划数量，不先低吸；接回必须等回踩缩量企稳。",
+            "重新站回真实分钟VWAP，或至少连续3根1分钟K线不再创新低。",
+            "主动卖出额下降，主动买入重新占优。",
+            "所属板块资金停止下降或重新回流。",
+        ]
+    else:
+        buyback_low = round(current * 0.975, 2) if current else 0
+        buyback_high = round(current * 0.99, 2) if current else 0
+        suggested_sell_price = round(max(current * 1.02, current), 2) if current else 0
+        conditions = [
+            "回踩VWAP附近缩量企稳。",
+            "5分钟内重新站回VWAP。",
+            "所属板块资金停止下降或重新回流。",
+            "主动买入重新占优，不能继续创新低。",
+        ]
     return TEligibilityOut(
         holding_id=int(holding.id),
         code=holding.code,
@@ -304,7 +325,7 @@ def build_t_eligibility(db: Session, holding: Holding) -> TEligibilityOut:
         today_buy_quantity=today_buy,
         yesterday_quantity=yesterday_quantity,
         suggested_quantity=suggested_qty,
-        suggested_sell_price=round(max(current * 1.02, current), 2) if current else 0,
+        suggested_sell_price=suggested_sell_price,
         buyback_price_low=buyback_low,
         buyback_price_high=buyback_high,
         buyback_conditions=conditions,

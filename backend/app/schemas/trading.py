@@ -398,6 +398,19 @@ class StopLevelsOut(BaseModel):
     invalid_conditions: list[str] = Field(default_factory=list)
 
 
+class IntradayReviewOut(BaseModel):
+    code: str
+    name: str = ""
+    generated_at: datetime
+    latest_action: str = ""
+    latest_state: str = ""
+    data_quality: str = "manual"
+    timeline: list[IntradayEvidenceEventOut] = Field(default_factory=list)
+    evidence: list[str] = Field(default_factory=list)
+    counter_evidence: list[str] = Field(default_factory=list)
+    next_actions: list[str] = Field(default_factory=list)
+
+
 class CollectionRunOut(BaseModel):
     id: int | None = None
     started_at: datetime

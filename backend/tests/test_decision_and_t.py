@@ -1,3 +1,5 @@
+from types import SimpleNamespace
+
 from app.api.helpers.decision import build_expectation_snapshot, build_t_eligibility, create_t_plan
 from app.api.helpers.plan_calc import _default_next_day_plan, refresh_limit_expectation_stage
 from app.api.helpers.volume_price import build_volume_price_snapshot
@@ -66,6 +68,43 @@ def test_create_positive_t_plan_when_eligible(db_session):
         assert plan.status == "forbidden"
 
 
+def test_inverse_t_requires_profit_protection_and_reversal_setup(db_session, monkeypatch):
+    holding = Holding(
+        code="600016",
+        name="倒T测试",
+        quantity=2000,
+        cost_price=10,
+        current_price=11,
+        total_asset=100000,
+        position_type="盈利趋势仓",
+        next_discipline="利润保护后允许倒T",
+    )
+    db_session.add(holding)
+    db_session.commit()
+    db_session.refresh(holding)
+    execution = SimpleNamespace(
+        sellable_quantity=2000,
+        today_buy_quantity=0,
+        yesterday_quantity=2000,
+        state="PROFIT_PROTECTION",
+        t_eligible=True,
+        profit_snapshot=SimpleNamespace(current_profit_pct=10, protection_level="LEVEL_4"),
+        data_quality="realtime",
+        volume_price_state="HIGH_DRAWDOWN",
+        evidence=["高点回撤 3.20%，利润回撤进入保护区。"],
+        recommended_action="继续持有",
+        structure_stop_price=10.4,
+    )
+    monkeypatch.setattr("app.api.helpers.decision.build_position_execution_state", lambda db, row: execution)
+
+    eligibility = build_t_eligibility(db_session, holding)
+
+    assert eligibility.eligible is True
+    assert eligibility.t_type == "INVERSE_T"
+    assert eligibility.suggested_sell_price == 11
+    assert any("先卖出计划数量" in item for item in eligibility.buyback_conditions)
+
+
 def test_volume_price_snapshot_detects_vwap_breakdown(db_session):
     snapshot = build_volume_price_snapshot(
         db_session,
@@ -97,6 +136,36 @@ def test_volume_price_snapshot_detects_vwap_breakdown(db_session):
     assert snapshot.vwap_source == "minute"
     assert snapshot.vwap_reliable is True
     assert snapshot.evidence
+
+
+def test_volume_price_snapshot_calculates_minute_flow_metrics(db_session):
+    snapshot = build_volume_price_snapshot(
+        db_session,
+        "600017",
+        name="分钟量能",
+        quote={
+            "price": 10.6,
+            "change_pct": 6,
+            "open": 10.0,
+            "prev_close": 10.0,
+            "high": 10.9,
+            "low": 9.9,
+            "amount": 6.0,
+            "volume": 60_000_000,
+            "minute_bars": [
+                {"price": 10.1, "volume": 1000, "amount": 10100, "active_buy_amount": 8000, "active_sell_amount": 2100},
+                {"price": 10.4, "volume": 1300, "amount": 13520, "active_buy_amount": 9000, "active_sell_amount": 4520},
+                {"price": 10.8, "volume": 1800, "amount": 19440, "active_buy_amount": 15000, "active_sell_amount": 4440},
+                {"price": 10.6, "volume": 900, "amount": 9540, "active_buy_amount": 2500, "active_sell_amount": 7040},
+            ],
+            "turnover": 4.5,
+            "note": "东方财富实时行情",
+        },
+    )
+
+    assert snapshot.active_buy_amount > snapshot.active_sell_amount
+    assert snapshot.volume_acceleration > 0
+    assert any("分钟主动买卖额" in item for item in snapshot.evidence)
 
 
 def test_decision_card_includes_volume_price(client, monkeypatch):

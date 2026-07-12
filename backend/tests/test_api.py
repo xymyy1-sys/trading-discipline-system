@@ -25,6 +25,32 @@ def test_intraday_collector_status(client):
     assert "running" in data
 
 
+def test_intraday_review_route_returns_current_evidence(client, db_session):
+    from app.models.trading import Holding
+
+    holding = Holding(
+        code="600018",
+        name="复盘接口",
+        quantity=1000,
+        cost_price=10,
+        current_price=10.6,
+        total_asset=100000,
+        position_type="盈利趋势仓",
+        next_discipline="按计划观察",
+    )
+    db_session.add(holding)
+    db_session.commit()
+
+    response = client.get("/api/stocks/600018/intraday-review")
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["code"] == "600018"
+    assert data["latest_action"]
+    assert "timeline" in data
+    assert isinstance(data["evidence"], list)
+
+
 def test_review_calibration_summary(client, db_session):
     from app.models.trading import (
         ActionRecommendation,

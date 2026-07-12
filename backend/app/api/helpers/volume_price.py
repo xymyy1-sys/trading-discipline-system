@@ -49,26 +49,96 @@ def _fallback_vwap(price: float, high_price: float, low_price: float) -> float:
     return round(sum(values) / len(values), 4) if values else 0
 
 
-def _minute_vwap(quote: dict[str, Any]) -> tuple[float, int]:
+def _minute_rows(quote: dict[str, Any]) -> list[dict[str, Any]]:
     rows = quote.get("minute_bars") or quote.get("minutes") or quote.get("minute_data") or []
+    if not isinstance(rows, list):
+        return []
+    return [row for row in rows if isinstance(row, dict)]
+
+
+def _minute_amount(row: dict[str, Any]) -> float:
+    volume = _safe_float(row.get("volume"))
+    amount = _safe_float(row.get("amount"))
+    price = _safe_float(row.get("price") or row.get("close"))
+    if amount <= 0 and price > 0 and volume > 0:
+        amount = price * volume
+    return amount
+
+
+def _minute_vwap(quote: dict[str, Any]) -> tuple[float, int]:
+    rows = _minute_rows(quote)
     total_amount = 0.0
     total_volume = 0.0
     count = 0
-    if not isinstance(rows, list):
-        return 0.0, 0
     for row in rows:
-        if not isinstance(row, dict):
-            continue
         volume = _safe_float(row.get("volume"))
-        amount = _safe_float(row.get("amount"))
-        price = _safe_float(row.get("price") or row.get("close"))
-        if amount <= 0 and price > 0 and volume > 0:
-            amount = price * volume
+        amount = _minute_amount(row)
         if amount > 0 and volume > 0:
             total_amount += amount
             total_volume += volume
             count += 1
     return (round(total_amount / total_volume, 4), count) if total_amount > 0 and total_volume > 0 else (0.0, count)
+
+
+def _minute_flow_metrics(quote: dict[str, Any]) -> tuple[float, float, float, float, list[str]]:
+    rows = _minute_rows(quote)
+    evidence: list[str] = []
+    if len(rows) < 3:
+        return (
+            _safe_float(quote.get("active_buy_amount")),
+            _safe_float(quote.get("active_sell_amount")),
+            _safe_float(quote.get("attack_efficiency")),
+            _safe_float(quote.get("volume_acceleration")),
+            evidence,
+        )
+
+    active_buy = 0.0
+    active_sell = 0.0
+    positive_amount = 0.0
+    positive_price_gain = 0.0
+    previous_price = _safe_float(rows[0].get("open") or rows[0].get("price") or rows[0].get("close"))
+    volumes: list[float] = []
+    highs = [_safe_float(row.get("high") or row.get("price") or row.get("close")) for row in rows]
+    latest_price = _safe_float(rows[-1].get("price") or rows[-1].get("close"))
+    peak_price = max([value for value in highs if value > 0], default=0.0)
+
+    for row in rows:
+        amount = _minute_amount(row)
+        volume = _safe_float(row.get("volume"))
+        volumes.append(volume)
+        explicit_buy = _safe_float(row.get("active_buy_amount") or row.get("buy_amount"))
+        explicit_sell = _safe_float(row.get("active_sell_amount") or row.get("sell_amount"))
+        price = _safe_float(row.get("price") or row.get("close"))
+        open_price = _safe_float(row.get("open")) or previous_price
+        if explicit_buy > 0 or explicit_sell > 0:
+            active_buy += explicit_buy
+            active_sell += explicit_sell
+        elif amount > 0 and price > 0:
+            if price >= max(previous_price, open_price):
+                active_buy += amount
+                positive_amount += amount
+                positive_price_gain += max(0.0, price - previous_price)
+            else:
+                active_sell += amount
+        if price > 0:
+            previous_price = price
+
+    recent = volumes[-3:]
+    prior = volumes[:-3]
+    recent_avg = sum(recent) / len(recent) if recent else 0.0
+    prior_avg = sum(prior) / len(prior) if prior else 0.0
+    volume_acceleration = ((recent_avg - prior_avg) / prior_avg * 100) if prior_avg > 0 else 0.0
+    attack_efficiency = positive_price_gain / positive_amount * 10000 if positive_amount > 0 else 0.0
+    pullback_pct = ((peak_price - latest_price) / peak_price * 100) if peak_price > 0 and latest_price > 0 else 0.0
+
+    if active_buy or active_sell:
+        evidence.append(f"分钟主动买卖额：主动买 {active_buy:.2f}，主动卖 {active_sell:.2f}。")
+    if attack_efficiency:
+        evidence.append(f"上攻效率 {attack_efficiency:.2f}，量能加速度 {volume_acceleration:+.2f}%。")
+    if pullback_pct >= 2 and active_sell > active_buy:
+        evidence.append(f"高点回落 {pullback_pct:.2f}% 且回落段卖出额占优，属于回落量能放大。")
+
+    return active_buy, active_sell, attack_efficiency, volume_acceleration, evidence
 
 
 def _classify_pattern(
@@ -180,6 +250,7 @@ def build_volume_price_snapshot(
     price_vs_vwap = ((price - vwap) / vwap * 100) if price > 0 and vwap > 0 else 0
     high_drawdown = ((high_price - price) / high_price * 100) if high_price > 0 and price > 0 else 0
     estimated_full_day_amount = round(amount / _trading_elapsed_ratio(), 2) if amount > 0 else 0
+    active_buy_amount, active_sell_amount, attack_efficiency, volume_acceleration, flow_evidence = _minute_flow_metrics(quote)
     note = str(quote.get("note") or "")
     data_quality = "realtime" if quote and _is_realtime_note(note) else ("degraded" if quote else "manual")
     if quote and not vwap_reliable:
@@ -201,6 +272,7 @@ def build_volume_price_snapshot(
         counter.append("缺少真实1分钟成交数据，VWAP为估算值，不能作为确定性减仓、清仓或做T触发。")
     elif data_quality != "realtime":
         counter.append("行情源不是实时可信状态，量价结论需要人工复核。")
+    evidence.extend(flow_evidence)
 
     row = VolumePriceSnapshot(
         trade_date=_today(),
@@ -224,10 +296,10 @@ def build_volume_price_snapshot(
         vwap_reliable=vwap_reliable,
         price_vs_vwap=round(price_vs_vwap, 2),
         high_drawdown=round(high_drawdown, 2),
-        active_buy_amount=round(_safe_float(quote.get("active_buy_amount")), 2),
-        active_sell_amount=round(_safe_float(quote.get("active_sell_amount")), 2),
-        attack_efficiency=round(_safe_float(quote.get("attack_efficiency")), 2),
-        volume_acceleration=round(_safe_float(quote.get("volume_acceleration")), 2),
+        active_buy_amount=round(active_buy_amount, 2),
+        active_sell_amount=round(active_sell_amount, 2),
+        attack_efficiency=round(attack_efficiency, 2),
+        volume_acceleration=round(volume_acceleration, 2),
         pattern=pattern,
         data_quality=data_quality,
         data_source=data_source,

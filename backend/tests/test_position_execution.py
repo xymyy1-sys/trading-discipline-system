@@ -1,8 +1,8 @@
 from types import SimpleNamespace
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from app.api.helpers.execution import build_position_execution_state
-from app.models.trading import ExpectationSnapshot, Holding, TradeLog, VolumePriceSnapshot
+from app.models.trading import ExpectationSnapshot, Holding, IntradayEvidenceEvent, TradeLog, VolumePriceSnapshot
 
 
 def test_position_execution_profit_drawdown_requires_reduce(db_session):
@@ -365,3 +365,200 @@ def test_t_plus_one_sellable_quantity_excludes_today_buys(db_session):
     assert state.today_buy_quantity == 500
     assert state.sellable_quantity == 1000
     assert state.yesterday_quantity == 1000
+
+
+def test_script_stop_levels_override_candidate_stop(db_session):
+    holding = Holding(
+        code="600012",
+        name="剧本止损",
+        quantity=1000,
+        cost_price=10,
+        current_price=10.15,
+        total_asset=100000,
+        position_type="盈利趋势仓",
+        next_discipline="交易剧本：结构止损 10.20，硬止损 9.80。",
+    )
+    db_session.add(holding)
+    db_session.commit()
+    db_session.refresh(holding)
+
+    state = build_position_execution_state(
+        db_session,
+        holding,
+        quote={"price": 10.15, "high": 10.8, "low": 10.1, "open": 10.5, "note": "实时行情"},
+    )
+
+    assert state.structure_stop_price == 10.2
+    assert state.hard_stop_price == 9.8
+    assert any("交易剧本解析结构止损" in item for item in state.evidence)
+
+
+def test_time_stop_triggers_on_sustained_reliable_vwap_break(db_session):
+    holding = Holding(
+        code="600013",
+        name="时间止损",
+        quantity=1000,
+        cost_price=10,
+        current_price=10.2,
+        total_asset=100000,
+        position_type="盈利趋势仓",
+        next_discipline="持续低于VWAP退出",
+    )
+    db_session.add(holding)
+    db_session.commit()
+    db_session.refresh(holding)
+    volume = VolumePriceSnapshot(
+        trade_date="2026-07-12",
+        code="600013",
+        name="时间止损",
+        stage="第一阶段确认",
+        price=10.2,
+        change_pct=2,
+        high_price=10.9,
+        low_price=10.1,
+        vwap=10.55,
+        vwap_source="minute",
+        minute_bar_count=8,
+        vwap_reliable=True,
+        high_drawdown=6.4,
+        pattern="跌破VWAP",
+        data_quality="realtime",
+        data_source="测试行情",
+        evidence_json="[]",
+        counter_evidence_json="[]",
+    )
+
+    state = build_position_execution_state(
+        db_session,
+        holding,
+        quote={
+            "price": 10.2,
+            "high": 10.9,
+            "low": 10.1,
+            "open": 10.7,
+            "vwap": 10.55,
+            "minute_bars": [
+                {"price": 10.48, "volume": 1000, "amount": 10480},
+                {"price": 10.45, "volume": 1000, "amount": 10450},
+                {"price": 10.42, "volume": 1000, "amount": 10420},
+                {"price": 10.35, "volume": 1000, "amount": 10350},
+                {"price": 10.2, "volume": 1000, "amount": 10200},
+            ],
+            "note": "实时行情",
+        },
+        volume_price=volume,
+    )
+
+    assert any("真实分钟数据连续" in item for item in state.evidence)
+    assert any(event.event_type == "TIME_STOP_TRIGGERED" for event in state.events)
+
+
+def test_recovery_event_after_previous_risk_event(db_session):
+    holding = Holding(
+        code="600014",
+        name="风险恢复",
+        quantity=1000,
+        cost_price=10,
+        current_price=10.8,
+        total_asset=100000,
+        position_type="盈利趋势仓",
+        next_discipline="修复后观察",
+    )
+    db_session.add(holding)
+    db_session.flush()
+    db_session.add(IntradayEvidenceEvent(
+        trade_date="2026-07-12",
+        captured_at=datetime.now() - timedelta(minutes=10),
+        scope="stock",
+        target_code="600014",
+        target_name="风险恢复",
+        event_type="VWAP_BROKEN",
+        severity="warning",
+        value=10.1,
+        previous_value=10.5,
+        evidence_json='["跌破VWAP。"]',
+    ))
+    db_session.commit()
+    db_session.refresh(holding)
+    volume = VolumePriceSnapshot(
+        trade_date="2026-07-12",
+        code="600014",
+        name="风险恢复",
+        stage="修复确认",
+        price=10.8,
+        change_pct=8,
+        high_price=10.9,
+        low_price=10.1,
+        vwap=10.45,
+        vwap_source="minute",
+        minute_bar_count=5,
+        vwap_reliable=True,
+        high_drawdown=0.9,
+        pattern="VWAP上方强势",
+        data_quality="realtime",
+        data_source="测试行情",
+        evidence_json="[]",
+        counter_evidence_json="[]",
+    )
+
+    state = build_position_execution_state(
+        db_session,
+        holding,
+        quote={"price": 10.8, "high": 10.9, "low": 10.1, "open": 10.2, "vwap": 10.45, "note": "实时行情"},
+        volume_price=volume,
+    )
+
+    assert any(event.event_type == "RISK_RECOVERY_CONFIRMED" for event in state.events)
+
+
+def test_sector_migration_event_when_external_flow_takes_over(db_session):
+    holding = Holding(
+        code="600015",
+        name="迁移识别",
+        quantity=1000,
+        cost_price=10,
+        current_price=10.6,
+        total_asset=100000,
+        position_type="盈利趋势仓",
+        next_discipline="板块退潮降风险",
+    )
+    db_session.add(holding)
+    db_session.commit()
+    db_session.refresh(holding)
+    seesaw = SimpleNamespace(
+        risk_level="中高",
+        signal="资金迁移",
+        external_inflow_target="机器人链",
+        sector_rank=18,
+        sector_net_inflow=-3,
+        theme_flow_pullback_pct=25,
+        theme_flow_current=2,
+        theme_flow_peak=8,
+        theme_flow_summary="原主线资金回落。",
+        holding_theme="半导体链",
+        pullback_from_high_pct=3,
+        sector_ebb_trigger=["资金排名降至第18。"],
+        stock_weakening_trigger=[],
+        profit_drawdown_trigger=[],
+    )
+
+    state = build_position_execution_state(
+        db_session,
+        holding,
+        quote={
+            "price": 10.6,
+            "high": 10.9,
+            "low": 10.4,
+            "open": 10.5,
+            "vwap": 10.5,
+            "minute_bars": [
+                {"price": 10.5, "volume": 1000, "amount": 10500},
+                {"price": 10.55, "volume": 1000, "amount": 10550},
+                {"price": 10.6, "volume": 1000, "amount": 10600},
+            ],
+            "note": "实时行情",
+        },
+        seesaw=seesaw,
+    )
+
+    assert any(event.event_type == "SECTOR_MIGRATION_CONFIRMED" for event in state.events)

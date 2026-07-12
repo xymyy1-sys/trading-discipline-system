@@ -1,6 +1,10 @@
+from datetime import datetime
+
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
+from app.api.helpers.execution import build_position_execution_state
+from app.api.helpers.holdings_calc import _find_holding_by_code
 from app.api.helpers.decision import (
     _json_list,
     build_expectation_snapshot,
@@ -12,12 +16,13 @@ from app.api.helpers.decision import (
 )
 from app.api.helpers.volume_price import build_volume_price_snapshot
 from app.core.database import get_db
-from app.models.trading import ExpectationSnapshot, IntradayEvidenceEvent
+from app.models.trading import ExpectationSnapshot, IntradayEvidenceEvent, PositionExecutionState
 from app.schemas.trading import (
     ExpectationSnapshotIn,
     ExpectationSnapshotOut,
     ExpectationSnapshotUpdate,
     IntradayEvidenceEventOut,
+    IntradayReviewOut,
     StockDecisionCardOut,
     VolumePriceSnapshotOut,
 )
@@ -83,3 +88,43 @@ def get_stock_timeline(code: str, db: Session = Depends(get_db)) -> list[Intrada
         )
         for row in rows
     ]
+
+
+@router.get("/stocks/{code}/intraday-review", response_model=IntradayReviewOut)
+def get_stock_intraday_review(code: str, db: Session = Depends(get_db)) -> IntradayReviewOut:
+    holding = _find_holding_by_code(db, code)
+    state = build_position_execution_state(db, holding) if holding else None
+    if state is None:
+        latest_state = (
+            db.query(PositionExecutionState)
+            .filter(PositionExecutionState.code.in_([code, code.lstrip("0")]))
+            .order_by(PositionExecutionState.updated_at.desc(), PositionExecutionState.id.desc())
+            .first()
+        )
+        if not latest_state:
+            raise HTTPException(status_code=404, detail="No intraday review data found")
+        timeline = get_stock_timeline(code, db)
+        return IntradayReviewOut(
+            code=latest_state.code,
+            name=latest_state.name,
+            generated_at=datetime.now(),
+            latest_action=latest_state.recommended_action,
+            latest_state=latest_state.state,
+            data_quality=latest_state.data_quality,
+            timeline=timeline,
+            evidence=_json_list(latest_state.evidence_json),
+            counter_evidence=_json_list(latest_state.counter_evidence_json),
+            next_actions=_json_list(latest_state.invalid_conditions_json)[:3],
+        )
+    return IntradayReviewOut(
+        code=state.code,
+        name=state.name,
+        generated_at=datetime.now(),
+        latest_action=state.recommended_action,
+        latest_state=state.state,
+        data_quality=state.data_quality,
+        timeline=state.events,
+        evidence=state.evidence,
+        counter_evidence=state.counter_evidence,
+        next_actions=(state.invalid_conditions + state.recovery_conditions)[:5],
+    )
