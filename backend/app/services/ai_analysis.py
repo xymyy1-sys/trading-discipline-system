@@ -40,14 +40,10 @@ def _context(db: Session, scope: str, target: str) -> dict:
 
 
 def _output_text(payload: dict) -> str:
-    if payload.get("output_text"):
-        return str(payload["output_text"]).strip()
-    parts: list[str] = []
-    for item in payload.get("output") or []:
-        for content in item.get("content") or []:
-            if content.get("type") == "output_text" and content.get("text"):
-                parts.append(str(content["text"]))
-    return "\n".join(parts).strip()
+    choices = payload.get("choices") or []
+    if choices:
+        return str((choices[0].get("message") or {}).get("content") or "").strip()
+    return ""
 
 
 def latest_analysis(db: Session, scope: str, target: str) -> AiAnalysisCache | None:
@@ -62,16 +58,18 @@ def generate_analysis(db: Session, scope: str, target: str, force: bool = False)
     cached = latest_analysis(db, scope, target)
     if cached and cached.input_hash == input_hash and not force and cached.status == "completed":
         return cached
-    if not settings.openai_api_key:
-        raise RuntimeError("尚未配置 OPENAI_API_KEY")
+    if not settings.ai_api_key:
+        raise RuntimeError("尚未配置 AI_API_KEY")
     response = httpx.post(
-        f"{settings.openai_base_url.rstrip('/')}/responses",
-        headers={"Authorization": f"Bearer {settings.openai_api_key}", "Content-Type": "application/json"},
+        f"{settings.ai_base_url.rstrip('/')}/chat/completions",
+        headers={"Authorization": f"Bearer {settings.ai_api_key}", "Content-Type": "application/json"},
         json={
-            "model": settings.openai_model,
-            "instructions": SYSTEM_INSTRUCTIONS,
-            "input": f"请审查以下交易证据并形成可执行但审慎的分析：\n{serialized}",
-            "reasoning": {"effort": "high"},
+            "model": settings.ai_model,
+            "messages": [
+                {"role": "system", "content": SYSTEM_INSTRUCTIONS},
+                {"role": "user", "content": f"请审查以下交易证据并形成可执行但审慎的分析：\n{serialized}"},
+            ],
+            "stream": False,
         },
         timeout=150,
     )
@@ -80,7 +78,7 @@ def generate_analysis(db: Session, scope: str, target: str, force: bool = False)
     if not content:
         raise RuntimeError("OpenAI 返回为空")
     row = cached or AiAnalysisCache(scope=scope, target=target)
-    row.model = settings.openai_model
+    row.model = settings.ai_model
     row.input_hash = input_hash
     row.content = content
     row.status = "completed"

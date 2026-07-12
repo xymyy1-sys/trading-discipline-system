@@ -13,9 +13,10 @@ services:
       AUTH_COOKIE_SECURE: ${AUTH_COOKIE_SECURE:-false}
       CORS_ORIGINS: ${CORS_ORIGINS:-["http://localhost:5173","http://127.0.0.1:5173"]}
       AUDIT_ENABLED: ${AUDIT_ENABLED:-true}
-      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
-      OPENAI_MODEL: ${OPENAI_MODEL:-gpt-5.6-sol}
-      OPENAI_BASE_URL: ${OPENAI_BASE_URL:-https://api.openai.com/v1}
+      AI_API_KEY: ${AI_API_KEY:-}
+      AI_MODEL: ${AI_MODEL:-deepseek-reasoner}
+      AI_BASE_URL: ${AI_BASE_URL:-https://api.deepseek.com}
+      AI_PROVIDER: ${AI_PROVIDER:-deepseek}
       DINGTALK_ENABLED: ${DINGTALK_ENABLED:-false}
       DINGTALK_WEBHOOK: ${DINGTALK_WEBHOOK:-}
       DINGTALK_SECRET: ${DINGTALK_SECRET:-}

@@ -25,7 +25,7 @@ class AiAnalysisOut(BaseModel):
 @router.get("/ai/status")
 def ai_status() -> dict[str, object]:
     settings = get_settings()
-    return {"configured": bool(settings.openai_api_key), "model": settings.openai_model}
+    return {"configured": bool(settings.ai_api_key), "model": settings.ai_model, "provider": settings.ai_provider}
 
 
 @router.get("/ai/analysis/{scope}/{target}", response_model=AiAnalysisOut | None)

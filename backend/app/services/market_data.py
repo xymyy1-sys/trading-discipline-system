@@ -497,31 +497,38 @@ class MarketDataProvider:
             "invt": "2",
             "fid": "f3",
             "fs": f"b:{board_code}",
-            "fields": "f12,f14,f2,f3,f5,f6,f20,f21,f62",
+            "fields": "f12,f14,f2,f3,f5,f6,f8,f20,f21,f62",
         }
-        resp = requests.get(
-            "https://push2.eastmoney.com/api/qt/clist/get",
-            params=params,
-            headers={
-                "User-Agent": "Mozilla/5.0",
-                "Referer": "https://quote.eastmoney.com/center/boardlist.html",
-                "Accept": "application/json,text/plain,*/*",
-            },
-            timeout=4,
-        )
-        resp.raise_for_status()
-        rows = resp.json().get("data", {}).get("diff", [])
+        headers = {
+            "User-Agent": "Mozilla/5.0",
+            "Referer": "https://quote.eastmoney.com/center/boardlist.html",
+            "Accept": "application/json,text/plain,*/*",
+        }
+        rows = []
+        last_exc: Exception | None = None
+        for host in ("https://push2delay.eastmoney.com", "https://push2.eastmoney.com"):
+            try:
+                resp = requests.get(f"{host}/api/qt/clist/get", params=params, headers=headers, timeout=8)
+                resp.raise_for_status()
+                rows = (resp.json().get("data") or {}).get("diff") or []
+                if rows:
+                    break
+            except Exception as exc:
+                last_exc = exc
+        if not rows and last_exc:
+            raise last_exc
         if not rows:
             raise ValueError("empty sector constituents")
         return [
             {
                 "code": str(row.get("f12") or ""),
                 "name": str(row.get("f14") or ""),
-                "price": float(row.get("f2") or 0),
-                "change_pct": float(row.get("f3") or 0),
-                "amount": round(float(row.get("f6") or 0) / 1e8, 2),
-                "float_cap": round(float(row.get("f21") or 0) / 1e8, 2),
-                "main_inflow": round(float(row.get("f62") or 0) / 1e8, 2),
+                "price": _safe_float(row.get("f2")),
+                "change_pct": _safe_float(row.get("f3")),
+                "amount": round(_safe_float(row.get("f6")) / 1e8, 2),
+                "float_cap": round(_safe_float(row.get("f21")) / 1e8, 2),
+                "main_inflow": round(_safe_float(row.get("f62")) / 1e8, 2),
+                "turnover": round(_safe_float(row.get("f8")), 2),
             }
             for row in rows
         ]
@@ -1741,37 +1748,37 @@ class MarketDataProvider:
                 "name": str(row.get("f14", "未知板块")),
                 "board_code": str(row.get("f12") or ""),
                 "provider": "eastmoney",
-                "change_pct": float(row.get("f3") or 0),
-                "net_inflow": round(float(row.get(net_key) or 0) / 1e8, 2),
-                "main_inflow": round(float(row.get(main_key) or 0) / 1e8, 2),
+                "change_pct": _safe_float(row.get("f3")),
+                "net_inflow": round(_safe_float(row.get(net_key)) / 1e8, 2),
+                "main_inflow": round(_safe_float(row.get(main_key)) / 1e8, 2),
                 "flow_breakdown": [
                     {
                         "name": "超大单",
-                        "net": round(float(row.get("f66") or 0) / 1e8, 2),
-                        "ratio": round(float(row.get("f69") or 0), 2),
+                        "net": round(_safe_float(row.get("f66")) / 1e8, 2),
+                        "ratio": round(_safe_float(row.get("f69")), 2),
                     },
                     {
                         "name": "大单",
-                        "net": round(float(row.get("f72") or 0) / 1e8, 2),
-                        "ratio": round(float(row.get("f75") or 0), 2),
+                        "net": round(_safe_float(row.get("f72")) / 1e8, 2),
+                        "ratio": round(_safe_float(row.get("f75")), 2),
                     },
                     {
                         "name": "中单",
-                        "net": round(float(row.get("f78") or 0) / 1e8, 2),
-                        "ratio": round(float(row.get("f81") or 0), 2),
+                        "net": round(_safe_float(row.get("f78")) / 1e8, 2),
+                        "ratio": round(_safe_float(row.get("f81")), 2),
                     },
                     {
                         "name": "小单",
-                        "net": round(float(row.get("f84") or 0) / 1e8, 2),
-                        "ratio": round(float(row.get("f87") or 0), 2),
+                        "net": round(_safe_float(row.get("f84")) / 1e8, 2),
+                        "ratio": round(_safe_float(row.get("f87")), 2),
                     },
                 ],
                 "strength": max(0, min(100, int(
-                    50 + float(row.get(change_key) or 0) * 8 + float(row.get(net_key) or 0) / 2e7
+                    50 + _safe_float(row.get(change_key)) * 8 + _safe_float(row.get(net_key)) / 2e7
                 ))),
                 "leaders": [str(row.get(leader_key) or "待识别")],
-                "change_pct_5": float(row.get("f109") or row.get("f160") or 0),
-                "net_5d": round(float(row.get("f164") or row.get("f174") or 0) / 1e8, 2),
+                "change_pct_5": _safe_float(row.get("f109") or row.get("f160")),
+                "net_5d": round(_safe_float(row.get("f164") or row.get("f174")) / 1e8, 2),
                 "limit_up_count": _safe_int(row.get("f100")),
                 "stock_count": _safe_int(row.get("f104")),
                 "avg_change": _safe_float(row.get("f102")),

@@ -33,7 +33,7 @@ export default function AiInsightButton({ scope, target, label = 'AI深度研判
     </button>
     {open && <div className="ai-insight-overlay" onClick={() => setOpen(false)}>
       <section className="ai-insight-panel" onClick={event => event.stopPropagation()}>
-        <header><div><strong>AI证据研判</strong><span>{analysis ? `${analysis.model} · ${new Date(analysis.updated_at).toLocaleString('zh-CN')}` : 'gpt-5.6-sol'}</span></div><button type="button" onClick={() => setOpen(false)}><X size={18}/></button></header>
+        <header><div><strong>AI证据研判</strong><span>{analysis ? `${analysis.model} · ${new Date(analysis.updated_at).toLocaleString('zh-CN')}` : 'DeepSeek Reasoner'}</span></div><button type="button" onClick={() => setOpen(false)}><X size={18}/></button></header>
         {loading && <p className="plain-text">正在审查实时证据，通常需要数十秒…</p>}
         {error && <p className="error-msg">{error}</p>}
         {analysis && <div className="ai-insight-content">{analysis.content}</div>}
