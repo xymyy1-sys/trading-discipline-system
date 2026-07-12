@@ -353,7 +353,7 @@ def _daily_history_metrics(code: str) -> dict[str, float]:
         url = "https://web.ifzq.gtimg.cn/appstock/app/kline/kline"
         resp = requests.get(
             url,
-            params={"param": f"{symbol},day,,,8"},
+            params={"param": f"{symbol},day,,,30"},
             headers={"User-Agent": "Mozilla/5.0", "Referer": "https://gu.qq.com/"},
             timeout=4,
         )
@@ -365,9 +365,21 @@ def _daily_history_metrics(code: str) -> dict[str, float]:
         volumes = [_safe_float(row[5]) for row in rows if len(row) > 5]
         closes = [_safe_float(row[2]) for row in rows if len(row) > 2]
         prev_volumes = volumes[:-1] if len(volumes) >= 2 else volumes
+        highs = [_safe_float(row[3]) for row in rows if len(row) > 3]
+        def cumulative_return(days: int) -> float:
+            if len(closes) <= days or closes[-days - 1] <= 0:
+                return 0.0
+            return (closes[-1] / closes[-days - 1] - 1) * 100
         return {
             "five_day_avg_volume": sum(prev_volumes[-5:]) / len(prev_volumes[-5:]) if prev_volumes else 0,
             "ma5": sum(closes[-5:]) / len(closes[-5:]) if closes else 0,
+            "ma10": sum(closes[-10:]) / len(closes[-10:]) if closes else 0,
+            "ma20": sum(closes[-20:]) / len(closes[-20:]) if closes else 0,
+            "return_1d": cumulative_return(1),
+            "return_2d": cumulative_return(2),
+            "return_3d": cumulative_return(3),
+            "return_5d": cumulative_return(5),
+            "recent_high": max(highs[-20:], default=0),
         }
     except Exception:
         return {}

@@ -331,6 +331,8 @@ def update_t_plan(db: Session, row: TTradePlan, payload: Any) -> TTradePlanOut:
 
 
 def decision_card(db: Session, code: str) -> StockDecisionCardOut:
+    from app.api.helpers.quotes import _daily_history_metrics
+    from app.services.consensus_risk import build_consensus_risk
     holding = _find_holding_by_code(db, code)
     quote = quote_for_code(code)
     name = holding.name if holding else str(quote.get("name") or code)
@@ -339,6 +341,7 @@ def decision_card(db: Session, code: str) -> StockDecisionCardOut:
     stage = current_expectation_stage()
     expectation = build_expectation_snapshot(db, code, name=name, stage=stage, quote=quote, base_hint=base_hint)
     volume_price = build_volume_price_snapshot(db, code, name=name, stage=stage, quote=quote)
+    consensus_risk = build_consensus_risk(quote, expectation, volume_price, _daily_history_metrics(code))
     execution = build_position_execution_state(db, holding, quote=quote, expectation=expectation, volume_price=volume_price) if holding else None
     t_eligibility = build_t_eligibility(db, holding) if holding else None
     events: list[IntradayEvidenceEventOut] = []
@@ -387,4 +390,5 @@ def decision_card(db: Session, code: str) -> StockDecisionCardOut:
         evidence=(execution.evidence if execution else expectation.evidence),
         counter_evidence=(execution.counter_evidence if execution else expectation.counter_evidence),
         data_quality="realtime" if quote else "manual",
+        consensus_risk=consensus_risk,
     )

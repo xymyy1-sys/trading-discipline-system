@@ -438,6 +438,16 @@ class StockDecisionCardOut(BaseModel):
     evidence: list[str] = Field(default_factory=list)
     counter_evidence: list[str] = Field(default_factory=list)
     data_quality: str = "manual"
+    consensus_risk: "ConsensusRiskOut | None" = None
+
+
+class ConsensusRiskOut(BaseModel):
+    level: str = "UNKNOWN"
+    score: int = 0
+    data_complete: bool = False
+    factors: list[str] = Field(default_factory=list)
+    counter_evidence: list[str] = Field(default_factory=list)
+    actions: list[str] = Field(default_factory=list)
 
 
 class CandidateOut(BaseModel):

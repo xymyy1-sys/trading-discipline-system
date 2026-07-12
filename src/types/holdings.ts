@@ -366,6 +366,16 @@ export interface StockDecisionCard {
   evidence: string[];
   counter_evidence: string[];
   data_quality: string;
+  consensus_risk: ConsensusRisk | null;
+}
+
+export interface ConsensusRisk {
+  level: 'LOW' | 'MEDIUM' | 'HIGH' | 'UNKNOWN';
+  score: number;
+  data_complete: boolean;
+  factors: string[];
+  counter_evidence: string[];
+  actions: string[];
 }
 
 export interface IntradayReview {

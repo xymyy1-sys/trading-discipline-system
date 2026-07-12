@@ -164,6 +164,16 @@ export default function DecisionCard() {
               </div>
             )}
 
+            {card.consensus_risk && (
+              <div className="decision-section">
+                <b>获利盘与一致性风险 · {card.consensus_risk.level} · {card.consensus_risk.score}</b>
+                <ul>
+                  {(card.consensus_risk.factors.length ? card.consensus_risk.factors : card.consensus_risk.counter_evidence).slice(0, 5).map(item => <li key={item}>{item}</li>)}
+                </ul>
+                <p>{card.consensus_risk.actions.join('；')}</p>
+              </div>
+            )}
+
             <div className="decision-section">
               <b>预期建议</b>
               <p>{card.expectation.suggestion}</p>
