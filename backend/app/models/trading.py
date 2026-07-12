@@ -384,6 +384,8 @@ class VolumePriceSnapshot(Base):
     high_drawdown: Mapped[float] = mapped_column(Float, default=0)
     active_buy_amount: Mapped[float] = mapped_column(Float, default=0)
     active_sell_amount: Mapped[float] = mapped_column(Float, default=0)
+    active_flow_source: Mapped[str] = mapped_column(String(48), default="unavailable")
+    active_flow_estimated: Mapped[bool] = mapped_column(Boolean, default=False)
     attack_efficiency: Mapped[float] = mapped_column(Float, default=0)
     volume_acceleration: Mapped[float] = mapped_column(Float, default=0)
     attack_amount: Mapped[float] = mapped_column(Float, default=0)

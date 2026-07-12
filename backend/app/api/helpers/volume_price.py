@@ -228,6 +228,8 @@ def _snapshot_out(row: VolumePriceSnapshot) -> VolumePriceSnapshotOut:
         high_drawdown=row.high_drawdown,
         active_buy_amount=row.active_buy_amount,
         active_sell_amount=row.active_sell_amount,
+        active_flow_source=getattr(row, "active_flow_source", "unavailable"),
+        active_flow_estimated=bool(getattr(row, "active_flow_estimated", False)),
         attack_efficiency=row.attack_efficiency,
         volume_acceleration=row.volume_acceleration,
         attack_amount=getattr(row, "attack_amount", 0),
@@ -289,6 +291,14 @@ def build_volume_price_snapshot(
         pullback_sell_ratio,
         flow_evidence,
     ) = _minute_flow_metrics(quote)
+    minute_rows = _minute_rows(quote)
+    has_explicit_active_flow = any(
+        _safe_float(item.get("active_buy_amount") or item.get("buy_amount")) > 0
+        or _safe_float(item.get("active_sell_amount") or item.get("sell_amount")) > 0
+        for item in minute_rows
+    )
+    active_flow_source = "provider_tick_direction" if has_explicit_active_flow else ("minute_price_direction_estimate" if minute_rows else "unavailable")
+    active_flow_estimated = bool(minute_rows) and not has_explicit_active_flow
     note = str(quote.get("note") or "")
     data_quality = "realtime" if quote and _is_realtime_note(note) else ("degraded" if quote else "manual")
     if quote and not vwap_reliable:
@@ -336,6 +346,8 @@ def build_volume_price_snapshot(
         high_drawdown=round(high_drawdown, 2),
         active_buy_amount=round(active_buy_amount, 2),
         active_sell_amount=round(active_sell_amount, 2),
+        active_flow_source=active_flow_source,
+        active_flow_estimated=active_flow_estimated,
         attack_efficiency=round(attack_efficiency, 2),
         volume_acceleration=round(volume_acceleration, 2),
         attack_amount=round(attack_amount, 2),

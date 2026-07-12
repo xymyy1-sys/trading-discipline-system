@@ -155,6 +155,7 @@ export default function DecisionCard() {
               <div className="decision-section volume-price-section">
                 <b>量价快照 · {card.volume_price.stage}</b>
                 <p>{card.volume_price.pattern} · {card.volume_price.data_quality} · {card.volume_price.data_source || '行情源待确认'}</p>
+                {card.volume_price.active_flow_estimated && <p className="refresh-note">主动买卖额按分钟价格方向推导，并非逐笔盘口原始主动成交。</p>}
                 <div className="volume-price-grid">
                   <div><b>VWAP</b><span>{card.volume_price.vwap ? card.volume_price.vwap.toFixed(2) : '--'}</span></div>
                   <div><b>偏离VWAP</b><span className={card.volume_price.price_vs_vwap >= 0 ? 'num-up' : 'num-down'}>{card.volume_price.price_vs_vwap >= 0 ? '+' : ''}{card.volume_price.price_vs_vwap.toFixed(2)}%</span></div>

@@ -33,6 +33,7 @@ __pycache__/
 
 # Codex backups
 .codex-backups/
+tmp/
 
 # Pre-cache snapshots
 *.pre-mainline-cache-*

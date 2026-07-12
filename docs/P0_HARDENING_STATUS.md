@@ -34,6 +34,11 @@ Historical replay is implemented against persisted evidence. A complete 600584 a
 - Persisted data-capture quality snapshots with source, latency, stale/degraded/estimated/complete flags, error details, normalized values, and raw payload hashes.
 - Added provider-health history aggregation at `/api/data-quality/health`.
 - Added risk-budget position sizing with entry/structural-stop distance and minimum caps across script, market, single-stock, sector, and liquidity constraints; Buy Check displays the binding limit and board-lot quantity.
+- Added hash-chained, tamper-evident write audit logs with chain verification and a protected audit endpoint.
+- Added a Sina/AkShare one-minute fallback when Eastmoney minute data fails. Fallback amount and VWAP evidence are explicitly marked estimated/degraded.
+- Added a profit-pressure and consensus-risk model using recent returns, opening expectation, VWAP, high drawdown, and attack/pullback turnover evidence.
+- Added account-level daily risk controls with opening-asset baselines, new-position blocking, portfolio reduction, and forced-defense levels.
+- Added a decision-card chart for price, VWAP, minute amount, and event markers without synthetic gap filling.
 
 - Background intraday collector with status and manual run APIs.
 - Intraday collection run records.
@@ -90,9 +95,9 @@ Historical replay is implemented against persisted evidence. A complete 600584 a
 ## Still Open
 
 - Put the public deployment behind HTTPS, set `AUTH_COOKIE_SECURE=true`, close firewall port 8000, and rotate any previously exposed credentials.
-- Add optional multi-user roles and an immutable audit log if the system will be shared with other operators.
+- Add optional multi-user roles if the system will be shared with other operators. The current deployment remains deliberately single-user.
 
-- Continue minute-bar production monitoring: retries/backoff metrics, provider health history, and alternate provider support beyond Eastmoney.
+- Continue production monitoring of provider uptime and retry/backoff behavior after deployment.
 
 ## Latest Validation Commands
 

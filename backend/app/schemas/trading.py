@@ -337,6 +337,8 @@ class VolumePriceSnapshotOut(BaseModel):
     high_drawdown: float = 0
     active_buy_amount: float = 0
     active_sell_amount: float = 0
+    active_flow_source: str = "unavailable"
+    active_flow_estimated: bool = False
     attack_efficiency: float = 0
     volume_acceleration: float = 0
     attack_amount: float = 0

@@ -306,6 +306,8 @@ export interface VolumePriceSnapshot {
   high_drawdown: number;
   active_buy_amount: number;
   active_sell_amount: number;
+  active_flow_source: string;
+  active_flow_estimated: boolean;
   attack_efficiency: number;
   volume_acceleration: number;
   attack_amount: number;
