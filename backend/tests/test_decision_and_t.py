@@ -253,6 +253,9 @@ def test_volume_price_snapshot_detects_vwap_breakdown(db_session):
                 {"price": 10.75, "volume": 1000, "amount": 10750},
             ],
             "turnover": 8.2,
+            "turnover_source": "eastmoney_f8_free_float",
+            "turnover_reliable": True,
+            "float_cap": 128.6,
             "note": "东方财富实时行情",
         },
     )
@@ -263,6 +266,10 @@ def test_volume_price_snapshot_detects_vwap_breakdown(db_session):
     assert snapshot.data_quality == "realtime"
     assert snapshot.vwap_source == "minute"
     assert snapshot.vwap_reliable is True
+    assert snapshot.turnover_reliable is True
+    assert snapshot.turnover_source == "eastmoney_f8_free_float"
+    assert snapshot.float_cap == 128.6
+    assert any("流通盘口径" in item for item in snapshot.evidence)
     assert snapshot.evidence
 
 

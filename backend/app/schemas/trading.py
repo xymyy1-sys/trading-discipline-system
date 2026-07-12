@@ -328,6 +328,9 @@ class VolumePriceSnapshotOut(BaseModel):
     amount: float = 0
     estimated_full_day_amount: float = 0
     turnover: float = 0
+    turnover_source: str = "unavailable"
+    turnover_reliable: bool = False
+    float_cap: float = 0
     volume_ratio: float = 0
     vwap: float = 0
     vwap_source: str = "estimated"

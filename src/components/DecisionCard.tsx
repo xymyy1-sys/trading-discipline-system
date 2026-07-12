@@ -162,7 +162,8 @@ export default function DecisionCard() {
                   <div><b>高点回撤</b><span>{card.volume_price.high_drawdown.toFixed(2)}%</span></div>
                   <div><b>成交额</b><span>{card.volume_price.amount.toFixed(2)}亿</span></div>
                   <div><b>估算全天</b><span>{card.volume_price.estimated_full_day_amount.toFixed(2)}亿</span></div>
-                  <div><b>换手</b><span>{card.volume_price.turnover ? `${card.volume_price.turnover.toFixed(2)}%` : '--'}</span></div>
+                  <div><b>流通盘换手</b><span>{card.volume_price.turnover ? `${card.volume_price.turnover.toFixed(2)}%${card.volume_price.turnover_reliable ? '' : '（待核）'}` : '--'}</span></div>
+                  <div><b>流通市值</b><span>{card.volume_price.float_cap ? `${card.volume_price.float_cap.toFixed(2)}亿` : '--'}</span></div>
                   <div><b>上攻段</b><span>{card.volume_price.attack_amount.toFixed(2)}亿</span></div>
                   <div><b>回落段</b><span>{card.volume_price.pullback_amount.toFixed(2)}亿</span></div>
                   <div><b>回落卖出</b><span>{card.volume_price.pullback_sell_ratio.toFixed(1)}%</span></div>

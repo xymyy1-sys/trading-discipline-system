@@ -297,6 +297,9 @@ export interface VolumePriceSnapshot {
   amount: number;
   estimated_full_day_amount: number;
   turnover: number;
+  turnover_source: string;
+  turnover_reliable: boolean;
+  float_cap: number;
   volume_ratio: number;
   vwap: number;
   vwap_source: string;

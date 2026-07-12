@@ -219,6 +219,9 @@ def _snapshot_out(row: VolumePriceSnapshot) -> VolumePriceSnapshotOut:
         amount=row.amount,
         estimated_full_day_amount=row.estimated_full_day_amount,
         turnover=row.turnover,
+        turnover_source=getattr(row, "turnover_source", "unavailable"),
+        turnover_reliable=bool(getattr(row, "turnover_reliable", False)),
+        float_cap=getattr(row, "float_cap", 0),
         volume_ratio=row.volume_ratio,
         vwap=row.vwap,
         vwap_source=getattr(row, "vwap_source", "estimated"),
@@ -277,6 +280,9 @@ def build_volume_price_snapshot(
     volume = _safe_float(quote.get("volume"))
     amount = _safe_float(quote.get("amount"))
     turnover = _safe_float(quote.get("turnover"))
+    turnover_source = str(quote.get("turnover_source") or "unavailable")
+    turnover_reliable = bool(quote.get("turnover_reliable")) and turnover > 0
+    float_cap = _safe_float(quote.get("float_cap"))
     minute_vwap, minute_bar_count = _minute_vwap(quote)
     minute_amount_estimated = bool(quote.get("minute_amount_estimated"))
     if minute_vwap > 0:
@@ -335,7 +341,7 @@ def build_volume_price_snapshot(
     if amount > 0:
         evidence.append(f"当前成交额 {amount:.2f} 亿，按交易进度估算全天 {estimated_full_day_amount:.2f} 亿。")
     if turnover > 0:
-        evidence.append(f"换手率 {turnover:.2f}%。")
+        evidence.append(f"换手率 {turnover:.2f}%（{'流通盘口径' if turnover_reliable else '来源口径待确认'}）。")
     if not vwap_reliable:
         counter.append("缺少真实1分钟成交数据，VWAP为估算值，不能作为确定性减仓、清仓或做T触发。")
     elif data_quality != "realtime":
@@ -357,6 +363,9 @@ def build_volume_price_snapshot(
         amount=round(amount, 2),
         estimated_full_day_amount=estimated_full_day_amount,
         turnover=round(turnover, 2),
+        turnover_source=turnover_source,
+        turnover_reliable=turnover_reliable,
+        float_cap=round(float_cap, 2),
         volume_ratio=round(_safe_float(quote.get("volume_ratio")), 2),
         vwap=round(vwap, 4),
         vwap_source=vwap_source,

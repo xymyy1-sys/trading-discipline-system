@@ -184,7 +184,7 @@ def _latest_a_share_quotes_eastmoney(codes: list[str]) -> dict[str, dict[str, An
     params = urlencode({
         "fltt": "2",
         "invt": "2",
-        "fields": "f12,f14,f2,f3,f6,f8,f15,f16,f17,f18",
+        "fields": "f12,f14,f2,f3,f6,f8,f15,f16,f17,f18,f21",
         "secids": secids,
     })
     url = f"https://push2.eastmoney.com/api/qt/ulist.np/get?{params}"
@@ -203,6 +203,9 @@ def _latest_a_share_quotes_eastmoney(codes: list[str]) -> dict[str, dict[str, An
             "change_pct": _safe_float(row.get("f3")),
             "amount": round(_safe_float(row.get("f6")) / 1e8, 2),
             "turnover": _safe_turnover(row.get("f8")),
+            "turnover_source": "eastmoney_f8_free_float",
+            "turnover_reliable": _safe_turnover(row.get("f8")) is not None,
+            "float_cap": round(_safe_float(row.get("f21")) / 1e8, 2),
             "open": _safe_float(row.get("f17")),
             "prev_close": _safe_float(row.get("f18")),
             "high": _safe_float(row.get("f15")),
