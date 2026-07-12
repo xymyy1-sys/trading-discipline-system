@@ -91,7 +91,7 @@ export default function DecisionCard({ mode = 'watchlist' }: { mode?: DecisionCa
   }
 
   return (
-    <section className="decision-page">
+    <section className={`decision-page ${mode === 'holding' ? 'holding-decision-page' : ''}`}>
       <header className="pos-header">
         <div>
           <h2>个股决策卡</h2>

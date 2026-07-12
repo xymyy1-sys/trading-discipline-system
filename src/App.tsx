@@ -8,6 +8,8 @@ import {
   WalletCards,
   Menu,
   X,
+  Eye,
+  EyeOff,
 } from 'lucide-react'
 import { API_BASE } from './api'
 import './App.css'
@@ -69,6 +71,7 @@ export default function App() {
   const [backendUp, setBackendUp] = useState(false)
   const [apiStatus, setApiStatus] = useState('检测中')
   const [sidebarOpen, setSidebarOpen] = useState(false)
+  const [privacyMode, setPrivacyMode] = useState(() => localStorage.getItem('privacy-mask') === 'on')
 
   const activePath = location.pathname === '/' ? '/今日决策' : decodeURIComponent(location.pathname)
   const activeWorkspacePath = oldPathToWorkspace[activePath] ?? activePath
@@ -116,7 +119,7 @@ export default function App() {
   }, [activePath, navigate])
 
   return (
-    <main className="terminal-shell">
+    <main className={`terminal-shell ${privacyMode ? 'privacy-mode' : ''}`}>
       <aside className={`sidebar ${sidebarOpen ? 'open' : ''}`}>
         <div className="brand" style={{ display: 'flex', width: '100%', alignItems: 'center' }}>
             <BrandIcon />
@@ -164,6 +167,16 @@ export default function App() {
             </div>
           </div>
           <div className="status-cluster">
+            {normalizedWorkspacePath === '/持仓执行' && <button
+              className={`privacy-toggle ${privacyMode ? 'active' : ''}`}
+              type="button"
+              onClick={() => setPrivacyMode(current => {
+                const next = !current
+                localStorage.setItem('privacy-mask', next ? 'on' : 'off')
+                return next
+              })}
+              title={privacyMode ? '恢复显示敏感数据' : '隐藏全部资金和持仓金额'}
+            >{privacyMode ? <Eye size={16}/> : <EyeOff size={16}/>} {privacyMode ? '恢复资金数据' : '隐藏资金数据'}</button>}
             <Metric label="市场档位" value="--" tone="neutral" />
             <Metric label="总仓上限" value="--" tone="neutral" />
             <Metric

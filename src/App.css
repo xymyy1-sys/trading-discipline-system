@@ -5297,6 +5297,58 @@ h3 {
 .ai-insight-panel footer { border-top: 1px solid var(--line); border-bottom: 0; }
 .ai-insight-panel footer button { display: inline-flex; align-items: center; gap: 6px; padding: 8px 11px; border: 1px solid var(--line); border-radius: 7px; background: var(--ink); color: var(--panel); }
 .ai-insight-content { overflow: auto; padding: 20px; white-space: pre-wrap; line-height: 1.75; color: var(--ink); }
+.privacy-toggle { display: inline-flex; align-items: center; gap: 7px; padding: 9px 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); color: var(--ink); font-weight: 700; cursor: pointer; }
+.privacy-toggle.active { border-color: #28749d; background: #e7f4fa; color: #174f72; }
+.privacy-mode .pos-summary strong,
+.privacy-mode .sensitive-card strong,
+.privacy-mode .sensitive-card small,
+.privacy-mode .account-risk-summary span,
+.privacy-mode .pos-table td.num,
+.privacy-mode .execution-cell-lines span,
+.privacy-mode .decision-price strong,
+.privacy-mode .decision-price span,
+.privacy-mode .holding-decision-page .decision-kpi-grid span,
+.privacy-mode .holding-decision-page .volume-price-grid span,
+.privacy-mode .holding-decision-page .execution-line-grid span,
+.privacy-mode .holding-decision-page .decision-t-box p,
+.privacy-mode .holding-decision-page .decision-timeline p,
+.privacy-mode .holding-cockpit .cockpit-detail-grid p,
+.privacy-mode .holding-cockpit .cockpit-detail-grid small,
+.privacy-mode .active-recommendations small,
+.privacy-mode .evidence-trajectory .trajectory-summary-latest span,
+.privacy-mode .evidence-trajectory .trajectory-summary-latest small {
+  font-size: 0 !important;
+  color: transparent !important;
+  text-shadow: none !important;
+}
+.privacy-mode .pos-summary strong::after,
+.privacy-mode .sensitive-card strong::after,
+.privacy-mode .sensitive-card small::after,
+.privacy-mode .account-risk-summary span::after,
+.privacy-mode .pos-table td.num::after,
+.privacy-mode .execution-cell-lines span::after,
+.privacy-mode .decision-price strong::after,
+.privacy-mode .decision-price span::after,
+.privacy-mode .holding-decision-page .decision-kpi-grid span::after,
+.privacy-mode .holding-decision-page .volume-price-grid span::after,
+.privacy-mode .holding-decision-page .execution-line-grid span::after,
+.privacy-mode .holding-decision-page .decision-t-box p::after,
+.privacy-mode .holding-decision-page .decision-timeline p::after,
+.privacy-mode .holding-cockpit .cockpit-detail-grid p::after,
+.privacy-mode .holding-cockpit .cockpit-detail-grid small::after,
+.privacy-mode .active-recommendations small::after,
+.privacy-mode .evidence-trajectory .trajectory-summary-latest span::after,
+.privacy-mode .evidence-trajectory .trajectory-summary-latest small::after {
+  content: '******';
+  display: inline-block;
+  color: var(--ink) !important;
+  font-size: 15px !important;
+  letter-spacing: 2px;
+}
+.privacy-mode .asset-editor { position: relative; }
+.privacy-mode .asset-editor input { visibility: hidden; }
+.privacy-mode .asset-editor::before { content: '******'; position: absolute; left: 14px; top: 50%; transform: translateY(-50%); z-index: 2; color: var(--ink); letter-spacing: 2px; }
+.privacy-mode .pos-form input[type='number'] { -webkit-text-security: disc; color: transparent; }
 
 .expectation-journey { margin: 18px 0; padding: 16px; border: 1px solid #b9d7ef; border-radius: 12px; background: linear-gradient(135deg, #f5fbff, #fff); }
 .expectation-journey-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; margin-bottom: 14px; }

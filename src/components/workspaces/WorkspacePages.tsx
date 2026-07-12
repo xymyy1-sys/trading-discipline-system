@@ -219,7 +219,7 @@ export function TodayDecisionSummary() {
         <strong>{riskStates.length + highRiskAlerts.length}</strong>
         <small>持仓执行风险 + 资金跷跷板告警</small>
       </div>
-      <div className="command-card">
+      <div className="command-card sensitive-card">
         <span>持仓市值</span>
         <strong>{(totalMarketValue / 10000).toFixed(2)} 万</strong>
         <small className={totalProfit >= 0 ? 'num-up' : 'num-down'}>
