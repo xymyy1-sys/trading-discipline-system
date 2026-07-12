@@ -1,12 +1,14 @@
 import { useEffect, useState } from 'react'
-import { Activity, AlertTriangle, CheckCircle2, ClipboardCheck, RefreshCcw, SlidersHorizontal } from 'lucide-react'
+import { Activity, AlertTriangle, CheckCircle2, ClipboardCheck, RefreshCcw, RotateCcw, SlidersHorizontal } from 'lucide-react'
 import { API_BASE } from '../api'
-import type { ReviewCalibrationSummary } from '../types'
+import type { CalibrationProposal, CalibrationRun, ReviewCalibrationSummary } from '../types'
 
 export default function ReviewCalibration() {
   const [summary, setSummary] = useState<ReviewCalibrationSummary | null>(null)
   const [loading, setLoading] = useState(false)
   const [status, setStatus] = useState('')
+  const [proposal, setProposal] = useState<CalibrationProposal | null>(null)
+  const [calibrationRun, setCalibrationRun] = useState<CalibrationRun | null>(null)
 
   const load = () => {
     setLoading(true)
@@ -21,6 +23,38 @@ export default function ReviewCalibration() {
       })
       .catch(() => setStatus('校准摘要加载失败'))
       .finally(() => setLoading(false))
+    fetch(`${API_BASE}/api/reviews/calibration-proposal`)
+      .then(r => r.ok ? r.json() : Promise.reject())
+      .then(setProposal)
+      .catch(() => setProposal(null))
+  }
+
+  const applyCalibration = async () => {
+    if (!proposal?.eligible || !window.confirm(`确认应用 ${proposal.changes.length} 项阈值变更？系统会保存变更前快照，可随时回滚。`)) return
+    setLoading(true)
+    try {
+      const response = await fetch(`${API_BASE}/api/reviews/calibration-apply`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ confirmation: 'APPLY_CALIBRATION' }),
+      })
+      if (!response.ok) throw new Error(await response.text())
+      setCalibrationRun(await response.json())
+      setStatus('参数校准已应用并保存回滚快照')
+      load()
+    } catch {
+      setStatus('参数校准应用失败')
+      setLoading(false)
+    }
+  }
+
+  const rollbackCalibration = async () => {
+    if (!calibrationRun || !window.confirm('确认回滚本次参数校准？')) return
+    const response = await fetch(`${API_BASE}/api/reviews/calibration-runs/${calibrationRun.id}/rollback`, { method: 'POST' })
+    if (response.ok) {
+      setCalibrationRun(await response.json())
+      setStatus('参数校准已回滚')
+      load()
+    } else setStatus('参数校准回滚失败')
   }
 
   useEffect(() => {
@@ -91,6 +125,21 @@ export default function ReviewCalibration() {
                 <small>{item.reason} · 样本 {item.sample_count}</small>
               </article>
             ))}
+            {proposal && (
+              <article className={`calibration-suggestion level-${proposal.eligible ? '中' : '观察'}`}>
+                <div><b>预期阈值校准方案</b><span>{proposal.sample_count}/{proposal.minimum_samples} 样本</span></div>
+                <p>{proposal.rationale}</p>
+                {!!proposal.changes.length && <small>拟变更 {proposal.changes.length} 项；应用前保存完整快照，不会静默改写。</small>}
+                <div className="header-actions">
+                  <button className="refresh-btn inline" type="button" disabled={!proposal.eligible || loading} onClick={applyCalibration}>
+                    <SlidersHorizontal size={13} />审阅并应用
+                  </button>
+                  {calibrationRun?.status === 'applied' && (
+                    <button className="refresh-btn inline" type="button" onClick={rollbackCalibration}><RotateCcw size={13} />回滚本次</button>
+                  )}
+                </div>
+              </article>
+            )}
           </div>
         </section>
       </div>

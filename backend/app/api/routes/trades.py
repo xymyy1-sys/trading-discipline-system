@@ -11,6 +11,9 @@ from app.schemas.trading import (
     GrowthProfileOut,
     ReviewCalibrationSummaryOut,
     EffectivenessReportOut,
+    CalibrationProposalOut,
+    CalibrationApplyIn,
+    CalibrationRunOut,
 )
 from app.api.helpers.quotes import _normalize_code
 from app.api.helpers.holdings_calc import _account_total_asset, _rebuild_holdings_from_trades
@@ -20,6 +23,9 @@ from app.api.helpers.trade_review import (
     _create_pending_trade_review,
     _complete_trade_review_task,
     _review_calibration_summary,
+    _expectation_calibration_proposal,
+    _apply_expectation_calibration,
+    _rollback_calibration_run,
     _json_list
 )
 
@@ -191,3 +197,26 @@ def volume_price_effectiveness(db: Session = Depends(get_db)) -> EffectivenessRe
 @router.get("/reviews/execution-effectiveness", response_model=EffectivenessReportOut)
 def execution_effectiveness(db: Session = Depends(get_db)) -> EffectivenessReportOut:
     return _effectiveness_report(db, "execution_adoption", 20)
+
+
+@router.get("/reviews/calibration-proposal", response_model=CalibrationProposalOut)
+def calibration_proposal(db: Session = Depends(get_db)) -> CalibrationProposalOut:
+    return _expectation_calibration_proposal(db)
+
+
+@router.post("/reviews/calibration-apply", response_model=CalibrationRunOut)
+def calibration_apply(payload: CalibrationApplyIn, db: Session = Depends(get_db)) -> CalibrationRunOut:
+    try:
+        return _apply_expectation_calibration(db, payload.confirmation)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@router.post("/reviews/calibration-runs/{run_id}/rollback", response_model=CalibrationRunOut)
+def calibration_rollback(run_id: int, db: Session = Depends(get_db)) -> CalibrationRunOut:
+    try:
+        return _rollback_calibration_run(db, run_id)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc

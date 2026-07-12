@@ -17,6 +17,7 @@ This matrix is derived from all three supplied requirement documents. A feature 
 | Candidate pools | evidence-based A/B/C/D classification |
 | Trading scripts | 12 seeded editable and versioned templates |
 | Replay and calibration | persisted replay, effectiveness APIs, sample gates and 600584 acceptance checkpoints |
+| Governed parameter calibration | 20-sample and 45%-deviation gates, field-level proposal, explicit confirmation, persisted before/after snapshots and one-click rollback |
 | Risk position sizing | structure-stop risk budget and script/market/stock/sector/liquidity caps |
 | Consensus/profit pressure | recent-return, opening-expectation, VWAP and turnover-based model in decision card |
 | Daily volume-price breadth | persisted MA5/10/20, 5/10-day returns, 20-day-high distance, historical volume ratio and transparent 30-day volume-weighted chip estimates |
@@ -32,7 +33,6 @@ This matrix is derived from all three supplied requirement documents. A feature 
 | --- | --- |
 | Exchange microstructure fields | Eastmoney tick direction provides true active buy/sell and configurable large-order net evidence when available; Eastmoney F8 turnover and F21 float capitalization are now persisted with explicit free-float provenance and reliability flags |
 | Sector evidence chart | real multi-point curves now expose rank movement, peak, pullback and new-high/reversal/turn-negative events in the chart and ranking; no event is inferred from a single snapshot, while sector VWAP remains unavailable until a trustworthy sector-index minute source is integrated |
-| Parameter auto-calibration | statistics and sample gates exist; automatic parameter writes remain intentionally gated until at least 20 valid samples |
 | Production availability | code is deployable; HTTPS certificate, firewall verification, database backup and real-server smoke tests must run on the target server |
 
 ## Deliberate non-goals

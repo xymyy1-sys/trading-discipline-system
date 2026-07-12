@@ -433,6 +433,20 @@ class ExpectationRule(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
 
 
+class CalibrationRun(Base):
+    __tablename__ = "calibration_runs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    metric_key: Mapped[str] = mapped_column(String(48), index=True)
+    sample_count: Mapped[int] = mapped_column(Integer, default=0)
+    status: Mapped[str] = mapped_column(String(24), default="applied", index=True)
+    rationale: Mapped[str] = mapped_column(Text, default="")
+    before_json: Mapped[str] = mapped_column(Text, default="[]")
+    after_json: Mapped[str] = mapped_column(Text, default="[]")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc), index=True)
+    rolled_back_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+
 class StrategyTemplate(Base):
     __tablename__ = "strategy_templates"
 

@@ -1,11 +1,13 @@
 import json
 from collections import Counter
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 from sqlalchemy.orm import Session
 from app.core.database import SessionLocal
 from app.models.trading import (
     ActionRecommendation,
+    CalibrationRun,
+    ExpectationRule,
     ExpectationSnapshot,
     NextDayPlan,
     RecommendationFeedback,
@@ -16,6 +18,9 @@ from app.models.trading import (
 )
 from app.schemas.trading import (
     CalibrationMetricOut,
+    CalibrationProposalOut,
+    CalibrationRuleChangeOut,
+    CalibrationRunOut,
     CalibrationIssueOut,
     CalibrationSuggestionOut,
     FeedbackSummaryOut,
@@ -337,6 +342,125 @@ def _model_calibration_metrics(
         ))
 
     return metrics, suggestions
+
+
+def _expectation_calibration_proposal(db: Session) -> CalibrationProposalOut:
+    summary = _review_calibration_summary(db)
+    metric = next(item for item in summary.model_metrics if item.key == "expectation_hit")
+    active_run = (
+        db.query(CalibrationRun)
+        .filter(CalibrationRun.metric_key == "expectation_hit", CalibrationRun.status == "applied")
+        .order_by(CalibrationRun.created_at.desc())
+        .first()
+    )
+    already_applied = bool(active_run and active_run.sample_count >= metric.sample_count)
+    eligible = metric.sample_count >= 20 and metric.fail_count / max(metric.sample_count, 1) >= 0.45 and not already_applied
+    rationale = (
+        f"同一批 {metric.sample_count} 个样本的校准已经应用；需要新增有效样本或先回滚，禁止重复累加阈值。"
+        if already_applied else (
+        f"{metric.sample_count} 个有效阶段预期样本中有 {metric.fail_count} 个弱于预期；"
+        "建议把弱于预期识别线和强于预期确认线各收紧 0.25 个百分点。"
+        if eligible else
+        f"当前有效样本 {metric.sample_count}/20，或弱于预期比例未达到 45%，不允许应用参数变更。"
+        )
+    )
+    changes: list[CalibrationRuleChangeOut] = []
+    if eligible:
+        for rule in db.query(ExpectationRule).filter(ExpectationRule.enabled.is_(True)).order_by(ExpectationRule.id).all():
+            changes.extend([
+                CalibrationRuleChangeOut(
+                    rule_id=rule.id, display_name=rule.display_name,
+                    field="underperform_threshold", before=rule.underperform_threshold,
+                    after=round(min(rule.underperform_threshold + 0.25, rule.expected_open_low - 0.01), 2),
+                ),
+                CalibrationRuleChangeOut(
+                    rule_id=rule.id, display_name=rule.display_name,
+                    field="outperform_threshold", before=rule.outperform_threshold,
+                    after=round(max(rule.outperform_threshold + 0.25, rule.expected_open_high + 0.01), 2),
+                ),
+            ])
+    return CalibrationProposalOut(
+        sample_count=metric.sample_count,
+        eligible=eligible,
+        rationale=rationale,
+        changes=changes,
+    )
+
+
+def _apply_expectation_calibration(db: Session, confirmation: str) -> CalibrationRunOut:
+    if confirmation != "APPLY_CALIBRATION":
+        raise ValueError("confirmation must be APPLY_CALIBRATION")
+    proposal = _expectation_calibration_proposal(db)
+    if not proposal.eligible or not proposal.changes:
+        raise ValueError("calibration sample gate is not satisfied")
+    rule_ids = sorted({change.rule_id for change in proposal.changes})
+    rules = db.query(ExpectationRule).filter(ExpectationRule.id.in_(rule_ids)).all()
+    before = [_rule_calibration_state(rule) for rule in rules]
+    rules_by_id = {rule.id: rule for rule in rules}
+    for change in proposal.changes:
+        setattr(rules_by_id[change.rule_id], change.field, change.after)
+    after = [_rule_calibration_state(rule) for rule in rules]
+    run = CalibrationRun(
+        metric_key=proposal.metric_key,
+        sample_count=proposal.sample_count,
+        status="applied",
+        rationale=proposal.rationale,
+        before_json=json.dumps(before, ensure_ascii=False),
+        after_json=json.dumps(after, ensure_ascii=False),
+    )
+    db.add(run)
+    db.commit()
+    db.refresh(run)
+    return _calibration_run_out(run)
+
+
+def _rollback_calibration_run(db: Session, run_id: int) -> CalibrationRunOut:
+    run = db.query(CalibrationRun).filter(CalibrationRun.id == run_id).first()
+    if run is None:
+        raise LookupError("calibration run not found")
+    if run.status != "applied":
+        raise ValueError("calibration run is not active")
+    before = json.loads(run.before_json or "[]")
+    for state in before:
+        rule = db.query(ExpectationRule).filter(ExpectationRule.id == int(state["id"])).first()
+        if rule:
+            for field in ("underperform_threshold", "outperform_threshold"):
+                setattr(rule, field, float(state[field]))
+    run.status = "rolled_back"
+    run.rolled_back_at = datetime.now(timezone.utc)
+    db.commit()
+    db.refresh(run)
+    return _calibration_run_out(run)
+
+
+def _rule_calibration_state(rule: ExpectationRule) -> dict[str, Any]:
+    return {
+        "id": rule.id,
+        "display_name": rule.display_name,
+        "underperform_threshold": rule.underperform_threshold,
+        "outperform_threshold": rule.outperform_threshold,
+    }
+
+
+def _calibration_run_out(run: CalibrationRun) -> CalibrationRunOut:
+    before = {int(item["id"]): item for item in json.loads(run.before_json or "[]")}
+    after = {int(item["id"]): item for item in json.loads(run.after_json or "[]")}
+    changes: list[CalibrationRuleChangeOut] = []
+    for rule_id, old in before.items():
+        new = after.get(rule_id, old)
+        for field in ("underperform_threshold", "outperform_threshold"):
+            changes.append(CalibrationRuleChangeOut(
+                rule_id=rule_id,
+                display_name=str(old.get("display_name") or rule_id),
+                field=field,
+                before=float(old[field]),
+                after=float(new[field]),
+            ))
+    return CalibrationRunOut(
+        id=run.id, metric_key=run.metric_key, sample_count=run.sample_count,
+        status=run.status, rationale=run.rationale, changes=changes,
+        created_at=run.created_at, rolled_back_at=run.rolled_back_at,
+    )
 
 
 def _metric(

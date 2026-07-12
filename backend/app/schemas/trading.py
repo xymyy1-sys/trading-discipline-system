@@ -807,6 +807,38 @@ class EffectivenessReportOut(BaseModel):
     auto_calibration_allowed: bool = False
 
 
+class CalibrationRuleChangeOut(BaseModel):
+    rule_id: int
+    display_name: str
+    field: str
+    before: float
+    after: float
+
+
+class CalibrationProposalOut(BaseModel):
+    metric_key: str = "expectation_hit"
+    sample_count: int
+    eligible: bool
+    minimum_samples: int = 20
+    rationale: str
+    changes: list[CalibrationRuleChangeOut] = Field(default_factory=list)
+
+
+class CalibrationApplyIn(BaseModel):
+    confirmation: str
+
+
+class CalibrationRunOut(BaseModel):
+    id: int
+    metric_key: str
+    sample_count: int
+    status: str
+    rationale: str
+    changes: list[CalibrationRuleChangeOut] = Field(default_factory=list)
+    created_at: datetime
+    rolled_back_at: datetime | None = None
+
+
 class MarketGradeOut(BaseModel):
     grade: str
     total_position_limit: str

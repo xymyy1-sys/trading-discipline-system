@@ -101,6 +101,34 @@ export interface CalibrationSuggestion {
   sample_count: number;
 }
 
+export interface CalibrationRuleChange {
+  rule_id: number;
+  display_name: string;
+  field: string;
+  before: number;
+  after: number;
+}
+
+export interface CalibrationProposal {
+  metric_key: string;
+  sample_count: number;
+  eligible: boolean;
+  minimum_samples: number;
+  rationale: string;
+  changes: CalibrationRuleChange[];
+}
+
+export interface CalibrationRun {
+  id: number;
+  metric_key: string;
+  sample_count: number;
+  status: string;
+  rationale: string;
+  changes: CalibrationRuleChange[];
+  created_at: string;
+  rolled_back_at: string | null;
+}
+
 export interface ReviewCalibrationSummary {
   trade_count: number;
   review_count: number;

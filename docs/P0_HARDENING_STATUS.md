@@ -29,7 +29,7 @@ Historical replay is implemented against persisted evidence. A complete 600584 a
 - Stock Selection workspace includes a strategy-template editor and versioned save workflow.
 - Added `ReplayEngine` and `/api/replay/{code}` to merge historical expectation, volume-price, event, state-transition, and recommendation evidence into a time-ordered replay.
 - Added 600584 acceptance checkpoints and a visual replay workspace under Review Calibration.
-- Added expectation, volume-price, and execution effectiveness APIs with explicit sample counts and a 20-sample auto-calibration gate.
+- Added expectation, volume-price, and execution effectiveness APIs with explicit sample counts, a 20-sample/45%-deviation calibration gate, review-before-apply confirmation, persisted before/after snapshots, and rollback.
 - Added downloadable acceptance reports covering authentication, SSE, collector status, migration version, T+1 validation, and optional single-stock replay evidence.
 - Persisted data-capture quality snapshots with source, latency, stale/degraded/estimated/complete flags, error details, normalized values, and raw payload hashes.
 - Added provider-health history aggregation at `/api/data-quality/health`.
