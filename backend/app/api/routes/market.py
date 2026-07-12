@@ -11,7 +11,9 @@ from app.schemas.trading import (
     LimitUpLadderOut,
     ThemeRadarOut,
     MarketGradeOut,
-    MarketSeesawOut
+    MarketSeesawOut,
+    CapitalRotationOut,
+    CapitalRotationAssessment,
 )
 from app.services.market_data import MarketDataProvider
 from app.services.rules import grade_market
@@ -136,3 +138,30 @@ def market_seesaw_monitor(
 ) -> MarketSeesawOut:
     holdings = db.query(Holding).order_by(Holding.updated_at.desc()).all()
     return _market_seesaw_monitor(holdings, force_refresh=force_refresh)
+
+
+@router.get("/market/capital-rotation", response_model=CapitalRotationOut)
+@limiter.limit("20/minute")
+def capital_rotation(request: Request, force_refresh: bool = False, db: Session = Depends(get_db)) -> CapitalRotationOut:
+    from datetime import datetime
+    from app.api.helpers.execution import _sector_migration_signal
+
+    holdings = db.query(Holding).order_by(Holding.updated_at.desc()).all()
+    monitor = _market_seesaw_monitor(holdings, force_refresh=force_refresh)
+    assessments: list[CapitalRotationAssessment] = []
+    for item in monitor.holding_alerts:
+        confirmed, confidence, evidence, source_net, source_peak = _sector_migration_signal(item)
+        if not item.external_inflow_target:
+            continue
+        assessments.append(CapitalRotationAssessment(
+            code=item.code,
+            name=item.name,
+            source_theme=item.holding_theme or item.sector,
+            target_theme=item.external_inflow_target,
+            confirmed=confirmed,
+            confidence=confidence,
+            source_net_inflow=source_net,
+            source_flow_peak=source_peak,
+            evidence=evidence,
+        ))
+    return CapitalRotationOut(generated_at=datetime.now(), assessments=sorted(assessments, key=lambda row: row.confidence, reverse=True))

@@ -480,6 +480,7 @@ def _sector_migration_signal(seesaw: Any | None) -> tuple[bool, int, list[str], 
 
     evidence: list[str] = []
     criteria = 0
+    score = 0
     sector_net = float(getattr(seesaw, "sector_net_inflow", 0) or 0)
     flow_peak = float(getattr(seesaw, "theme_flow_peak", 0) or 0)
     pullback = float(getattr(seesaw, "theme_flow_pullback_pct", 0) or 0)
@@ -488,26 +489,39 @@ def _sector_migration_signal(seesaw: Any | None) -> tuple[bool, int, list[str], 
 
     if target:
         criteria += 1
+        score += 15
         evidence.append(f"新题材/外部吸金方向为 {target}。")
     if sector_net < 0 or pullback >= 20:
         criteria += 1
+        score += 25 if sector_net < 0 and pullback >= 20 else 18
         evidence.append(f"原主线资金弱化：净流入 {sector_net:.2f} 亿，峰值回落 {pullback:.2f}%。")
     if rank > 10:
         criteria += 1
+        score += 12
         evidence.append(f"原主线资金排名降至第 {rank}，不在前排。")
     if risk_level in {"高", "中高", "中"}:
         criteria += 1
+        score += 12
         evidence.append(f"持仓/主线风险等级为 {risk_level}。")
     stock_triggers = [str(item) for item in list(getattr(seesaw, "stock_weakening_trigger", []) or [])]
     sector_triggers = [str(item) for item in list(getattr(seesaw, "sector_ebb_trigger", []) or [])]
     if stock_triggers:
         criteria += 1
+        score += 18
         evidence.extend(stock_triggers[:2])
     if sector_triggers:
+        criteria += 1
+        score += 15
         evidence.extend(sector_triggers[:2])
 
-    confidence = min(95, 45 + criteria * 10 + (10 if sector_net < 0 and pullback >= 20 else 0))
-    confirmed = criteria >= 3
+    leader_text = " ".join(stock_triggers + sector_triggers)
+    if any(keyword in leader_text for keyword in ("龙头", "核心股", "领涨", "切换")):
+        criteria += 1
+        score += 15
+        evidence.append("龙头/核心强弱证据支持资金方向切换。")
+
+    confidence = min(95, score)
+    confirmed = criteria >= 3 and score >= 55 and (sector_net < 0 or pullback >= 20) and bool(stock_triggers or sector_triggers)
     if confirmed:
         evidence.insert(0, f"疑似跨板块资金迁移，可信度 {confidence}%。")
     return confirmed, confidence, evidence[:7], sector_net, flow_peak

@@ -835,6 +835,23 @@ class SectorRotationItem(BaseModel):
     evidence: str = ""
 
 
+class CapitalRotationAssessment(BaseModel):
+    code: str
+    name: str
+    source_theme: str = ""
+    target_theme: str = ""
+    confirmed: bool = False
+    confidence: int = 0
+    source_net_inflow: float = 0
+    source_flow_peak: float = 0
+    evidence: list[str] = Field(default_factory=list)
+
+
+class CapitalRotationOut(BaseModel):
+    generated_at: datetime
+    assessments: list[CapitalRotationAssessment] = Field(default_factory=list)
+
+
 class FlowTimelinePoint(BaseModel):
     time: str
     value: float = 0

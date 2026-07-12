@@ -25,6 +25,8 @@ Deferred by request:
 - Today Decision now shows unacknowledged operation recommendations and records explicit user acknowledgement.
 - Added `/api/candidates` with evidence-based A/B/C/D scoring from expectation, reliable minute VWAP, execution state, and data quality.
 - Stock Selection workspace now includes a candidate-pool panel with positive evidence and explicit exclusion reasons.
+- Strengthened capital-migration confirmation with weighted source outflow/pullback, target inflow, stock weakness, sector ebb, ranking, risk, and leader-switch evidence.
+- Added `/api/market/capital-rotation` with per-holding confidence and confirmation details.
 
 - Background intraday collector with status and manual run APIs.
 - Intraday collection run records.
@@ -84,7 +86,6 @@ Deferred by request:
 - Add optional multi-user roles and an immutable audit log if the system will be shared with other operators.
 
 - Continue minute-bar production monitoring: retries/backoff metrics, provider health history, and alternate provider support beyond Eastmoney.
-- Strengthen cross-sector migration scoring with original theme outflow, new theme inflow, stock weakening, and leader-switch evidence.
 - Add a front-end SSE connection health indicator and recovery notification UX beyond the current event list.
 - Add formal acceptance report exports for SSE demo, full single-stock intraday timeline, and T+1 validation.
 
