@@ -49,6 +49,28 @@ def _fallback_vwap(price: float, high_price: float, low_price: float) -> float:
     return round(sum(values) / len(values), 4) if values else 0
 
 
+def _minute_vwap(quote: dict[str, Any]) -> tuple[float, int]:
+    rows = quote.get("minute_bars") or quote.get("minutes") or quote.get("minute_data") or []
+    total_amount = 0.0
+    total_volume = 0.0
+    count = 0
+    if not isinstance(rows, list):
+        return 0.0, 0
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        volume = _safe_float(row.get("volume"))
+        amount = _safe_float(row.get("amount"))
+        price = _safe_float(row.get("price") or row.get("close"))
+        if amount <= 0 and price > 0 and volume > 0:
+            amount = price * volume
+        if amount > 0 and volume > 0:
+            total_amount += amount
+            total_volume += volume
+            count += 1
+    return (round(total_amount / total_volume, 4), count) if total_amount > 0 and total_volume > 0 else (0.0, count)
+
+
 def _classify_pattern(
     *,
     price: float,
@@ -106,6 +128,9 @@ def _snapshot_out(row: VolumePriceSnapshot) -> VolumePriceSnapshotOut:
         turnover=row.turnover,
         volume_ratio=row.volume_ratio,
         vwap=row.vwap,
+        vwap_source=getattr(row, "vwap_source", "estimated"),
+        minute_bar_count=getattr(row, "minute_bar_count", 0),
+        vwap_reliable=bool(getattr(row, "vwap_reliable", False)),
         price_vs_vwap=row.price_vs_vwap,
         high_drawdown=row.high_drawdown,
         active_buy_amount=row.active_buy_amount,
@@ -141,12 +166,24 @@ def build_volume_price_snapshot(
     volume = _safe_float(quote.get("volume"))
     amount = _safe_float(quote.get("amount"))
     turnover = _safe_float(quote.get("turnover"))
-    vwap = _estimated_vwap(quote) or _fallback_vwap(price, high_price, low_price)
+    minute_vwap, minute_bar_count = _minute_vwap(quote)
+    if minute_vwap > 0:
+        vwap = minute_vwap
+        vwap_source = "minute"
+    elif _estimated_vwap(quote) > 0:
+        vwap = _estimated_vwap(quote)
+        vwap_source = "quote_estimated"
+    else:
+        vwap = _fallback_vwap(price, high_price, low_price)
+        vwap_source = "range_estimated"
+    vwap_reliable = vwap_source == "minute" and minute_bar_count >= 3
     price_vs_vwap = ((price - vwap) / vwap * 100) if price > 0 and vwap > 0 else 0
     high_drawdown = ((high_price - price) / high_price * 100) if high_price > 0 and price > 0 else 0
     estimated_full_day_amount = round(amount / _trading_elapsed_ratio(), 2) if amount > 0 else 0
     note = str(quote.get("note") or "")
     data_quality = "realtime" if quote and _is_realtime_note(note) else ("degraded" if quote else "manual")
+    if quote and not vwap_reliable:
+        data_quality = "degraded_vwap"
     data_source = note or ("实时行情" if quote else "无行情")
     pattern, evidence, counter = _classify_pattern(
         price=price,
@@ -160,7 +197,9 @@ def build_volume_price_snapshot(
         evidence.append(f"当前成交额 {amount:.2f} 亿，按交易进度估算全天 {estimated_full_day_amount:.2f} 亿。")
     if turnover > 0:
         evidence.append(f"换手率 {turnover:.2f}%。")
-    if data_quality != "realtime":
+    if not vwap_reliable:
+        counter.append("缺少真实1分钟成交数据，VWAP为估算值，不能作为确定性减仓、清仓或做T触发。")
+    elif data_quality != "realtime":
         counter.append("行情源不是实时可信状态，量价结论需要人工复核。")
 
     row = VolumePriceSnapshot(
@@ -180,6 +219,9 @@ def build_volume_price_snapshot(
         turnover=round(turnover, 2),
         volume_ratio=round(_safe_float(quote.get("volume_ratio")), 2),
         vwap=round(vwap, 4),
+        vwap_source=vwap_source,
+        minute_bar_count=minute_bar_count,
+        vwap_reliable=vwap_reliable,
         price_vs_vwap=round(price_vs_vwap, 2),
         high_drawdown=round(high_drawdown, 2),
         active_buy_amount=round(_safe_float(quote.get("active_buy_amount")), 2),

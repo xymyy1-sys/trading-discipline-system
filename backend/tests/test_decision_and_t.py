@@ -58,8 +58,8 @@ def test_create_positive_t_plan_when_eligible(db_session):
 
     plan = create_t_plan(db_session, holding)
 
-    assert plan.t_type in {"POSITIVE_T", "NO_T"}
-    if plan.t_type == "POSITIVE_T":
+    assert plan.t_type in {"POSITIVE_T", "INVERSE_T", "NO_T"}
+    if plan.t_type in {"POSITIVE_T", "INVERSE_T"}:
         assert plan.planned_sell_quantity > 0
         assert plan.buyback_conditions
     else:
@@ -80,6 +80,11 @@ def test_volume_price_snapshot_detects_vwap_breakdown(db_session):
             "low": 9.4,
             "amount": 12.0,
             "volume": 100_000_000,
+            "minute_bars": [
+                {"price": 10.8, "volume": 1000, "amount": 10800},
+                {"price": 10.6, "volume": 1000, "amount": 10600},
+                {"price": 10.75, "volume": 1000, "amount": 10750},
+            ],
             "turnover": 8.2,
             "note": "东方财富实时行情",
         },
@@ -89,6 +94,8 @@ def test_volume_price_snapshot_detects_vwap_breakdown(db_session):
     assert snapshot.price_vs_vwap < 0
     assert snapshot.high_drawdown > 10
     assert snapshot.data_quality == "realtime"
+    assert snapshot.vwap_source == "minute"
+    assert snapshot.vwap_reliable is True
     assert snapshot.evidence
 
 

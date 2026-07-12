@@ -9,6 +9,7 @@ from app.api.routes import root_router, router
 from app.core.config import get_settings
 from app.core.database import Base, engine
 from app.core.limiter import limiter
+from app.services.intraday_collector import start_intraday_collector, stop_intraday_collector
 
 settings = get_settings()
 
@@ -16,7 +17,9 @@ settings = get_settings()
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     Base.metadata.create_all(bind=engine)
+    start_intraday_collector()
     yield
+    await stop_intraday_collector()
 
 
 app = FastAPI(title=settings.app_name, lifespan=lifespan)

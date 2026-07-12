@@ -187,6 +187,7 @@ class PositionExecutionState(Base):
     current_quantity: Mapped[int] = mapped_column(Integer, default=0)
     sellable_quantity: Mapped[int] = mapped_column(Integer, default=0)
     today_buy_quantity: Mapped[int] = mapped_column(Integer, default=0)
+    yesterday_quantity: Mapped[int] = mapped_column(Integer, default=0)
     current_position_ratio: Mapped[float] = mapped_column(Float, default=0)
     recommended_position_ratio: Mapped[float] = mapped_column(Float, default=0)
     recommended_action: Mapped[str] = mapped_column(String(64), default="继续持有")
@@ -219,6 +220,9 @@ class ProfitProtectionSnapshot(Base):
     maximum_profit_pct: Mapped[float] = mapped_column(Float, default=0)
     profit_drawdown_pct: Mapped[float] = mapped_column(Float, default=0)
     maximum_price: Mapped[float] = mapped_column(Float, default=0)
+    maximum_profit_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    day_max_profit_pct: Mapped[float] = mapped_column(Float, default=0)
+    day_max_profit_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     protection_level: Mapped[str] = mapped_column(String(32), default="NONE")
     protection_floor: Mapped[float] = mapped_column(Float, default=0)
     triggered: Mapped[bool] = mapped_column(Boolean, default=False)
@@ -238,6 +242,12 @@ class IntradayEvidenceEvent(Base):
     severity: Mapped[str] = mapped_column(String(24), default="info")
     value: Mapped[float] = mapped_column(Float, default=0)
     previous_value: Mapped[float] = mapped_column(Float, default=0)
+    priority: Mapped[int] = mapped_column(Integer, default=0)
+    group_key: Mapped[str] = mapped_column(String(64), default="")
+    first_seen_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    last_seen_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    occurrence_count: Mapped[int] = mapped_column(Integer, default=1)
+    confirmed: Mapped[bool] = mapped_column(Boolean, default=False)
     evidence_json: Mapped[str] = mapped_column(Text, default="[]")
     recommendation_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
 
@@ -321,6 +331,9 @@ class VolumePriceSnapshot(Base):
     turnover: Mapped[float] = mapped_column(Float, default=0)
     volume_ratio: Mapped[float] = mapped_column(Float, default=0)
     vwap: Mapped[float] = mapped_column(Float, default=0)
+    vwap_source: Mapped[str] = mapped_column(String(32), default="estimated")
+    minute_bar_count: Mapped[int] = mapped_column(Integer, default=0)
+    vwap_reliable: Mapped[bool] = mapped_column(Boolean, default=False)
     price_vs_vwap: Mapped[float] = mapped_column(Float, default=0)
     high_drawdown: Mapped[float] = mapped_column(Float, default=0)
     active_buy_amount: Mapped[float] = mapped_column(Float, default=0)
@@ -359,3 +372,18 @@ class TTradePlan(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc)
     )
+
+
+class IntradayCollectionRun(Base):
+    __tablename__ = "intraday_collection_runs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    started_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc), index=True)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    status: Mapped[str] = mapped_column(String(24), default="running")
+    trigger: Mapped[str] = mapped_column(String(32), default="scheduler")
+    holding_count: Mapped[int] = mapped_column(Integer, default=0)
+    snapshot_count: Mapped[int] = mapped_column(Integer, default=0)
+    event_count: Mapped[int] = mapped_column(Integer, default=0)
+    notes_json: Mapped[str] = mapped_column(Text, default="[]")
+    error_message: Mapped[str] = mapped_column(Text, default="")

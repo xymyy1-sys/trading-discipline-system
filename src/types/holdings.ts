@@ -119,6 +119,12 @@ export interface IntradayEvidenceEvent {
   severity: string;
   value: number;
   previous_value: number;
+  priority: number;
+  group_key: string;
+  first_seen_at: string | null;
+  last_seen_at: string | null;
+  occurrence_count: number;
+  confirmed: boolean;
   evidence: string[];
 }
 
@@ -146,6 +152,9 @@ export interface ProfitProtectionSnapshot {
   maximum_profit_pct: number;
   profit_drawdown_pct: number;
   maximum_price: number;
+  maximum_profit_at: string | null;
+  day_max_profit_pct: number;
+  day_max_profit_at: string | null;
   protection_level: string;
   protection_floor: number;
   triggered: boolean;
@@ -165,6 +174,7 @@ export interface PositionExecutionState {
   current_quantity: number;
   sellable_quantity: number;
   today_buy_quantity: number;
+  yesterday_quantity: number;
   current_position_ratio: number;
   recommended_position_ratio: number;
   recommended_action: string;
@@ -238,6 +248,9 @@ export interface VolumePriceSnapshot {
   turnover: number;
   volume_ratio: number;
   vwap: number;
+  vwap_source: string;
+  minute_bar_count: number;
+  vwap_reliable: boolean;
   price_vs_vwap: number;
   high_drawdown: number;
   active_buy_amount: number;
@@ -258,6 +271,8 @@ export interface TEligibility {
   t_type: string;
   eligible: boolean;
   sellable_quantity: number;
+  today_buy_quantity: number;
+  yesterday_quantity: number;
   suggested_quantity: number;
   suggested_sell_price: number;
   buyback_price_low: number;

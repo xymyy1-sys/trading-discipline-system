@@ -1,7 +1,8 @@
 from types import SimpleNamespace
+from datetime import datetime
 
 from app.api.helpers.execution import build_position_execution_state
-from app.models.trading import ExpectationSnapshot, Holding, VolumePriceSnapshot
+from app.models.trading import ExpectationSnapshot, Holding, TradeLog, VolumePriceSnapshot
 
 
 def test_position_execution_profit_drawdown_requires_reduce(db_session):
@@ -24,6 +25,12 @@ def test_position_execution_profit_drawdown_requires_reduce(db_session):
         "high": 11.2,
         "low": 10.6,
         "open": 11.0,
+        "vwap": 11.05,
+        "minute_bars": [
+            {"price": 11.0, "volume": 1000, "amount": 11000},
+            {"price": 11.1, "volume": 1000, "amount": 11100},
+            {"price": 11.05, "volume": 1000, "amount": 11050},
+        ],
         "amount": 1,
         "volume": 1000000,
         "note": "实时行情",
@@ -131,6 +138,9 @@ def test_expectation_and_vwap_breakdown_requires_risk_reduction(db_session):
         estimated_full_day_amount=20,
         turnover=5,
         vwap=10.75,
+        vwap_source="minute",
+        minute_bar_count=5,
+        vwap_reliable=True,
         price_vs_vwap=-3.26,
         high_drawdown=6.31,
         pattern="冲高回落跌破VWAP",
@@ -143,7 +153,19 @@ def test_expectation_and_vwap_breakdown_requires_risk_reduction(db_session):
     state = build_position_execution_state(
         db_session,
         holding,
-        quote={"price": 10.4, "high": 11.1, "low": 10.3, "open": 10.6, "note": "东方财富实时行情"},
+        quote={
+            "price": 10.4,
+            "high": 11.1,
+            "low": 10.3,
+            "open": 10.6,
+            "vwap": 10.75,
+            "minute_bars": [
+                {"price": 10.8, "volume": 1000, "amount": 10800},
+                {"price": 10.7, "volume": 1000, "amount": 10700},
+                {"price": 10.75, "volume": 1000, "amount": 10750},
+            ],
+            "note": "东方财富实时行情",
+        },
         expectation=expectation,
         volume_price=volume,
     )
@@ -207,6 +229,9 @@ def test_stronger_expectation_and_vwap_strength_stays_hold(db_session):
         estimated_full_day_amount=25,
         turnover=8,
         vwap=10.55,
+        vwap_source="minute",
+        minute_bar_count=5,
+        vwap_reliable=True,
         price_vs_vwap=3.32,
         high_drawdown=0.9,
         pattern="VWAP上方强势",
@@ -228,3 +253,115 @@ def test_stronger_expectation_and_vwap_strength_stays_hold(db_session):
     assert state.recommended_action in {"继续持有", "减仓25%"}
     assert state.volume_price_state in {"REPAIR_CONFIRMED", "VWAP_STRONG"}
     assert any("暂未构成预期证伪" in item for item in state.counter_evidence)
+
+
+def test_degraded_vwap_does_not_emit_deterministic_reduce(db_session):
+    holding = Holding(
+        code="600010",
+        name="降级VWAP",
+        quantity=1000,
+        cost_price=10,
+        current_price=10.4,
+        total_asset=100000,
+        position_type="盈利趋势仓",
+        next_discipline="缺分钟数据不确定触发",
+    )
+    db_session.add(holding)
+    db_session.commit()
+    db_session.refresh(holding)
+    volume = VolumePriceSnapshot(
+        trade_date="2026-07-12",
+        code="600010",
+        name="降级VWAP",
+        stage="五分钟确认",
+        price=10.4,
+        change_pct=0.2,
+        open_price=10.6,
+        high_price=11.1,
+        low_price=10.3,
+        prev_close=10,
+        amount=8,
+        estimated_full_day_amount=20,
+        turnover=5,
+        vwap=10.75,
+        vwap_source="range_estimated",
+        minute_bar_count=0,
+        vwap_reliable=False,
+        price_vs_vwap=-3.26,
+        high_drawdown=6.31,
+        pattern="冲高回落跌破VWAP",
+        data_quality="degraded_vwap",
+        data_source="估算行情",
+        evidence_json='["冲高回落跌破VWAP。"]',
+        counter_evidence_json='["缺少真实1分钟成交数据。"]',
+    )
+
+    state = build_position_execution_state(
+        db_session,
+        holding,
+        quote={"price": 10.4, "high": 11.1, "low": 10.3, "open": 10.6, "note": "东方财富实时行情"},
+        volume_price=volume,
+    )
+
+    assert state.state == "DEGRADED_DATA_OBSERVATION"
+    assert state.recommended_action == "观察但禁止加仓"
+    assert state.recommended_reduce_ratio == 0
+    assert state.data_quality == "degraded_vwap"
+    assert any("不输出确定性减仓" in item for item in state.evidence)
+
+
+def test_t_plus_one_sellable_quantity_excludes_today_buys(db_session):
+    holding = Holding(
+        code="600011",
+        name="T加一",
+        quantity=1500,
+        cost_price=10,
+        current_price=10.5,
+        total_asset=100000,
+        position_type="盈利趋势仓",
+        next_discipline="验证可卖数量",
+    )
+    db_session.add(holding)
+    db_session.flush()
+    db_session.add(TradeLog(
+        code="600011",
+        name="T加一",
+        traded_at=datetime.now(),
+        side="买入",
+        price=10.5,
+        quantity=500,
+        amount=5250,
+        total_asset=100000,
+        position_ratio=0.0525,
+        cost_price=10,
+        stop_loss_price=9.6,
+        reason="今日买入不计入可卖。",
+        mode="标准短线模式",
+        compliant=True,
+        human_tags="",
+    ))
+    db_session.commit()
+    db_session.refresh(holding)
+
+    state = build_position_execution_state(
+        db_session,
+        holding,
+        quote={
+            "price": 10.5,
+            "high": 10.8,
+            "low": 10.3,
+            "open": 10.4,
+            "vwap": 10.45,
+            "minute_bars": [
+                {"price": 10.4, "volume": 1000, "amount": 10400},
+                {"price": 10.5, "volume": 1000, "amount": 10500},
+                {"price": 10.45, "volume": 1000, "amount": 10450},
+            ],
+            "note": "实时行情",
+        },
+    )
+
+    assert state.current_quantity == 1500
+    assert state.today_buy_quantity == 500
+    assert state.sellable_quantity == 1000
+    assert state.yesterday_quantity == 1000

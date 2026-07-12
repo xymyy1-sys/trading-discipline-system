@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, timedelta
+from datetime import datetime, time, timedelta
 from typing import Any
 
 from sqlalchemy.orm import Session
@@ -24,6 +24,7 @@ from app.models.trading import (
     IntradayEvidenceEvent,
     PositionExecutionState,
     ProfitProtectionSnapshot,
+    TradeLog,
     VolumePriceSnapshot,
 )
 from app.schemas.trading import (
@@ -120,6 +121,13 @@ def _volume_pattern(row: VolumePriceSnapshot | VolumePriceSnapshotOut | None) ->
     return str(getattr(row, "pattern", "") or "")
 
 
+def _volume_vwap_reliable(row: VolumePriceSnapshot | VolumePriceSnapshotOut | None, quote: dict[str, Any]) -> bool:
+    if row is not None:
+        return bool(getattr(row, "vwap_reliable", False))
+    minute_rows = quote.get("minute_bars") or quote.get("minutes") or []
+    return isinstance(minute_rows, list) and len(minute_rows) >= 3
+
+
 def _volume_price_state(pattern: str, current: float, vwap: float, high_drawdown_pct: float) -> str:
     if "冲高回落跌破VWAP" in pattern:
         return "VOLUME_PRICE_WEAKENING"
@@ -132,6 +140,23 @@ def _volume_price_state(pattern: str, current: float, vwap: float, high_drawdown
     if vwap and current >= vwap:
         return "VWAP_STRONG"
     return "VOLUME_PRICE_NEUTRAL"
+
+
+def _position_quantities(db: Session, holding: Holding, trade_date: str) -> tuple[int, int, int]:
+    normalized = _normalize_code(holding.code)
+    candidates = {holding.code, normalized, normalized.lstrip("0")}
+    day_start = datetime.combine(datetime.now().date(), time.min)
+    day_end = datetime.combine(datetime.now().date(), time.max)
+    rows = (
+        db.query(TradeLog)
+        .filter(TradeLog.code.in_(list(candidates)), TradeLog.traded_at >= day_start, TradeLog.traded_at <= day_end)
+        .all()
+    )
+    buy_sides = {"买入", "加仓", "做T买回", "T买回"}
+    today_buy = sum(int(row.quantity or 0) for row in rows if row.side in buy_sides)
+    current_quantity = int(holding.quantity or 0)
+    sellable = max(0, current_quantity - today_buy)
+    return sellable, today_buy, sellable
 
 
 def _protection_level(max_profit_pct: float) -> tuple[str, float]:
@@ -180,10 +205,11 @@ def _build_events(
     evidence: list[str],
     volume_price_state: str = "",
     expectation_result: str = "",
+    vwap_reliable: bool = False,
 ) -> list[dict[str, Any]]:
     now = datetime.now()
     events: list[dict[str, Any]] = []
-    if vwap and current < vwap:
+    if vwap and current < vwap and vwap_reliable:
         events.append({
             "captured_at": now,
             "scope": "stock",
@@ -193,7 +219,9 @@ def _build_events(
             "severity": "warning",
             "value": round(current, 2),
             "previous_value": round(vwap, 2),
-            "evidence": [f"当前价 {current:.2f} 跌破估算 VWAP {vwap:.2f}。"],
+            "priority": 60,
+            "group_key": "stock:vwap",
+            "evidence": [f"当前价 {current:.2f} 跌破真实分钟VWAP {vwap:.2f}。"],
         })
     if volume_price_state in {"VOLUME_PRICE_WEAKENING", "HIGH_DRAWDOWN"}:
         events.append({
@@ -202,12 +230,14 @@ def _build_events(
             "target_code": holding.code,
             "target_name": holding.name,
             "event_type": volume_price_state,
-            "severity": "critical" if volume_price_state == "VOLUME_PRICE_WEAKENING" else "warning",
+            "severity": "critical" if volume_price_state == "VOLUME_PRICE_WEAKENING" and vwap_reliable else "warning",
             "value": round(current, 2),
             "previous_value": round(vwap, 2),
-            "evidence": evidence[:3] or ["量价结构转弱。"],
+            "priority": 90 if volume_price_state == "VOLUME_PRICE_WEAKENING" else 55,
+            "group_key": "stock:volume-price",
+            "evidence": (evidence[:3] or ["量价结构转弱。"]) + ([] if vwap_reliable else ["VWAP缺少真实1分钟成交确认，该事件仅作观察。"]),
         })
-    if expectation_result in {"WEAKER", "SLIGHTLY_WEAKER"} and volume_price_state in {"VWAP_BREAKDOWN", "VOLUME_PRICE_WEAKENING"}:
+    if vwap_reliable and expectation_result in {"WEAKER", "SLIGHTLY_WEAKER"} and volume_price_state in {"VWAP_BREAKDOWN", "VOLUME_PRICE_WEAKENING"}:
         events.append({
             "captured_at": now,
             "scope": "stock",
@@ -217,6 +247,8 @@ def _build_events(
             "severity": "critical",
             "value": round(current, 2),
             "previous_value": round(vwap, 2),
+            "priority": 95,
+            "group_key": "stock:expectation-volume",
             "evidence": ["预期低于阈值，同时量价跌破关键承接，执行上优先降风险。"],
         })
     if max_profit_pct >= 5 and profit_drawdown_pct >= 3:
@@ -229,6 +261,8 @@ def _build_events(
             "severity": "warning",
             "value": round(current_profit_pct, 2),
             "previous_value": round(max_profit_pct, 2),
+            "priority": 50,
+            "group_key": "stock:profit",
             "evidence": [f"最大浮盈 {max_profit_pct:.2f}%，当前 {current_profit_pct:.2f}%，利润回撤 {profit_drawdown_pct:.2f} 个百分点。"],
         })
     if seesaw and float(getattr(seesaw, "theme_flow_pullback_pct", 0) or 0) >= 20:
@@ -241,6 +275,8 @@ def _build_events(
             "severity": "warning",
             "value": round(float(getattr(seesaw, "theme_flow_current", 0) or 0), 2),
             "previous_value": round(float(getattr(seesaw, "theme_flow_peak", 0) or 0), 2),
+            "priority": 55,
+            "group_key": "sector:flow",
             "evidence": [str(getattr(seesaw, "theme_flow_summary", "") or "板块资金从峰值回落。")],
         })
     if seesaw and str(getattr(seesaw, "risk_level", "")) in {"高", "中高"}:
@@ -253,9 +289,43 @@ def _build_events(
             "severity": "critical" if getattr(seesaw, "risk_level", "") == "高" else "warning",
             "value": float(getattr(seesaw, "pullback_from_high_pct", 0) or 0),
             "previous_value": 0,
+            "priority": 70,
+            "group_key": "stock:risk",
             "evidence": evidence[:3] or [str(getattr(seesaw, "signal", "") or "持仓风险升高。")],
         })
     return events
+
+
+def _dedupe_events(db: Session, events: list[dict[str, Any]], cooldown_minutes: int = 5) -> list[dict[str, Any]]:
+    persisted: list[dict[str, Any]] = []
+    now = datetime.now()
+    seen: set[tuple[str, str]] = set()
+    for event in events:
+        key = (str(event.get("target_code") or ""), str(event.get("event_type") or ""))
+        if key in seen:
+            continue
+        seen.add(key)
+        recent = (
+            db.query(IntradayEvidenceEvent)
+            .filter(
+                IntradayEvidenceEvent.target_code == key[0],
+                IntradayEvidenceEvent.event_type == key[1],
+                IntradayEvidenceEvent.captured_at >= now - timedelta(minutes=cooldown_minutes),
+            )
+            .order_by(IntradayEvidenceEvent.captured_at.desc(), IntradayEvidenceEvent.id.desc())
+            .first()
+        )
+        if recent is not None:
+            recent.last_seen_at = now
+            recent.occurrence_count = int(recent.occurrence_count or 1) + 1
+            recent.confirmed = recent.occurrence_count >= 2
+            continue
+        event["first_seen_at"] = event.get("captured_at")
+        event["last_seen_at"] = event.get("captured_at")
+        event["occurrence_count"] = 1
+        event["confirmed"] = False
+        persisted.append(event)
+    return persisted
 
 
 def build_position_execution_state(
@@ -282,10 +352,17 @@ def build_position_execution_state(
     previous_snapshot = _latest_profit_snapshot(db, int(holding.id or 0))
     expectation = expectation or _latest_expectation_snapshot(db, holding.code)
     volume_price = volume_price or _latest_volume_price_snapshot(db, holding.code)
+    vwap_reliable = _volume_vwap_reliable(volume_price, quote)
     previous_max_profit = float(previous_snapshot.maximum_profit_pct or 0) if previous_snapshot else 0.0
     previous_max_price = float(previous_snapshot.maximum_price or 0) if previous_snapshot else 0.0
+    previous_max_at = previous_snapshot.maximum_profit_at if previous_snapshot else None
+    previous_day_max = float(getattr(previous_snapshot, "day_max_profit_pct", 0) or 0) if previous_snapshot else 0.0
+    previous_day_max_at = getattr(previous_snapshot, "day_max_profit_at", None) if previous_snapshot else None
     max_profit_pct = max(previous_max_profit, high_profit_pct, current_profit_pct)
     maximum_price = max(previous_max_price, high, current)
+    maximum_profit_at = previous_max_at if previous_max_profit >= max(high_profit_pct, current_profit_pct) else now
+    day_max_profit_pct = max(previous_day_max, high_profit_pct, current_profit_pct)
+    day_max_profit_at = previous_day_max_at if previous_day_max >= max(high_profit_pct, current_profit_pct) else now
     profit_drawdown_pct = max(0.0, max_profit_pct - current_profit_pct)
     protection_level, allowed_drawdown = _protection_level(max_profit_pct)
     floor_profit_pct = max_profit_pct * (1 - allowed_drawdown) if protection_level != "NONE" else 0.0
@@ -317,7 +394,7 @@ def build_position_execution_state(
     if volume_price is not None:
         high_drawdown_pct = max(high_drawdown_pct, _safe_float(getattr(volume_price, "high_drawdown", 0)))
         vwap = _safe_float(getattr(volume_price, "vwap", 0)) or vwap
-    volume_state = _volume_price_state(volume_pattern, current, vwap, high_drawdown_pct)
+    volume_state = _volume_price_state(volume_pattern, current, vwap if vwap_reliable else 0, high_drawdown_pct)
 
     if protection_level != "NONE":
         evidence.append(f"已进入{protection_level}利润保护，不能无条件放任盈利大幅回吐。")
@@ -328,11 +405,11 @@ def build_position_execution_state(
         invalid_conditions.append("预期低于阈值且未出现量价修复前，禁止加仓或做T接回。")
     elif expectation_result in {"STRONGER", "SLIGHTLY_STRONGER"}:
         counter_evidence.append(f"阶段预期结果 {expectation_result}，暂未构成预期证伪。")
-    if volume_state == "VOLUME_PRICE_WEAKENING":
+    if volume_state == "VOLUME_PRICE_WEAKENING" and vwap_reliable:
         negative_score += 2
         evidence.append("量价形态为冲高回落跌破VWAP，优先按风险信号处理。")
         invalid_conditions.append("冲高回落跌破VWAP后，不能用主观预期继续扛单。")
-    elif volume_state == "VWAP_BREAKDOWN":
+    elif volume_state == "VWAP_BREAKDOWN" and vwap_reliable:
         negative_score += 1
         evidence.append("量价状态为跌破VWAP，等待重新站回后才允许恢复观察。")
     elif volume_state == "HIGH_DRAWDOWN":
@@ -347,14 +424,14 @@ def build_position_execution_state(
     elif current <= structure_stop_price and structure_stop_price:
         negative_score += 2
         evidence.append(f"当前价 {current:.2f} 已接近/跌破结构止损 {structure_stop_price:.2f}。")
-    if vwap:
+    if vwap and vwap_reliable:
         if current < vwap:
             negative_score += 1
-            evidence.append(f"当前价 {current:.2f} 跌破估算 VWAP {vwap:.2f}。")
+            evidence.append(f"当前价 {current:.2f} 跌破真实分钟VWAP {vwap:.2f}。")
         else:
-            counter_evidence.append(f"当前仍在估算 VWAP {vwap:.2f} 上方。")
+            counter_evidence.append(f"当前仍在真实分钟VWAP {vwap:.2f} 上方。")
     else:
-        counter_evidence.append("缺少分钟成交数据，VWAP 为估算缺口，不把该项作为确定性卖点。")
+        counter_evidence.append("缺少真实1分钟成交数据，VWAP 为估算缺口，不把该项作为确定性卖点。")
     if max_profit_pct >= 8 and profit_drawdown_pct >= 3:
         negative_score += 2
         evidence.append("浮盈超过 8% 后出现明显回撤，优先保护利润。")
@@ -387,6 +464,13 @@ def build_position_execution_state(
         action = "减仓50%" if current_profit_pct >= 0 else "只留观察仓"
         reduce_ratio = max(reduce_ratio, 0.50 if current_profit_pct >= 0 else 0.75)
         level = "REDUCE" if current_profit_pct >= 0 else "EXIT"
+    if not vwap_reliable and action in {"减仓25%", "减仓50%", "只留观察仓", "全部退出"} and not hard_exit:
+        state = "DEGRADED_DATA_OBSERVATION"
+        action = "观察但禁止加仓"
+        reduce_ratio = 0.0
+        level = "WATCH"
+        evidence.append("数据降级：缺少真实1分钟VWAP，不输出确定性减仓、清仓或做T信号。")
+        invalid_conditions.append("未恢复真实分钟成交数据前，系统建议只能作为观察提醒。")
     if current_profit_pct < 0 and state == "NORMAL_HOLD":
         state = "LOSS_OBSERVATION"
         action = "观察但禁止加仓"
@@ -394,7 +478,7 @@ def build_position_execution_state(
         hard_exit
         or state in {"EXIT_REQUIRED", "REDUCE_REQUIRED", "EXPECTATION_VOLUME_BREAKDOWN"}
         or current < structure_stop_price
-        or volume_state in {"VWAP_BREAKDOWN", "VOLUME_PRICE_WEAKENING"}
+        or (vwap_reliable and volume_state in {"VWAP_BREAKDOWN", "VOLUME_PRICE_WEAKENING"})
         or expectation_result in {"WEAKER", "SLIGHTLY_WEAKER"}
         or (seesaw and getattr(seesaw, "risk_level", "") in {"高", "中高"})
     )
@@ -404,8 +488,12 @@ def build_position_execution_state(
         evidence.append("当前禁止做T：做T不能用于挽救已经证伪或需要降风险的交易。")
         t_type = "NO_T"
     recommended_position_ratio = max(0.0, position_ratio * (1 - reduce_ratio))
+    sellable_quantity, today_buy_quantity, yesterday_quantity = _position_quantities(db, holding, _trade_date())
+    evidence.append(f"T+1口径：当前持仓 {int(holding.quantity or 0)} 股，今日买入 {today_buy_quantity} 股，昨日可卖 {sellable_quantity} 股。")
     volume_price_state = volume_state
     data_quality = "realtime" if _is_realtime_note(str(quote.get("note") or "")) else "degraded" if quote else "manual"
+    if quote and not vwap_reliable:
+        data_quality = "degraded_vwap"
     data_time = str(quote.get("time") or quote.get("updated_at") or now.strftime("%H:%M:%S"))
     events = _build_events(
         holding,
@@ -418,6 +506,7 @@ def build_position_execution_state(
         evidence,
         volume_price_state=volume_price_state,
         expectation_result=expectation_result,
+        vwap_reliable=vwap_reliable,
     )
 
     snapshot = ProfitProtectionSnapshot(
@@ -428,6 +517,9 @@ def build_position_execution_state(
         maximum_profit_pct=round(max_profit_pct, 2),
         profit_drawdown_pct=round(profit_drawdown_pct, 2),
         maximum_price=round(maximum_price, 2),
+        maximum_profit_at=maximum_profit_at,
+        day_max_profit_pct=round(day_max_profit_pct, 2),
+        day_max_profit_at=day_max_profit_at,
         protection_level=protection_level,
         protection_floor=profit_protection_price,
         triggered=protection_level != "NONE",
@@ -465,8 +557,9 @@ def build_position_execution_state(
     state_row.volume_price_state = volume_price_state
     state_row.sector_state = sector_state
     state_row.current_quantity = int(holding.quantity or 0)
-    state_row.sellable_quantity = int(holding.quantity or 0)
-    state_row.today_buy_quantity = 0
+    state_row.sellable_quantity = sellable_quantity
+    state_row.today_buy_quantity = today_buy_quantity
+    state_row.yesterday_quantity = yesterday_quantity
     state_row.current_position_ratio = round(position_ratio, 4)
     state_row.recommended_position_ratio = round(recommended_position_ratio, 4)
     state_row.recommended_action = action
@@ -490,7 +583,7 @@ def build_position_execution_state(
         db.add(snapshot)
         db.add(recommendation)
         db.flush()
-        for event in events:
+        for event in _dedupe_events(db, events):
             row = IntradayEvidenceEvent(
                 trade_date=_trade_date(),
                 captured_at=event["captured_at"],
@@ -501,6 +594,12 @@ def build_position_execution_state(
                 severity=event["severity"],
                 value=event["value"],
                 previous_value=event["previous_value"],
+                priority=int(event.get("priority") or 0),
+                group_key=str(event.get("group_key") or ""),
+                first_seen_at=event.get("first_seen_at"),
+                last_seen_at=event.get("last_seen_at"),
+                occurrence_count=int(event.get("occurrence_count") or 1),
+                confirmed=bool(event.get("confirmed") or False),
                 evidence_json=_json_dumps(event["evidence"]),
                 recommendation_id=recommendation.id,
             )
@@ -539,6 +638,12 @@ def _execution_state_out(
                     severity=event.severity,
                     value=event.value,
                     previous_value=event.previous_value,
+                    priority=getattr(event, "priority", 0),
+                    group_key=getattr(event, "group_key", ""),
+                    first_seen_at=getattr(event, "first_seen_at", None),
+                    last_seen_at=getattr(event, "last_seen_at", None),
+                    occurrence_count=getattr(event, "occurrence_count", 1),
+                    confirmed=bool(getattr(event, "confirmed", False)),
                     evidence=_json_list(event.evidence_json),
                 )
             )
@@ -555,6 +660,7 @@ def _execution_state_out(
         current_quantity=state.current_quantity,
         sellable_quantity=state.sellable_quantity,
         today_buy_quantity=state.today_buy_quantity,
+        yesterday_quantity=getattr(state, "yesterday_quantity", state.sellable_quantity),
         current_position_ratio=state.current_position_ratio,
         recommended_position_ratio=state.recommended_position_ratio,
         recommended_action=state.recommended_action,
@@ -593,6 +699,9 @@ def _execution_state_out(
             maximum_profit_pct=snapshot.maximum_profit_pct,
             profit_drawdown_pct=snapshot.profit_drawdown_pct,
             maximum_price=snapshot.maximum_price,
+            maximum_profit_at=getattr(snapshot, "maximum_profit_at", None),
+            day_max_profit_pct=getattr(snapshot, "day_max_profit_pct", 0),
+            day_max_profit_at=getattr(snapshot, "day_max_profit_at", None),
             protection_level=snapshot.protection_level,
             protection_floor=snapshot.protection_floor,
             triggered=snapshot.triggered,

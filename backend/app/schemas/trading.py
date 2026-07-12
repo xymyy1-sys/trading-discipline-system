@@ -104,6 +104,12 @@ class IntradayEvidenceEventOut(BaseModel):
     severity: str
     value: float = 0
     previous_value: float = 0
+    priority: int = 0
+    group_key: str = ""
+    first_seen_at: datetime | None = None
+    last_seen_at: datetime | None = None
+    occurrence_count: int = 1
+    confirmed: bool = False
     evidence: list[str] = Field(default_factory=list)
 
     class Config:
@@ -137,6 +143,9 @@ class ProfitProtectionSnapshotOut(BaseModel):
     maximum_profit_pct: float = 0
     profit_drawdown_pct: float = 0
     maximum_price: float = 0
+    maximum_profit_at: datetime | None = None
+    day_max_profit_pct: float = 0
+    day_max_profit_at: datetime | None = None
     protection_level: str = "NONE"
     protection_floor: float = 0
     triggered: bool = False
@@ -159,6 +168,7 @@ class PositionExecutionStateOut(BaseModel):
     current_quantity: int
     sellable_quantity: int
     today_buy_quantity: int = 0
+    yesterday_quantity: int = 0
     current_position_ratio: float = 0
     recommended_position_ratio: float = 0
     recommended_action: str
@@ -275,6 +285,9 @@ class VolumePriceSnapshotOut(BaseModel):
     turnover: float = 0
     volume_ratio: float = 0
     vwap: float = 0
+    vwap_source: str = "estimated"
+    minute_bar_count: int = 0
+    vwap_reliable: bool = False
     price_vs_vwap: float = 0
     high_drawdown: float = 0
     active_buy_amount: float = 0
@@ -341,6 +354,8 @@ class TEligibilityOut(BaseModel):
     t_type: str
     eligible: bool
     sellable_quantity: int = 0
+    today_buy_quantity: int = 0
+    yesterday_quantity: int = 0
     suggested_quantity: int = 0
     suggested_sell_price: float = 0
     buyback_price_low: float = 0
@@ -368,6 +383,39 @@ class StockDecisionCardOut(BaseModel):
     evidence: list[str] = Field(default_factory=list)
     counter_evidence: list[str] = Field(default_factory=list)
     data_quality: str = "manual"
+
+
+class StopLevelsOut(BaseModel):
+    holding_id: int
+    code: str
+    name: str
+    structure_stop_price: float = 0
+    hard_stop_price: float = 0
+    trailing_stop_price: float = 0
+    profit_protection_price: float = 0
+    data_quality: str = "manual"
+    evidence: list[str] = Field(default_factory=list)
+    invalid_conditions: list[str] = Field(default_factory=list)
+
+
+class CollectionRunOut(BaseModel):
+    id: int | None = None
+    started_at: datetime
+    finished_at: datetime | None = None
+    status: str
+    trigger: str
+    holding_count: int = 0
+    snapshot_count: int = 0
+    event_count: int = 0
+    notes: list[str] = Field(default_factory=list)
+    error_message: str = ""
+
+
+class IntradayCollectorStatusOut(BaseModel):
+    enabled: bool
+    interval_seconds: int
+    running: bool
+    last_run: CollectionRunOut | None = None
 
 
 class TradeLogCreate(BaseModel):

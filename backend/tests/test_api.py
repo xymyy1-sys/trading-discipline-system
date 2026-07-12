@@ -15,6 +15,16 @@ def test_market_sector_flow(client):
     assert isinstance(data["outflow"], list)
 
 
+def test_intraday_collector_status(client):
+    response = client.get("/api/intraday-collector/status")
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["enabled"] is True
+    assert data["interval_seconds"] >= 1
+    assert "running" in data
+
+
 def test_review_calibration_summary(client, db_session):
     from app.models.trading import (
         ActionRecommendation,
