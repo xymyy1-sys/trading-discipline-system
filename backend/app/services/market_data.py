@@ -1146,7 +1146,7 @@ class MarketDataProvider:
                 return cached
 
         notes: list[str] = []
-        source = "akshare/eastmoney"
+        source = "东方财富涨停池"
         raw_items: list[dict[str, Any]] = []
         if not _is_trading_day() and trade_date is None:
             notes.append(f"非交易日，展示最近交易日 {target_date} 的涨停池")
@@ -1918,15 +1918,22 @@ class MarketDataProvider:
                 continue
             code = str(row.get("code") or "")
             url = f"https://kuaixun.eastmoney.com/{code}.html" if code else None
+            related_stocks: list[str] = []
+            for stock in row.get("stockList", []) or []:
+                if isinstance(stock, dict):
+                    raw_stock = stock.get("stockCode") or stock.get("securityCode") or stock.get("code") or ""
+                else:
+                    raw_stock = stock
+                stock_text = str(raw_stock).strip().split(".")[-1]
+                if re.fullmatch(r"\d{6}", stock_text):
+                    related_stocks.append(stock_text)
             items.append({
                 "title": title,
                 "summary": summary,
                 "source": "东方财富快讯",
                 "published_at": str(row.get("showTime") or ""),
                 "url": url,
-                "related_stocks": [
-                    str(s) for s in row.get("stockList", []) if str(s).strip()
-                ],
+                "related_stocks": list(dict.fromkeys(related_stocks)),
             })
         return items
 
