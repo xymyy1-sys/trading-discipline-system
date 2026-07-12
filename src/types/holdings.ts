@@ -273,6 +273,10 @@ export interface VolumePriceSnapshot {
   active_sell_amount: number;
   attack_efficiency: number;
   volume_acceleration: number;
+  attack_amount: number;
+  pullback_amount: number;
+  pullback_amount_ratio: number;
+  pullback_sell_ratio: number;
   pattern: string;
   data_quality: string;
   data_source: string;

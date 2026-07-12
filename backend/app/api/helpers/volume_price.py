@@ -80,7 +80,7 @@ def _minute_vwap(quote: dict[str, Any]) -> tuple[float, int]:
     return (round(total_amount / total_volume, 4), count) if total_amount > 0 and total_volume > 0 else (0.0, count)
 
 
-def _minute_flow_metrics(quote: dict[str, Any]) -> tuple[float, float, float, float, list[str]]:
+def _minute_flow_metrics(quote: dict[str, Any]) -> tuple[float, float, float, float, float, float, float, float, list[str]]:
     rows = _minute_rows(quote)
     evidence: list[str] = []
     if len(rows) < 3:
@@ -89,6 +89,10 @@ def _minute_flow_metrics(quote: dict[str, Any]) -> tuple[float, float, float, fl
             _safe_float(quote.get("active_sell_amount")),
             _safe_float(quote.get("attack_efficiency")),
             _safe_float(quote.get("volume_acceleration")),
+            _safe_float(quote.get("attack_amount")),
+            _safe_float(quote.get("pullback_amount")),
+            _safe_float(quote.get("pullback_amount_ratio")),
+            _safe_float(quote.get("pullback_sell_ratio")),
             evidence,
         )
 
@@ -150,14 +154,14 @@ def _minute_flow_metrics(quote: dict[str, Any]) -> tuple[float, float, float, fl
         evidence.append(f"分钟主动买卖额：主动买 {active_buy:.2f}，主动卖 {active_sell:.2f}。")
     if attack_efficiency:
         evidence.append(f"上攻效率 {attack_efficiency:.2f}，量能加速度 {volume_acceleration:+.2f}%。")
+    pullback_ratio = (pullback_amount / attack_amount * 100) if attack_amount > 0 else 0.0
+    sell_ratio = (pullback_sell_amount / pullback_amount * 100) if pullback_amount > 0 else 0.0
     if attack_amount > 0 or pullback_amount > 0:
-        pullback_ratio = (pullback_amount / attack_amount * 100) if attack_amount > 0 else 0.0
-        sell_ratio = (pullback_sell_amount / pullback_amount * 100) if pullback_amount > 0 else 0.0
         evidence.append(f"上攻段成交额 {attack_amount:.2f}，回落段成交额 {pullback_amount:.2f}（{pullback_ratio:.1f}%），回落段卖出占比 {sell_ratio:.1f}%。")
     if pullback_pct >= 2 and active_sell > active_buy:
         evidence.append(f"高点回落 {pullback_pct:.2f}% 且回落段卖出额占优，属于回落量能放大。")
 
-    return active_buy, active_sell, attack_efficiency, volume_acceleration, evidence
+    return active_buy, active_sell, attack_efficiency, volume_acceleration, attack_amount, pullback_amount, pullback_ratio, sell_ratio, evidence
 
 
 def _classify_pattern(
@@ -226,6 +230,10 @@ def _snapshot_out(row: VolumePriceSnapshot) -> VolumePriceSnapshotOut:
         active_sell_amount=row.active_sell_amount,
         attack_efficiency=row.attack_efficiency,
         volume_acceleration=row.volume_acceleration,
+        attack_amount=getattr(row, "attack_amount", 0),
+        pullback_amount=getattr(row, "pullback_amount", 0),
+        pullback_amount_ratio=getattr(row, "pullback_amount_ratio", 0),
+        pullback_sell_ratio=getattr(row, "pullback_sell_ratio", 0),
         pattern=row.pattern,
         data_quality=row.data_quality,
         data_source=row.data_source,
@@ -269,7 +277,17 @@ def build_volume_price_snapshot(
     price_vs_vwap = ((price - vwap) / vwap * 100) if price > 0 and vwap > 0 else 0
     high_drawdown = ((high_price - price) / high_price * 100) if high_price > 0 and price > 0 else 0
     estimated_full_day_amount = round(amount / _trading_elapsed_ratio(), 2) if amount > 0 else 0
-    active_buy_amount, active_sell_amount, attack_efficiency, volume_acceleration, flow_evidence = _minute_flow_metrics(quote)
+    (
+        active_buy_amount,
+        active_sell_amount,
+        attack_efficiency,
+        volume_acceleration,
+        attack_amount,
+        pullback_amount,
+        pullback_amount_ratio,
+        pullback_sell_ratio,
+        flow_evidence,
+    ) = _minute_flow_metrics(quote)
     note = str(quote.get("note") or "")
     data_quality = "realtime" if quote and _is_realtime_note(note) else ("degraded" if quote else "manual")
     if quote and not vwap_reliable:
@@ -319,6 +337,10 @@ def build_volume_price_snapshot(
         active_sell_amount=round(active_sell_amount, 2),
         attack_efficiency=round(attack_efficiency, 2),
         volume_acceleration=round(volume_acceleration, 2),
+        attack_amount=round(attack_amount, 2),
+        pullback_amount=round(pullback_amount, 2),
+        pullback_amount_ratio=round(pullback_amount_ratio, 2),
+        pullback_sell_ratio=round(pullback_sell_ratio, 2),
         pattern=pattern,
         data_quality=data_quality,
         data_source=data_source,

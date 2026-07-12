@@ -313,6 +313,10 @@ class VolumePriceSnapshotOut(BaseModel):
     active_sell_amount: float = 0
     attack_efficiency: float = 0
     volume_acceleration: float = 0
+    attack_amount: float = 0
+    pullback_amount: float = 0
+    pullback_amount_ratio: float = 0
+    pullback_sell_ratio: float = 0
     pattern: str = "量价中性"
     data_quality: str = "manual"
     data_source: str = ""

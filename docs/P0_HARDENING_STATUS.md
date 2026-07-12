@@ -55,12 +55,15 @@ Deferred by request:
   - Added `time_stop_rules` with default, breakout, and trend templates.
   - Time-stop execution now reads editable confirmation deadline, sustained VWAP-break minutes, confirming bar count, observation window, and failed reseal threshold.
   - Added `/api/time-stop-rules` list/update APIs and a Positions workspace rule editor.
+- V2.2 structured minute-segment metrics batch:
+  - Persisted attack amount, pullback amount, pullback/attack ratio, and pullback sell ratio on volume-price snapshots.
+  - Stock decision cards now display attack/pullback segment metrics alongside VWAP and drawdown.
+  - Segment metrics remain derived only from real minute bars or explicit quote fields; missing minute data still downgrades deterministic signals.
 
 ## Still Open
 
 - Enable CI in GitHub after the PAT gets `workflow` scope. The workflow file exists locally at `.github/workflows/ci.yml` but cannot be pushed by the current token.
 - Continue minute-bar production monitoring: retries/backoff metrics, provider health history, and alternate provider support beyond Eastmoney.
-- Persist attack/pullback segment metrics into dedicated columns if later analytics need filtering and aggregation.
 - Strengthen cross-sector migration scoring with original theme outflow, new theme inflow, stock weakening, and leader-switch evidence.
 - Add a front-end SSE connection health indicator and recovery notification UX beyond the current event list.
 - Continue deeper TTradingEngine work: positive/reverse T execution feedback and UI guardrails.

@@ -106,6 +106,9 @@ export default function DecisionCard() {
                   <div><b>成交额</b><span>{card.volume_price.amount.toFixed(2)}亿</span></div>
                   <div><b>估算全天</b><span>{card.volume_price.estimated_full_day_amount.toFixed(2)}亿</span></div>
                   <div><b>换手</b><span>{card.volume_price.turnover ? `${card.volume_price.turnover.toFixed(2)}%` : '--'}</span></div>
+                  <div><b>上攻段</b><span>{card.volume_price.attack_amount.toFixed(2)}亿</span></div>
+                  <div><b>回落段</b><span>{card.volume_price.pullback_amount.toFixed(2)}亿</span></div>
+                  <div><b>回落卖出</b><span>{card.volume_price.pullback_sell_ratio.toFixed(1)}%</span></div>
                 </div>
                 <ul>
                   {(card.volume_price.evidence.length ? card.volume_price.evidence : ['暂无明确量价偏离。']).slice(0, 5).map(item => <li key={item}>{item}</li>)}
