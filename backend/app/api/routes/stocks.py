@@ -17,7 +17,7 @@ from app.api.helpers.decision import (
 )
 from app.api.helpers.volume_price import build_volume_price_snapshot
 from app.core.database import get_db
-from app.models.trading import ExpectationRule, ExpectationSnapshot, IntradayEvidenceEvent, PositionExecutionState
+from app.models.trading import ExpectationRule, ExpectationSnapshot, Holding, IntradayEvidenceEvent, NextDayPlan, PositionExecutionState, VolumePriceSnapshot
 from app.schemas.trading import (
     ExpectationSnapshotIn,
     ExpectationSnapshotOut,
@@ -28,9 +28,70 @@ from app.schemas.trading import (
     IntradayReviewOut,
     StockDecisionCardOut,
     VolumePriceSnapshotOut,
+    CandidateOut,
 )
 
 router = APIRouter()
+
+
+@router.get("/candidates", response_model=list[CandidateOut])
+def list_candidates(db: Session = Depends(get_db)) -> list[CandidateOut]:
+    targets: dict[str, str] = {}
+    for row in db.query(NextDayPlan).order_by(NextDayPlan.updated_at.desc()).limit(300).all():
+        targets.setdefault(row.code, row.name)
+    for row in db.query(Holding).all():
+        targets.setdefault(row.code, row.name)
+
+    outputs: list[CandidateOut] = []
+    for code, name in targets.items():
+        expectation = db.query(ExpectationSnapshot).filter(ExpectationSnapshot.code == code).order_by(ExpectationSnapshot.created_at.desc()).first()
+        volume = db.query(VolumePriceSnapshot).filter(VolumePriceSnapshot.code == code).order_by(VolumePriceSnapshot.captured_at.desc()).first()
+        execution = db.query(PositionExecutionState).filter(PositionExecutionState.code == code).order_by(PositionExecutionState.updated_at.desc()).first()
+        score = 50
+        reasons: list[str] = []
+        exclusions: list[str] = []
+        expectation_result = expectation.expectation_result if expectation else "UNKNOWN"
+        if expectation_result in {"STRONGER", "MATCHED"}:
+            score += 20
+            reasons.append(f"expectation {expectation_result}")
+        elif expectation_result in {"WEAKER", "INVALID"}:
+            score -= 30
+            exclusions.append(f"expectation {expectation_result}")
+        else:
+            score -= 10
+            exclusions.append("expectation evidence missing")
+
+        volume_state = volume.pattern if volume else "UNKNOWN"
+        data_quality = volume.data_quality if volume else "missing"
+        if volume and volume.vwap_reliable:
+            score += 15
+            reasons.append("real minute VWAP is reliable")
+        else:
+            score -= 15
+            exclusions.append("real minute VWAP is unavailable")
+        if execution:
+            if execution.state in {"EXIT_REQUIRED", "REDUCE_REQUIRED", "EXPECTATION_INVALIDATED", "STOP_LOSS_WARNING"}:
+                score -= 35
+                exclusions.append(f"execution state {execution.state}")
+            elif execution.state in {"NORMAL_HOLD", "PROFIT_EXPANSION"}:
+                score += 10
+                reasons.append(f"execution state {execution.state}")
+        score = max(0, min(100, score))
+        pool = "A" if score >= 75 and not exclusions else "B" if score >= 55 else "C" if score >= 35 else "D"
+        outputs.append(CandidateOut(
+            code=code,
+            name=name,
+            pool=pool,
+            score=score,
+            expectation_result=expectation_result,
+            volume_price_state=volume_state,
+            execution_state=execution.state if execution else "",
+            data_quality=data_quality,
+            reasons=reasons,
+            exclusions=exclusions,
+            updated_at=max([value for value in (expectation.created_at if expectation else None, volume.captured_at if volume else None, execution.updated_at if execution else None) if value is not None], default=None),
+        ))
+    return sorted(outputs, key=lambda item: (-item.score, item.code))
 
 
 @router.get("/expectation-rules", response_model=list[ExpectationRuleOut])

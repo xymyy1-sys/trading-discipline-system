@@ -23,6 +23,8 @@ Deferred by request:
 - Added editable expectation threshold rules scoped by script type, stage, and base expectation, with an editor in the stock decision workspace.
 - Added active-alert and acknowledge APIs with latest-per-holding deduplication, expiry filtering, and execution-feedback status.
 - Today Decision now shows unacknowledged operation recommendations and records explicit user acknowledgement.
+- Added `/api/candidates` with evidence-based A/B/C/D scoring from expectation, reliable minute VWAP, execution state, and data quality.
+- Stock Selection workspace now includes a candidate-pool panel with positive evidence and explicit exclusion reasons.
 
 - Background intraday collector with status and manual run APIs.
 - Intraday collection run records.

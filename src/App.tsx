@@ -37,6 +37,7 @@ const ConcentratedAttack = lazy(() => import('./components/ConcentratedAttack'))
 const SellPlan = lazy(() => import('./components/SellPlan'))
 const MonthlyReview = lazy(() => import('./components/MonthlyReview'))
 const ReviewCalibration = lazy(() => import('./components/ReviewCalibration'))
+const CandidatePool = lazy(() => import('./components/CandidatePool'))
 
 const navItems = [
   ['今日决策', Activity, '/今日决策'],
@@ -256,6 +257,7 @@ function StockSelectionWorkspace() {
       allowed={['主线前排', '资金确认', '量价健康', '预期差不为负']}
       forbidden={['后排跟风', '数据质量不合格', '高位巨量滞涨', '板块资金持续转弱']}
       modules={[
+        { key: 'candidates', label: '候选池分层', description: 'A/B/C/D执行、等待、观察和排除池', Component: CandidatePool },
         { key: 'radar', label: '题材雷达', description: '主线强度、共振方向、核心股', Component: Dashboard },
         { key: 'flow', label: '板块资金', description: '主力资金、热点题材、暗盘资金', Component: FlowDesk },
         { key: 'ladder', label: '涨停天梯', description: '连板高度、涨停质量、题材聚类', Component: LimitUpLadder },

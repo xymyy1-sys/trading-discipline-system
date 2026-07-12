@@ -5146,3 +5146,9 @@ h3 {
 .expectation-rule-card input { width: 100%; padding: 7px; border: 1px solid var(--line); border-radius: 5px; background: var(--panel); color: var(--ink); }
 .expectation-rule-card button { grid-column: 1 / -1; padding: 8px; border: 0; border-radius: 6px; background: var(--accent); color: white; }
 .alert-ack-button { margin-left: auto; padding: 6px 9px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel); color: var(--ink); }
+.candidate-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 12px; }
+.candidate-card { padding: 14px; border: 1px solid var(--line); border-left-width: 4px; border-radius: 9px; background: var(--panel); }
+.candidate-card.pool-A { border-left-color: var(--up); }.candidate-card.pool-B { border-left-color: var(--info); }.candidate-card.pool-C { border-left-color: var(--warn); }.candidate-card.pool-D { border-left-color: var(--down); }
+.candidate-head { display: flex; justify-content: space-between; gap: 10px; }.candidate-head b { font-size: 20px; }
+.candidate-card small { color: var(--ink-muted); }.candidate-card p { margin: 7px 0 0; font-size: 12px; }
+.candidate-positive { color: var(--up); }.candidate-negative { color: var(--down); }

@@ -243,3 +243,23 @@ def test_active_alert_can_be_acknowledged(client, db_session):
     assert acknowledged.status_code == 200
     assert acknowledged.json()["acknowledged_at"] is not None
     assert client.get("/api/alerts/active").json() == []
+
+
+def test_candidate_pool_excludes_invalid_execution(client, db_session):
+    from datetime import datetime
+    from app.models.trading import ExpectationSnapshot, Holding, PositionExecutionState, VolumePriceSnapshot
+
+    holding = Holding(code="600777", name="candidate", quantity=1000, cost_price=10, current_price=9, total_asset=100000)
+    db_session.add(holding)
+    db_session.flush()
+    db_session.add(ExpectationSnapshot(trade_date="2026-07-12", code="600777", name="candidate", stage="intraday", base_expectation="STRONG", expectation_result="INVALID"))
+    db_session.add(VolumePriceSnapshot(trade_date="2026-07-12", code="600777", name="candidate", stage="intraday", captured_at=datetime.now(), vwap_reliable=True, data_quality="realtime", pattern="VWAP_BREAKDOWN"))
+    db_session.add(PositionExecutionState(holding_id=holding.id, code="600777", name="candidate", trade_date="2026-07-12", state="EXIT_REQUIRED"))
+    db_session.commit()
+
+    response = client.get("/api/candidates")
+    assert response.status_code == 200
+    candidate = response.json()[0]
+    assert candidate["pool"] == "D"
+    assert candidate["score"] < 35
+    assert candidate["exclusions"]

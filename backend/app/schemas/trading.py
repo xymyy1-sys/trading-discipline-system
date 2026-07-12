@@ -440,6 +440,20 @@ class StockDecisionCardOut(BaseModel):
     data_quality: str = "manual"
 
 
+class CandidateOut(BaseModel):
+    code: str
+    name: str = ""
+    pool: str
+    score: int
+    expectation_result: str = "UNKNOWN"
+    volume_price_state: str = "UNKNOWN"
+    execution_state: str = ""
+    data_quality: str = "missing"
+    reasons: list[str] = Field(default_factory=list)
+    exclusions: list[str] = Field(default_factory=list)
+    updated_at: datetime | None = None
+
+
 class StopLevelsOut(BaseModel):
     holding_id: int
     code: str
