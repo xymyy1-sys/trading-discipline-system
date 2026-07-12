@@ -11,9 +11,10 @@ export default function BuyCheck() {
     code: '', name: '', market_grade: 'B', position_ratio: '20',
     target_role: '龙二', is_mainline: 'true', has_sector_response: 'true',
     has_volume_price_confirm: 'true', buy_point: '', stop_loss_price: '',
-    current_price: '', mode: '标准短线模式',
+    current_price: '', mode: '标准短线模式', net_asset: '', risk_ratio: '1', script_limit: '20', market_limit: '50', sector_limit: '40', liquidity_limit: '30',
   })
   const [result, setResult] = useState<CheckResult | null>(null)
+  const [riskResult, setRiskResult] = useState<{ risk_budget: number; loss_per_share: number; final_position_value: number; final_position_ratio: number; quantity: number; binding_limit: string; warnings: string[] } | null>(null)
 
   const check = () => {
     fetch(`${API_BASE}/api/checks/pre-trade`, {
@@ -37,6 +38,18 @@ export default function BuyCheck() {
       .then(r => r.json())
       .then(setResult)
       .catch(() => {})
+    if (Number(form.net_asset) > 0 && Number(form.current_price) > 0 && Number(form.stop_loss_price) > 0) {
+      fetch(`${API_BASE}/api/checks/risk-position`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          net_asset: Number(form.net_asset), risk_ratio: Number(form.risk_ratio) / 100,
+          entry_price: Number(form.current_price), stop_price: Number(form.stop_loss_price), lot_size: 100,
+          script_limit: Number(form.script_limit) / 100, market_limit: Number(form.market_limit) / 100,
+          single_stock_limit: Number(form.position_ratio) / 100, sector_limit: Number(form.sector_limit) / 100,
+          liquidity_limit: Number(form.liquidity_limit) / 100,
+        }),
+      }).then(async r => { if (!r.ok) throw new Error(await r.text()); return r.json() }).then(setRiskResult).catch(() => setRiskResult(null))
+    }
   }
 
   const DecisionIcon = result?.decision?.includes('可买') ? CheckCircle2
@@ -108,6 +121,12 @@ export default function BuyCheck() {
             <input placeholder="买点类型（突破/回踩/承接）" value={form.buy_point} onChange={e => setForm(p => ({ ...p, buy_point: e.target.value }))} />
             <input placeholder="当前价" type="number" step="0.01" value={form.current_price} onChange={e => setForm(p => ({ ...p, current_price: e.target.value }))} />
             <input placeholder="止损价" type="number" step="0.01" value={form.stop_loss_price} onChange={e => setForm(p => ({ ...p, stop_loss_price: e.target.value }))} />
+            <input placeholder="账户净资产" type="number" value={form.net_asset} onChange={e => setForm(p => ({ ...p, net_asset: e.target.value }))} />
+            <label>单笔风险%<input type="number" step="0.1" value={form.risk_ratio} onChange={e => setForm(p => ({ ...p, risk_ratio: e.target.value }))} /></label>
+            <label>剧本上限%<input type="number" value={form.script_limit} onChange={e => setForm(p => ({ ...p, script_limit: e.target.value }))} /></label>
+            <label>市场上限%<input type="number" value={form.market_limit} onChange={e => setForm(p => ({ ...p, market_limit: e.target.value }))} /></label>
+            <label>板块上限%<input type="number" value={form.sector_limit} onChange={e => setForm(p => ({ ...p, sector_limit: e.target.value }))} /></label>
+            <label>流动性上限%<input type="number" value={form.liquidity_limit} onChange={e => setForm(p => ({ ...p, liquidity_limit: e.target.value }))} /></label>
           </div>
           <button className="check-btn" onClick={check}>
             <ArrowRight size={16} /> 执行检查
@@ -136,6 +155,7 @@ export default function BuyCheck() {
             )}
           </div>
         )}
+        {riskResult && <div className="panel risk-position-result"><h3>风险预算仓位</h3><div className="decision-kpi-grid"><div><b>风险预算</b><span>{riskResult.risk_budget.toFixed(2)}</span></div><div><b>每股风险</b><span>{riskResult.loss_per_share.toFixed(2)}</span></div><div><b>最终数量</b><span>{riskResult.quantity}股</span></div><div><b>仓位金额</b><span>{riskResult.final_position_value.toFixed(2)}</span></div><div><b>仓位比例</b><span>{(riskResult.final_position_ratio * 100).toFixed(1)}%</span></div><div><b>约束来源</b><span>{riskResult.binding_limit}</span></div></div>{riskResult.warnings.map(item => <p className="refresh-note" key={item}>{item}</p>)}</div>}
       </div>
     </div>
   )

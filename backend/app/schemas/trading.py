@@ -780,6 +780,31 @@ class PreTradeCheckOut(BaseModel):
     required_actions: list[str]
 
 
+class RiskPositionIn(BaseModel):
+    net_asset: float
+    risk_ratio: float = 0.01
+    entry_price: float
+    stop_price: float
+    lot_size: int = 100
+    script_limit: float = 1
+    market_limit: float = 1
+    single_stock_limit: float = 1
+    sector_limit: float = 1
+    liquidity_limit: float = 1
+
+
+class RiskPositionOut(BaseModel):
+    risk_budget: float
+    loss_per_share: float
+    risk_based_value: float
+    final_position_value: float
+    final_position_ratio: float
+    quantity: int
+    binding_limit: str
+    caps: dict[str, float] = Field(default_factory=dict)
+    warnings: list[str] = Field(default_factory=list)
+
+
 class ExitCardCreate(BaseModel):
     code: str
     name: str

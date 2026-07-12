@@ -322,3 +322,16 @@ def test_data_quality_health_aggregates_provider_history(client, db_session):
     assert provider["sample_count"] == 2
     assert provider["degraded_count"] == 1
     assert provider["average_latency_ms"] == 200
+
+
+def test_risk_position_uses_tightest_cap_and_board_lot(client):
+    response = client.post("/api/checks/risk-position", json={
+        "net_asset": 100000, "risk_ratio": 0.01, "entry_price": 10, "stop_price": 9,
+        "script_limit": 0.3, "market_limit": 0.5, "single_stock_limit": 0.4,
+        "sector_limit": 0.35, "liquidity_limit": 0.08, "lot_size": 100,
+    })
+    assert response.status_code == 200
+    result = response.json()
+    assert result["binding_limit"] == "liquidity_limit"
+    assert result["quantity"] == 800
+    assert result["final_position_value"] == 8000

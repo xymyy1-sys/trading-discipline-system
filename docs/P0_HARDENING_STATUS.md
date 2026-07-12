@@ -33,6 +33,7 @@ Historical replay is implemented against persisted evidence. A complete 600584 a
 - Added downloadable acceptance reports covering authentication, SSE, collector status, migration version, T+1 validation, and optional single-stock replay evidence.
 - Persisted data-capture quality snapshots with source, latency, stale/degraded/estimated/complete flags, error details, normalized values, and raw payload hashes.
 - Added provider-health history aggregation at `/api/data-quality/health`.
+- Added risk-budget position sizing with entry/structural-stop distance and minimum caps across script, market, single-stock, sector, and liquidity constraints; Buy Check displays the binding limit and board-lot quantity.
 
 - Background intraday collector with status and manual run APIs.
 - Intraday collection run records.

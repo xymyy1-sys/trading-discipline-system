@@ -1,4 +1,41 @@
-from app.schemas.trading import MarketGradeOut, PreTradeCheckIn, PreTradeCheckOut
+from app.schemas.trading import MarketGradeOut, PreTradeCheckIn, PreTradeCheckOut, RiskPositionIn, RiskPositionOut
+
+
+def calculate_risk_position(payload: RiskPositionIn) -> RiskPositionOut:
+    if payload.net_asset <= 0 or payload.entry_price <= 0:
+        raise ValueError("net asset and entry price must be positive")
+    if payload.stop_price <= 0 or payload.stop_price >= payload.entry_price:
+        raise ValueError("stop price must be positive and below entry price")
+    if not 0 < payload.risk_ratio <= 0.05:
+        raise ValueError("risk ratio must be between 0 and 5%")
+    loss_per_share = payload.entry_price - payload.stop_price
+    risk_budget = payload.net_asset * payload.risk_ratio
+    risk_quantity = int(risk_budget / loss_per_share)
+    risk_based_value = risk_quantity * payload.entry_price
+    caps = {
+        "risk_budget": risk_based_value,
+        "script_limit": payload.net_asset * payload.script_limit,
+        "market_limit": payload.net_asset * payload.market_limit,
+        "single_stock_limit": payload.net_asset * payload.single_stock_limit,
+        "sector_limit": payload.net_asset * payload.sector_limit,
+        "liquidity_limit": payload.net_asset * payload.liquidity_limit,
+    }
+    binding_limit, final_value = min(caps.items(), key=lambda item: item[1])
+    raw_quantity = int(final_value / payload.entry_price)
+    lot_size = max(1, payload.lot_size)
+    quantity = raw_quantity // lot_size * lot_size
+    final_value = round(quantity * payload.entry_price, 2)
+    warnings = []
+    if quantity == 0:
+        warnings.append("calculated quantity is below one trading lot")
+    if loss_per_share / payload.entry_price > 0.1:
+        warnings.append("stop distance exceeds 10%; verify the trade structure")
+    return RiskPositionOut(
+        risk_budget=round(risk_budget, 2), loss_per_share=round(loss_per_share, 4),
+        risk_based_value=round(risk_based_value, 2), final_position_value=final_value,
+        final_position_ratio=round(final_value / payload.net_asset, 4), quantity=quantity,
+        binding_limit=binding_limit, caps={key: round(value, 2) for key, value in caps.items()}, warnings=warnings,
+    )
 
 
 ROLE_LIMITS = {
