@@ -21,8 +21,10 @@ from app.api.helpers.seesaw import _market_seesaw_monitor
 from app.models.trading import (
     ActionRecommendation,
     ExpectationSnapshot,
+    ExitCard,
     Holding,
     IntradayEvidenceEvent,
+    NextDayPlan,
     PositionExecutionState,
     ProfitProtectionSnapshot,
     TradeLog,
@@ -181,10 +183,10 @@ def _script_hard_stop_ratio(position_type: str) -> float:
     return 0.96
 
 
-def _script_stop_levels(holding: Holding, current_stop: float) -> tuple[float, float, list[str]]:
+def _script_stop_levels(holding: Holding, current_stop: float, current_hard_stop: float) -> tuple[float, float, list[str]]:
     text = f"{holding.position_type or ''} {holding.next_discipline or ''}"
     evidence: list[str] = []
-    hard_stop = round(holding.cost_price * _script_hard_stop_ratio(holding.position_type), 2) if holding.cost_price else 0.0
+    hard_stop = current_hard_stop or (round(holding.cost_price * _script_hard_stop_ratio(holding.position_type), 2) if holding.cost_price else 0.0)
     structure_stop = current_stop
     price_patterns = [
         (r"(?:结构止损|结构位|失败位|防守位|跌破|破位|止损)\D{0,8}(\d+(?:\.\d+)?)", "structure"),
@@ -212,6 +214,64 @@ def _script_stop_levels(holding: Holding, current_stop: float) -> tuple[float, f
         structure_stop = max(structure_stop, pct_stop) if structure_stop else pct_stop
 
     return structure_stop, hard_stop, evidence
+
+
+def _structured_stop_levels(db: Session, holding: Holding, current_stop: float, hard_stop: float) -> tuple[float, float, list[str]]:
+    normalized = _normalize_code(holding.code)
+    candidates = {holding.code, normalized, normalized.lstrip("0")}
+    evidence: list[str] = []
+    structure_stop = current_stop
+    hard_stop_price = hard_stop
+    plan = (
+        db.query(NextDayPlan)
+        .filter(NextDayPlan.code.in_(list(candidates)))
+        .order_by(NextDayPlan.plan_date.desc(), NextDayPlan.updated_at.desc(), NextDayPlan.id.desc())
+        .first()
+    )
+    if plan:
+        if float(plan.final_risk_price or 0) > 0:
+            hard_stop_price = round(float(plan.final_risk_price), 2)
+            evidence.append(f"按次日计划最终风险价设定硬止损 {hard_stop_price:.2f}。")
+        plan_candidates = [
+            float(plan.reduce_price or 0),
+            float(plan.trim_price or 0),
+            float(plan.confirm_price or 0),
+            float(plan.stop_loss_4pct or 0),
+        ]
+        plan_stop = max([value for value in plan_candidates if value > 0], default=0.0)
+        if plan_stop > 0:
+            structure_stop = round(plan_stop, 2)
+            evidence.append(f"按次日计划结构位设定结构止损 {structure_stop:.2f}。")
+    exit_card = (
+        db.query(ExitCard)
+        .filter(ExitCard.code.in_(list(candidates)))
+        .order_by(ExitCard.created_at.desc(), ExitCard.id.desc())
+        .first()
+    )
+    if exit_card:
+        if float(exit_card.failure_price or 0) > 0:
+            hard_stop_price = round(float(exit_card.failure_price), 2)
+            evidence.append(f"按卖出卡失败价设定硬止损 {hard_stop_price:.2f}。")
+        card_candidates = [float(exit_card.trim_price or 0), float(exit_card.confirm_price or 0)]
+        card_stop = max([value for value in card_candidates if value > 0], default=0.0)
+        if card_stop > 0 and (not structure_stop or card_stop > structure_stop):
+            structure_stop = round(card_stop, 2)
+            evidence.append(f"按卖出卡减仓/确认价设定结构止损 {structure_stop:.2f}。")
+    return structure_stop, hard_stop_price, evidence
+
+
+def _confirmation_deadline(holding: Holding) -> time:
+    text = f"{holding.position_type or ''} {holding.next_discipline or ''}"
+    match = re.search(r"(\d{1,2})[:：](\d{2})\s*(?:确认|截止|不修复|未修复)", text)
+    if match:
+        hour = min(14, max(9, int(match.group(1))))
+        minute = min(59, max(0, int(match.group(2))))
+        return time(hour, minute)
+    if "打板" in text or "冲板" in text or "连板" in text:
+        return time(9, 45)
+    if "趋势" in text or "容量" in text:
+        return time(10, 30)
+    return time(10, 0)
 
 
 def _action_from_score(score: int, hard_exit: bool, has_profit: bool) -> tuple[str, str, float, str]:
@@ -382,6 +442,7 @@ def _time_stop_reasons(
     now: datetime,
 ) -> list[str]:
     reasons: list[str] = []
+    deadline = _confirmation_deadline(holding)
     if vwap_reliable and vwap > 0 and current < vwap:
         rows = quote.get("minute_bars") or quote.get("minutes") or []
         below_rows = []
@@ -418,8 +479,8 @@ def _time_stop_reasons(
     if limit_up_price and high >= limit_up_price * 0.995 and current < limit_up_price * 0.985:
         reasons.append(f"盘中冲击涨停价 {limit_up_price:.2f} 后未回封，当前 {current:.2f} 已明显脱离封板区。")
 
-    if now.time() >= time(10, 0) and expectation_result in {"WEAKER", "SLIGHTLY_WEAKER"} and volume_state not in {"REPAIR_CONFIRMED", "VWAP_STRONG"}:
-        reasons.append("10:00确认截止后预期仍偏弱且量价未修复，触发时间止损确认。")
+    if now.time() >= deadline and expectation_result in {"WEAKER", "SLIGHTLY_WEAKER"} and volume_state not in {"REPAIR_CONFIRMED", "VWAP_STRONG"}:
+        reasons.append(f"{deadline.strftime('%H:%M')}确认截止后预期仍偏弱且量价未修复，触发时间止损确认。")
     return reasons
 
 
@@ -462,6 +523,21 @@ def _recovery_events(db: Session, holding: Holding, volume_state: str, current: 
     }]
 
 
+def _confirmation_policy(event_type: str) -> tuple[int, int]:
+    policy = {
+        "VWAP_BROKEN": (5, 2),
+        "VOLUME_PRICE_WEAKENING": (5, 2),
+        "HIGH_DRAWDOWN": (10, 2),
+        "EXPECTATION_VOLUME_BREAKDOWN": (3, 1),
+        "TIME_STOP_TRIGGERED": (3, 1),
+        "SECTOR_MIGRATION_CONFIRMED": (10, 2),
+        "SECTOR_FLOW_PEAK_REVERSAL": (10, 2),
+        "RISK_RECOVERY_CONFIRMED": (5, 1),
+        "PROFIT_DRAWDOWN_WARNING": (15, 2),
+    }
+    return policy.get(event_type, (5, 2))
+
+
 def _dedupe_events(db: Session, events: list[dict[str, Any]], cooldown_minutes: int = 5) -> list[dict[str, Any]]:
     persisted: list[dict[str, Any]] = []
     now = datetime.now()
@@ -471,12 +547,15 @@ def _dedupe_events(db: Session, events: list[dict[str, Any]], cooldown_minutes: 
         if key in seen:
             continue
         seen.add(key)
+        event_type = str(event.get("event_type") or "")
+        event_cooldown, required_occurrences = _confirmation_policy(event_type)
+        window_minutes = event_cooldown or cooldown_minutes
         recent = (
             db.query(IntradayEvidenceEvent)
             .filter(
                 IntradayEvidenceEvent.target_code == key[0],
                 IntradayEvidenceEvent.event_type == key[1],
-                IntradayEvidenceEvent.captured_at >= now - timedelta(minutes=cooldown_minutes),
+                IntradayEvidenceEvent.captured_at >= now - timedelta(minutes=window_minutes),
             )
             .order_by(IntradayEvidenceEvent.captured_at.desc(), IntradayEvidenceEvent.id.desc())
             .first()
@@ -484,12 +563,12 @@ def _dedupe_events(db: Session, events: list[dict[str, Any]], cooldown_minutes: 
         if recent is not None:
             recent.last_seen_at = now
             recent.occurrence_count = int(recent.occurrence_count or 1) + 1
-            recent.confirmed = recent.occurrence_count >= 2
+            recent.confirmed = recent.occurrence_count >= required_occurrences
             continue
         event["first_seen_at"] = event.get("captured_at")
         event["last_seen_at"] = event.get("captured_at")
         event["occurrence_count"] = 1
-        event["confirmed"] = False
+        event["confirmed"] = required_occurrences <= 1
         persisted.append(event)
     return persisted
 
@@ -536,13 +615,15 @@ def build_position_execution_state(
     hard_stop_price = round(holding.cost_price * _script_hard_stop_ratio(holding.position_type), 2) if holding.cost_price else 0.0
     support_candidates = [value for value in [vwap, open_price, low, holding.cost_price * 0.97 if holding.cost_price else 0] if value and value > 0]
     structure_stop_price = round(max(min(support_candidates), hard_stop_price), 2) if support_candidates else hard_stop_price
-    structure_stop_price, hard_stop_price, script_stop_evidence = _script_stop_levels(holding, structure_stop_price)
+    structure_stop_price, hard_stop_price, structured_stop_evidence = _structured_stop_levels(db, holding, structure_stop_price, hard_stop_price)
+    structure_stop_price, hard_stop_price, script_stop_evidence = _script_stop_levels(holding, structure_stop_price, hard_stop_price)
     trailing_stop_price = round(maximum_price * 0.95, 2) if maximum_price and protection_level in {"LEVEL_2", "LEVEL_3", "LEVEL_4"} else 0.0
 
     evidence: list[str] = [
         f"当前盈亏 {current_profit_pct:+.2f}%，最大浮盈 {max_profit_pct:+.2f}%，利润回撤 {profit_drawdown_pct:.2f} 个百分点。",
         f"结构止损 {structure_stop_price:.2f}，硬止损 {hard_stop_price:.2f}，利润保护线 {profit_protection_price:.2f}。",
     ]
+    evidence.extend(structured_stop_evidence)
     evidence.extend(script_stop_evidence)
     counter_evidence: list[str] = []
     invalid_conditions: list[str] = [

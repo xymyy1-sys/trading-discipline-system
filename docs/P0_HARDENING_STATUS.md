@@ -19,20 +19,21 @@ Deferred by request:
 - Profit protection and stop-level APIs.
 - Intraday review API at `/api/stocks/{code}/intraday-review`.
 - Script-aware stop parsing from holding discipline text.
-- Time-stop base rules: sustained true-VWAP break, failed limit-up reseal, and 10:00 confirmation deadline.
+- Structured stop levels from next-day plans and sell cards, before text parsing fallback.
+- Time-stop base rules: sustained true-VWAP break, failed limit-up reseal, and script-aware confirmation deadline.
+- Per-event confirmation policy for immediate, repeated, and cooldown-based risk events.
 - Cross-sector migration event: `SECTOR_MIGRATION_CONFIRMED`.
 - Risk recovery event: `RISK_RECOVERY_CONFIRMED`.
-- Minute-bar volume metrics: active buy/sell amount, attack efficiency, and volume acceleration.
+- Minute-bar volume metrics: active buy/sell amount, attack efficiency, volume acceleration, attack amount, pullback amount, and pullback sell ratio evidence.
 - Frontend real-time risk event panel in the Today Decision workspace.
 
 ## Still Open
 
 - Enable CI in GitHub after the PAT gets `workflow` scope. The workflow file exists locally at `.github/workflows/ci.yml` but cannot be pushed by the current token.
 - Make minute-bar fetching production-hardened across trading days, non-trading days, ETFs, and temporary Eastmoney outages.
-- Convert time-stop thresholds into configurable rules by script type and stage.
-- Prefer structured stop levels from next-day plans, limit-up plans, and sell cards before text parsing.
-- Add per-event confirmation windows by event type.
-- Split minute-bar volume into attack segment and pullback segment for stricter pullback-volume evidence.
+- Expand time-stop thresholds into editable user-facing rule templates by script type and stage.
+- Add explicit UI display of which stop source was used: next-day plan, sell card, text script, or fallback candidate.
+- Persist attack/pullback segment metrics into dedicated columns if later analytics need filtering and aggregation.
 - Strengthen cross-sector migration scoring with original theme outflow, new theme inflow, stock weakening, and leader-switch evidence.
 - Add a front-end SSE connection health indicator and recovery notification UX beyond the current event list.
 - Add formal acceptance report exports for SSE demo, full single-stock intraday timeline, and T+1 validation.

@@ -101,8 +101,12 @@ def _minute_flow_metrics(quote: dict[str, Any]) -> tuple[float, float, float, fl
     highs = [_safe_float(row.get("high") or row.get("price") or row.get("close")) for row in rows]
     latest_price = _safe_float(rows[-1].get("price") or rows[-1].get("close"))
     peak_price = max([value for value in highs if value > 0], default=0.0)
+    peak_index = max(range(len(highs)), key=lambda idx: highs[idx]) if any(highs) else 0
+    attack_amount = 0.0
+    pullback_amount = 0.0
+    pullback_sell_amount = 0.0
 
-    for row in rows:
+    for index, row in enumerate(rows):
         amount = _minute_amount(row)
         volume = _safe_float(row.get("volume"))
         volumes.append(volume)
@@ -113,6 +117,11 @@ def _minute_flow_metrics(quote: dict[str, Any]) -> tuple[float, float, float, fl
         if explicit_buy > 0 or explicit_sell > 0:
             active_buy += explicit_buy
             active_sell += explicit_sell
+            if index <= peak_index:
+                attack_amount += amount or explicit_buy + explicit_sell
+            else:
+                pullback_amount += amount or explicit_buy + explicit_sell
+                pullback_sell_amount += explicit_sell
         elif amount > 0 and price > 0:
             if price >= max(previous_price, open_price):
                 active_buy += amount
@@ -120,6 +129,12 @@ def _minute_flow_metrics(quote: dict[str, Any]) -> tuple[float, float, float, fl
                 positive_price_gain += max(0.0, price - previous_price)
             else:
                 active_sell += amount
+            if index <= peak_index:
+                attack_amount += amount
+            else:
+                pullback_amount += amount
+                if price < previous_price or price < open_price:
+                    pullback_sell_amount += amount
         if price > 0:
             previous_price = price
 
@@ -135,6 +150,10 @@ def _minute_flow_metrics(quote: dict[str, Any]) -> tuple[float, float, float, fl
         evidence.append(f"分钟主动买卖额：主动买 {active_buy:.2f}，主动卖 {active_sell:.2f}。")
     if attack_efficiency:
         evidence.append(f"上攻效率 {attack_efficiency:.2f}，量能加速度 {volume_acceleration:+.2f}%。")
+    if attack_amount > 0 or pullback_amount > 0:
+        pullback_ratio = (pullback_amount / attack_amount * 100) if attack_amount > 0 else 0.0
+        sell_ratio = (pullback_sell_amount / pullback_amount * 100) if pullback_amount > 0 else 0.0
+        evidence.append(f"上攻段成交额 {attack_amount:.2f}，回落段成交额 {pullback_amount:.2f}（{pullback_ratio:.1f}%），回落段卖出占比 {sell_ratio:.1f}%。")
     if pullback_pct >= 2 and active_sell > active_buy:
         evidence.append(f"高点回落 {pullback_pct:.2f}% 且回落段卖出额占优，属于回落量能放大。")
 

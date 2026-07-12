@@ -166,6 +166,7 @@ def test_volume_price_snapshot_calculates_minute_flow_metrics(db_session):
     assert snapshot.active_buy_amount > snapshot.active_sell_amount
     assert snapshot.volume_acceleration > 0
     assert any("分钟主动买卖额" in item for item in snapshot.evidence)
+    assert any("上攻段成交额" in item for item in snapshot.evidence)
 
 
 def test_decision_card_includes_volume_price(client, monkeypatch):

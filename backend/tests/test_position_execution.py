@@ -1,8 +1,8 @@
 from types import SimpleNamespace
 from datetime import datetime, timedelta
 
-from app.api.helpers.execution import build_position_execution_state
-from app.models.trading import ExpectationSnapshot, Holding, IntradayEvidenceEvent, TradeLog, VolumePriceSnapshot
+from app.api.helpers.execution import _confirmation_deadline, _confirmation_policy, build_position_execution_state
+from app.models.trading import ExpectationSnapshot, ExitCard, Holding, IntradayEvidenceEvent, NextDayPlan, TradeLog, VolumePriceSnapshot
 
 
 def test_position_execution_profit_drawdown_requires_reduce(db_session):
@@ -391,6 +391,76 @@ def test_script_stop_levels_override_candidate_stop(db_session):
     assert state.structure_stop_price == 10.2
     assert state.hard_stop_price == 9.8
     assert any("交易剧本解析结构止损" in item for item in state.evidence)
+
+
+def test_structured_plan_and_exit_card_stop_levels_take_priority(db_session):
+    holding = Holding(
+        code="600019",
+        name="结构化止损",
+        quantity=1000,
+        cost_price=10,
+        current_price=10.5,
+        total_asset=100000,
+        position_type="盈利趋势仓",
+        next_discipline="按计划执行",
+    )
+    db_session.add(holding)
+    db_session.flush()
+    db_session.add(NextDayPlan(
+        plan_date="2026-07-13",
+        plan_type="holding",
+        holding_id=holding.id,
+        code="600019",
+        name="结构化止损",
+        confirm_price=10.35,
+        trim_price=10.45,
+        reduce_price=10.4,
+        final_risk_price=9.9,
+        stop_loss_4pct=9.6,
+    ))
+    db_session.add(ExitCard(
+        code="600019",
+        name="结构化止损",
+        max_position_ratio=0.1,
+        confirm_price=10.5,
+        trim_price=10.55,
+        failure_price=9.85,
+        outperform_condition="站稳确认价",
+        underperform_action="跌破失败价退出",
+    ))
+    db_session.commit()
+    db_session.refresh(holding)
+
+    state = build_position_execution_state(
+        db_session,
+        holding,
+        quote={"price": 10.5, "high": 10.8, "low": 10.3, "open": 10.4, "note": "实时行情"},
+    )
+
+    assert state.structure_stop_price == 10.55
+    assert state.hard_stop_price == 9.85
+    assert any("次日计划结构位" in item for item in state.evidence)
+    assert any("卖出卡失败价" in item for item in state.evidence)
+
+
+def test_event_confirmation_policy_uses_event_specific_windows():
+    assert _confirmation_policy("TIME_STOP_TRIGGERED") == (3, 1)
+    assert _confirmation_policy("SECTOR_MIGRATION_CONFIRMED") == (10, 2)
+
+
+def test_confirmation_deadline_can_be_configured_by_script():
+    holding = Holding(
+        code="600020",
+        name="确认截止",
+        quantity=1000,
+        cost_price=10,
+        current_price=10,
+        total_asset=100000,
+        position_type="盈利趋势仓",
+        next_discipline="10:30确认仍未修复则退出",
+    )
+
+    assert _confirmation_deadline(holding).strftime("%H:%M") == "10:30"
 
 
 def test_time_stop_triggers_on_sustained_reliable_vwap_break(db_session):
