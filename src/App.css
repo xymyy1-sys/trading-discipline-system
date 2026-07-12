@@ -941,6 +941,20 @@ h4 {
   line-height: 1.45;
 }
 
+.realtime-events {
+  border-left: 3px solid var(--danger);
+}
+
+.stream-state {
+  color: var(--ink-muted);
+  font-size: 12px;
+}
+
+.realtime-events article span {
+  color: var(--danger);
+  font-weight: 700;
+}
+
 .workspace-tabs {
   border: 1px solid var(--border-dim);
   background: rgba(255, 255, 255, 0.02);

@@ -105,16 +105,20 @@ def _latest_a_share_quotes(codes: list[str]) -> dict[str, dict[str, Any]]:
                 "note": "AkShare/东方财富实时行情",
             }
         if quotes:
+            _attach_minute_bars(quotes)
             return quotes
     except Exception:
         pass
     try:
         quotes = _latest_a_share_quotes_sina(codes)
         if quotes:
+            _attach_minute_bars(quotes)
             return quotes
     except Exception:
         pass
-    return _latest_a_share_quotes_eastmoney(codes)
+    quotes = _latest_a_share_quotes_eastmoney(codes)
+    _attach_minute_bars(quotes)
+    return quotes
 
 def _latest_a_share_quotes_sina(codes: list[str]) -> dict[str, dict[str, Any]]:
     symbols = []
@@ -211,6 +215,77 @@ def _eastmoney_secid(code: str) -> str:
     normalized = _quote_code_candidates(code)[0] if _quote_code_candidates(code) else _normalize_code(code)
     market = "1" if normalized.startswith(("6", "9")) else "0"
     return f"{market}.{normalized}"
+
+
+def _attach_minute_bars(quotes: dict[str, dict[str, Any]]) -> None:
+    for code, quote in quotes.items():
+        try:
+            bars = _eastmoney_minute_bars(code)
+        except Exception as exc:
+            quote["minute_fetch_error"] = str(exc)
+            continue
+        if not bars:
+            continue
+        quote["minute_bars"] = bars
+        quote["minute_bar_source"] = "东方财富1分钟分时K线"
+        quote["note"] = f"{quote.get('note') or '实时行情'} + 东方财富1分钟成交"
+
+
+def _eastmoney_minute_bars(code: str) -> list[dict[str, Any]]:
+    normalized = _quote_code_candidates(code)[0] if _quote_code_candidates(code) else _normalize_code(code)
+    secid = _eastmoney_secid(normalized)
+    params = {
+        "secid": secid,
+        "klt": "1",
+        "fqt": "1",
+        "lmt": "260",
+        "end": "20500101",
+        "iscca": "1",
+        "fields1": "f1,f2,f3,f4,f5,f6",
+        "fields2": "f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61",
+    }
+    headers = {
+        "User-Agent": "Mozilla/5.0",
+        "Referer": "https://quote.eastmoney.com/",
+        "Accept": "application/json,text/plain,*/*",
+    }
+    rows: list[str] = []
+    last_exc: Exception | None = None
+    for host in ("https://push2his.eastmoney.com", "https://push2delay.eastmoney.com"):
+        try:
+            resp = requests.get(f"{host}/api/qt/stock/kline/get", params=params, headers=headers, timeout=6)
+            resp.raise_for_status()
+            data = resp.json().get("data") or {}
+            rows = data.get("klines") or []
+            if rows:
+                break
+        except Exception as exc:
+            last_exc = exc
+    if not rows:
+        if last_exc:
+            raise last_exc
+        return []
+    today = datetime.now().date().isoformat()
+    bars: list[dict[str, Any]] = []
+    for row in rows:
+        parts = str(row).split(",")
+        if len(parts) < 7:
+            continue
+        ts = parts[0]
+        if not ts.startswith(today):
+            continue
+        bars.append({
+            "time": ts[-5:],
+            "open": _safe_float(parts[1]),
+            "price": _safe_float(parts[2]),
+            "close": _safe_float(parts[2]),
+            "high": _safe_float(parts[3]),
+            "low": _safe_float(parts[4]),
+            "volume": _safe_float(parts[5]) * 100,
+            "amount": _safe_float(parts[6]),
+            "turnover": _safe_float(parts[10]) if len(parts) > 10 else 0.0,
+        })
+    return bars
 
 def _latest_quote_for_holding(holding: Holding) -> dict[str, Any]:
     try:

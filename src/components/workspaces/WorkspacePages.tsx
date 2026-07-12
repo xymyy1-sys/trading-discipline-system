@@ -10,7 +10,7 @@ import {
 } from 'lucide-react'
 import { API_BASE } from '../../api'
 
-import type { HoldingOut, MarketSeesaw, PositionExecutionState, ThemeRadar } from '../../types'
+import type { HoldingOut, IntradayEvidenceEvent, MarketSeesaw, PositionExecutionState, ThemeRadar } from '../../types'
 
 type WorkspaceModule = {
   key: string
@@ -90,6 +90,8 @@ export function WorkspacePage({
 export function TodayDecisionSummary() {
   const [holdings, setHoldings] = useState<HoldingOut[]>([])
   const [executionStates, setExecutionStates] = useState<PositionExecutionState[]>([])
+  const [realtimeEvents, setRealtimeEvents] = useState<IntradayEvidenceEvent[]>([])
+  const [streamState, setStreamState] = useState('连接中')
   const [seesaw, setSeesaw] = useState<MarketSeesaw | null>(null)
   const [theme, setTheme] = useState<ThemeRadar | null>(null)
   const [loading, setLoading] = useState(false)
@@ -112,6 +114,21 @@ export function TodayDecisionSummary() {
 
   useEffect(() => {
     load()
+  }, [])
+
+  useEffect(() => {
+    const source = new EventSource(`${API_BASE}/api/intraday-events/stream`)
+    source.onopen = () => setStreamState('实时推送已连接')
+    source.onerror = () => setStreamState('实时推送重连中')
+    source.addEventListener('intraday-risk', event => {
+      try {
+        const payload = JSON.parse((event as MessageEvent).data) as IntradayEvidenceEvent
+        setRealtimeEvents(prev => [payload, ...prev.filter(item => item.id !== payload.id)].slice(0, 8))
+      } catch {
+        setStreamState('实时事件解析失败')
+      }
+    })
+    return () => source.close()
   }, [])
 
   const riskStates = useMemo(
@@ -188,6 +205,24 @@ export function TodayDecisionSummary() {
           </article>
         ))}
         {!seesaw?.inflow_targets?.length && <p className="plain-text">暂无资金迁移证据。</p>}
+      </div>
+
+      <div className="panel command-list realtime-events">
+        <header>
+          <h3><AlertTriangle size={16} />实时风险事件</h3>
+          <span className="stream-state">{streamState}</span>
+        </header>
+        {realtimeEvents.length ? (
+          realtimeEvents.map(event => (
+            <article key={`${event.id}-${event.event_type}`}>
+              <b>{event.target_name || event.target_code}</b>
+              <span>{event.event_type}</span>
+              <small>{event.evidence?.[0] ?? `${event.severity} / 优先级 ${event.priority}`}</small>
+            </article>
+          ))
+        ) : (
+          <p className="plain-text">暂无新推送事件；后台采集或手动刷新触发后会实时出现。</p>
+        )}
       </div>
     </section>
   )

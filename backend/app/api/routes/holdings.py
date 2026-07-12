@@ -265,12 +265,16 @@ def trigger_intraday_collector() -> CollectionRunOut:
 
 
 @router.get("/intraday-events/stream")
-async def stream_intraday_events() -> StreamingResponse:
+async def stream_intraday_events(replay: bool = False) -> StreamingResponse:
     async def event_generator():
-        last_id = 0
+        last_id: int | None = 0 if replay else None
         while True:
             db = SessionLocal()
             try:
+                if last_id is None:
+                    latest = db.query(IntradayEvidenceEvent).order_by(IntradayEvidenceEvent.id.desc()).first()
+                    last_id = int(latest.id or 0) if latest else 0
+                    yield "event: stream-ready\ndata: {}\n\n"
                 rows = (
                     db.query(IntradayEvidenceEvent)
                     .filter(IntradayEvidenceEvent.id > last_id)
