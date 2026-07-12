@@ -1075,23 +1075,34 @@ def build_position_execution_state(
         triggered=protection_level != "NONE",
         recommended_action=action,
     )
-    recommendation = ActionRecommendation(
-        trade_date=_trade_date(),
-        holding_id=int(holding.id),
-        code=holding.code,
-        name=holding.name,
-        created_at=now,
-        level=level,
-        state=state,
-        action=action,
-        recommended_ratio=reduce_ratio,
-        trigger_events_json=_json_dumps([event["event_type"] for event in events]),
-        evidence_json=_json_dumps(evidence),
-        counter_evidence_json=_json_dumps(counter_evidence),
-        invalid_conditions_json=_json_dumps(invalid_conditions),
-        recovery_conditions_json=_json_dumps(recovery_conditions),
-        expires_at=now + timedelta(minutes=15),
+    recommendation = (
+        db.query(ActionRecommendation)
+        .filter(
+            ActionRecommendation.holding_id == int(holding.id),
+            ActionRecommendation.trade_date == _trade_date(),
+        )
+        .order_by(ActionRecommendation.id.desc())
+        .first()
     )
+    if recommendation is None:
+        recommendation = ActionRecommendation(
+            trade_date=_trade_date(), holding_id=int(holding.id), code=holding.code, name=holding.name,
+        )
+    changed = (recommendation.level, recommendation.state, recommendation.action) != (level, state, action)
+    recommendation.created_at = now
+    recommendation.level = level
+    recommendation.state = state
+    recommendation.action = action
+    recommendation.recommended_ratio = reduce_ratio
+    recommendation.trigger_events_json = _json_dumps([event["event_type"] for event in events])
+    recommendation.evidence_json = _json_dumps(evidence)
+    recommendation.counter_evidence_json = _json_dumps(counter_evidence)
+    recommendation.invalid_conditions_json = _json_dumps(invalid_conditions)
+    recommendation.recovery_conditions_json = _json_dumps(recovery_conditions)
+    recommendation.expires_at = now + timedelta(minutes=15)
+    if changed:
+        recommendation.acknowledged_at = None
+        recommendation.feedback_status = ""
     state_row = (
         db.query(PositionExecutionState)
         .filter(PositionExecutionState.holding_id == int(holding.id), PositionExecutionState.trade_date == _trade_date())

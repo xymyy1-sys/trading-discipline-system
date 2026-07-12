@@ -4,6 +4,7 @@ from datetime import datetime, timedelta
 from app.api.helpers.execution import _confirmation_deadline, _confirmation_policy, build_position_execution_state
 from app.models.trading import (
     ExpectationSnapshot,
+    ActionRecommendation,
     ExitCard,
     Holding,
     IntradayEvidenceEvent,
@@ -97,6 +98,14 @@ def test_position_execution_hard_stop_forbids_t(db_session):
     assert state.recommended_reduce_ratio == 1
     assert state.t_eligible is False
     assert any("硬止损" in item for item in state.evidence)
+
+    build_position_execution_state(
+        db_session,
+        holding,
+        quote={"price": 9.2, "high": 9.6, "low": 9.15, "open": 9.5, "note": "实时行情"},
+        seesaw=None,
+    )
+    assert db_session.query(ActionRecommendation).filter(ActionRecommendation.holding_id == holding.id).count() == 1
 
 
 def test_expectation_and_vwap_breakdown_requires_risk_reduction(db_session):

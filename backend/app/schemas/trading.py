@@ -502,6 +502,12 @@ class WatchlistRecommendationOut(BaseModel):
     limit_level: int = 0
     limit_quality: str = ""
     fund_signal: str = ""
+    expectation_status: str = "未建立盘前预期"
+    volume_price_status: str = "量价待确认"
+    expectation_gap: float | None = None
+    risk_reward_ratio: float | None = None
+    gate_passed: bool = False
+    missing_conditions: list[str] = Field(default_factory=list)
     reasons: list[str] = Field(default_factory=list)
     risks: list[str] = Field(default_factory=list)
     source: str = ""

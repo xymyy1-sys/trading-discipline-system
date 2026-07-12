@@ -70,7 +70,7 @@ def watchlist_recommendations(db: Session = Depends(get_db)) -> list[WatchlistRe
             row = rows.setdefault(stock.code, {
                 "code": stock.code, "name": stock.name, "theme_score": 0, "limit_score": 0, "theme": theme.name,
                 "role": stock.role, "limit_level": 0, "limit_quality": "未进入涨停梯队",
-                "fund_signal": "", "reasons": [], "risks": [], "sources": set(),
+                "fund_signal": "", "current_price": 0.0, "reasons": [], "risks": [], "sources": set(),
             })
             theme_points = min(45, round(theme.score * 0.45))
             rank_points = max(0, 12 - theme.rank)
@@ -104,8 +104,9 @@ def watchlist_recommendations(db: Session = Depends(get_db)) -> list[WatchlistRe
                 "code": stock.code, "name": stock.name, "theme_score": 0, "limit_score": 0,
                 "theme": (stock.concepts[0] if stock.concepts else stock.industry), "role": "涨停前排",
                 "limit_level": 0, "limit_quality": "", "fund_signal": "",
-                "reasons": [], "risks": [], "sources": set(),
+                "current_price": stock.price, "reasons": [], "risks": [], "sources": set(),
             })
+            row["current_price"] = stock.price or row["current_price"]
             row["limit_level"] = max(row["limit_level"], stock.consecutive_limit_days, group.level)
             quality_score = min(20, row["limit_level"] * 6)
             if stock.break_count == 0:
@@ -124,9 +125,43 @@ def watchlist_recommendations(db: Session = Depends(get_db)) -> list[WatchlistRe
             row["reasons"].append(f"{group.label}，{row['limit_quality']}")
             row["sources"].add(ladder_source)
 
+    codes = list(rows)
+    expectations: dict[str, ExpectationSnapshot] = {}
+    volumes: dict[str, VolumePriceSnapshot] = {}
+    plans: dict[str, NextDayPlan] = {}
+    if codes:
+        for item in db.query(ExpectationSnapshot).filter(ExpectationSnapshot.code.in_(codes)).order_by(ExpectationSnapshot.created_at.desc()).all():
+            expectations.setdefault(item.code, item)
+        for item in db.query(VolumePriceSnapshot).filter(VolumePriceSnapshot.code.in_(codes)).order_by(VolumePriceSnapshot.captured_at.desc()).all():
+            volumes.setdefault(item.code, item)
+        for item in db.query(NextDayPlan).filter(NextDayPlan.code.in_(codes)).order_by(NextDayPlan.updated_at.desc()).all():
+            plans.setdefault(item.code, item)
+
     outputs: list[WatchlistRecommendationOut] = []
     for row in rows.values():
         score_value = row["theme_score"] + row["limit_score"]
+        expectation = expectations.get(row["code"])
+        volume = volumes.get(row["code"])
+        plan = plans.get(row["code"])
+        missing_conditions: list[str] = []
+        expectation_ok = bool(expectation and expectation.expectation_result in {"STRONGER", "MATCHED"} and expectation.expectation_gap_score >= 0)
+        if not expectation:
+            missing_conditions.append("未建立盘前预期")
+        elif expectation.expectation_gap_score < 0 or expectation.expectation_result not in {"STRONGER", "MATCHED"}:
+            missing_conditions.append("预期差尚未转为非负")
+        volume_ok = bool(volume and volume.vwap_reliable and volume.data_quality not in {"missing", "degraded"})
+        if not volume_ok:
+            missing_conditions.append("个股真实量价尚未确认")
+        current_price = float(row["current_price"] or (plan.current_price if plan else 0) or 0)
+        target_price = float((plan.trim_price or plan.limit_up_price or plan.confirm_price) if plan else 0)
+        stop_price = float((plan.final_risk_price or plan.reduce_price) if plan else 0)
+        risk_reward_ratio = None
+        if current_price > stop_price > 0 and target_price > current_price:
+            risk_reward_ratio = round((target_price - current_price) / (current_price - stop_price), 2)
+        risk_reward_ok = risk_reward_ratio is not None and risk_reward_ratio >= 1.5
+        if not risk_reward_ok:
+            missing_conditions.append("风险收益比未达到1.5")
+        gate_passed = expectation_ok and volume_ok and risk_reward_ok
         if "ST" in row["name"].upper():
             score_value -= 50
             row["risks"].append("风险警示股票不纳入自动观察池")
@@ -134,11 +169,16 @@ def watchlist_recommendations(db: Session = Depends(get_db)) -> list[WatchlistRe
             score_value -= 15
             row["risks"].append("当前已持仓，应转入持仓执行而非新增观察")
         score = max(0, min(100, int(score_value)))
-        tier = "重点观察" if score >= 70 and not any("风险警示" in risk for risk in row["risks"]) else "普通观察" if score >= 50 else "暂不纳入"
+        tier = "重点观察" if score >= 70 and gate_passed and not any("风险警示" in risk for risk in row["risks"]) else "等待确认" if score >= 50 else "暂不纳入"
         outputs.append(WatchlistRecommendationOut(
             code=row["code"], name=row["name"], score=score, tier=tier,
             theme=row["theme"], role=row["role"], limit_level=row["limit_level"],
             limit_quality=row["limit_quality"], fund_signal=row["fund_signal"],
+            expectation_status=_candidate_state_label(expectation.expectation_result) if expectation else "未建立盘前预期",
+            volume_price_status=_candidate_state_label(volume.pattern) if volume else "量价待确认",
+            expectation_gap=round(expectation.expectation_gap_score, 2) if expectation else None,
+            risk_reward_ratio=risk_reward_ratio, gate_passed=gate_passed,
+            missing_conditions=missing_conditions,
             reasons=list(dict.fromkeys(row["reasons"])), risks=list(dict.fromkeys(row["risks"])),
             source=" + ".join(sorted(row["sources"])),
             updated_at=max([value for value in (radar.updated_at if radar else None, ladder.updated_at if ladder else None) if value is not None], default=None),
@@ -220,6 +260,9 @@ def _candidate_state_label(value: str) -> str:
         "EXPECTATION_INVALIDATED": "预期失效", "STOP_LOSS_WARNING": "止损警告",
         "NORMAL_HOLD": "正常持有", "PROFIT_EXPANSION": "利润扩张",
         "DEGRADED_DATA_OBSERVATION": "数据降级观察",
+        "VWAP_BREAKDOWN": "跌破分时均价", "ABOVE_VWAP": "站上分时均价",
+        "VOLUME_PRICE_WEAKENING": "量价转弱", "HIGH_VOLUME_STAGNATION": "高位放量滞涨",
+        "HEALTHY": "量价健康", "NEUTRAL": "量价中性",
     }.get(value, value or "未知")
 
 

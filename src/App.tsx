@@ -192,11 +192,9 @@ function TodayDecisionWorkspace() {
       allowed={['处理持仓风险', '按市场档位选择策略', '只执行有证据的计划']}
       forbidden={['风险未解除前扩大仓位', '无计划追高', '亏损仓补仓摊低成本']}
       modules={[
-        { key: 'intel', label: '行业要闻', description: '东方财富、央视及行业资讯原文与资金验证', Component: IntelDesk },
+        { key: 'cockpit', label: '盘中驾驶舱', description: '市场状态、持仓预期、量价证据、事件轨迹和操作建议', Component: TodayDecisionSummary },
       ]}
-    >
-      <TodayDecisionSummary />
-    </WorkspacePage>
+    />
   )
 }
 
@@ -210,6 +208,7 @@ function StockSelectionWorkspace() {
       forbidden={['后排跟风', '数据质量不合格', '高位巨量滞涨', '板块资金持续转弱']}
       modules={[
         { key: 'candidates', label: '自动观察池', description: '主线、涨停质量、资金与风险综合推荐', Component: CandidatePool },
+        { key: 'intel', label: '行业要闻', description: '东方财富、央视及行业资讯原文与资金验证', Component: IntelDesk },
         { key: 'radar', label: '主线题材', description: '主线强度、共振方向、核心股', Component: Dashboard },
         { key: 'flow', label: '资金证据', description: '板块资金拐点、排名与强弱', Component: FlowDesk },
         { key: 'ladder', label: '涨停质量', description: '连板高度、封板质量、题材聚类', Component: LimitUpLadder },

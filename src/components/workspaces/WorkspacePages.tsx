@@ -12,7 +12,7 @@ import {
 import { API_BASE } from '../../api'
 import { chineseEvidence, chineseLabel } from '../../labels'
 
-import type { ActionRecommendation, HoldingOut, IntradayEvidenceEvent, IntradayReview, MarketSeesaw, PositionExecutionState, ThemeRadar } from '../../types'
+import type { ActionRecommendation, HoldingOut, IntradayEvidenceEvent, IntradayReview, MarketSeesaw, PositionExecutionState, StockDecisionCard, ThemeRadar } from '../../types'
 
 type WorkspaceModule = {
   key: string
@@ -103,6 +103,8 @@ export function TodayDecisionSummary() {
   const [executionStates, setExecutionStates] = useState<PositionExecutionState[]>([])
   const [realtimeEvents, setRealtimeEvents] = useState<IntradayEvidenceEvent[]>([])
   const [intradayReviews, setIntradayReviews] = useState<Record<string, IntradayReview>>({})
+  const [decisionCards, setDecisionCards] = useState<Record<string, StockDecisionCard>>({})
+  const [selectedCode, setSelectedCode] = useState('')
   const [activeAlerts, setActiveAlerts] = useState<ActionRecommendation[]>([])
   const [streamState, setStreamState] = useState('连接中')
   const [streamLastAt, setStreamLastAt] = useState<string | null>(null)
@@ -125,7 +127,9 @@ export function TodayDecisionSummary() {
       const [holdingRes, executionRes, seesawRes, themeRes, alertRes] = results
       if (holdingRes.status === 'fulfilled' && Array.isArray(holdingRes.value)) {
         setHoldings(holdingRes.value)
+        setSelectedCode(current => current || holdingRes.value[0]?.code || '')
         loadIntradayReviews(holdingRes.value)
+        loadDecisionCards(holdingRes.value)
       }
       if (executionRes.status === 'fulfilled' && Array.isArray(executionRes.value)) setExecutionStates(executionRes.value)
       if (seesawRes.status === 'fulfilled') setSeesaw(seesawRes.value)
@@ -196,6 +200,12 @@ export function TodayDecisionSummary() {
       return new Date(bTime).getTime() - new Date(aTime).getTime()
     })
     .slice(0, 4)
+  const selectedHolding = holdings.find(item => item.code === selectedCode) ?? holdings[0]
+  const selectedExecution = executionStates.find(item => item.code === selectedHolding?.code) ?? null
+  const selectedCard = selectedHolding ? decisionCards[selectedHolding.code] ?? null : null
+  const selectedReview = selectedHolding ? intradayReviews[selectedHolding.code] ?? null : null
+  const marketCycle = inferMarketCycle(theme?.market_temperature, seesaw?.market_mode)
+  const earningEffect = inferEarningEffect(theme, seesaw)
 
   return (
     <section className="decision-command">
@@ -284,6 +294,83 @@ export function TodayDecisionSummary() {
         )}
       </div>
 
+      <section className="panel cockpit-overview">
+        <header>
+          <h3><Activity size={16} />全市场决策状态</h3>
+          <span className="stream-state">规则推断 · 数据刷新后更新</span>
+        </header>
+        <div className="cockpit-market-grid">
+          <div><span>赚钱效应</span><strong>{earningEffect}</strong><small>{theme?.strongest_theme?.stage_reason || '等待题材扩散和涨停质量证据'}</small></div>
+          <div><span>情绪周期</span><strong>{marketCycle}</strong><small>根据市场温度、主线强度和资金迁移综合判断</small></div>
+          <div><span>主线方向</span><strong>{theme?.strongest_theme?.name || '--'}</strong><small>{theme?.strongest_theme ? `强度 ${theme.strongest_theme.score} · 排名 ${theme.strongest_theme.rank}` : '等待真实题材数据'}</small></div>
+          <div><span>资金轮动</span><strong>{seesaw?.market_mode || '--'}</strong><small>{seesaw?.summary || '等待资金流证据'}</small></div>
+        </div>
+      </section>
+
+      <section className="panel holding-cockpit">
+        <header>
+          <h3><ListTodo size={16} />持仓预期与盘中证据驾驶舱</h3>
+          <span className="stream-state">选择持仓查看完整决策链</span>
+        </header>
+        <div className="holding-cockpit-tabs">
+          {holdings.map(item => (
+            <button type="button" key={item.code} className={item.code === selectedHolding?.code ? 'active' : ''} onClick={() => setSelectedCode(item.code)}>
+              <strong>{item.name}</strong><span>{item.code}</span>
+            </button>
+          ))}
+        </div>
+        {selectedHolding && (
+          <div className="cockpit-detail-grid">
+            <article>
+              <h4>预期阶段与动态验证</h4>
+              {selectedCard ? <>
+                <p><b>当前阶段：</b>{selectedCard.expectation.stage || '待建立'}</p>
+                <p><b>盘前预期：</b>{chineseLabel(selectedCard.expectation.base_expectation)}</p>
+                <p><b>实际表现：</b>{chineseLabel(selectedCard.expectation.expectation_result)}</p>
+                <p><b>状态变化：</b>{chineseLabel(selectedCard.expectation.state_transition)}</p>
+                <p><b>预期差：</b>{selectedCard.expectation.expectation_gap_score.toFixed(1)} 分 · 可信度 {(selectedCard.expectation.confidence * 100).toFixed(0)}%</p>
+                <small>合理开盘区间 {selectedCard.expectation.expected_open_low.toFixed(2)}% ～ {selectedCard.expectation.expected_open_high.toFixed(2)}%</small>
+              </> : <p>正在读取该持仓的预期快照。</p>}
+            </article>
+            <article>
+              <h4>个股量价确认</h4>
+              {selectedCard?.volume_price ? <>
+                <p><b>当前价 / 分时均价：</b>{selectedCard.volume_price.price.toFixed(2)} / {selectedCard.volume_price.vwap.toFixed(2)}</p>
+                <p><b>量价状态：</b>{chineseLabel(selectedCard.volume_price.pattern)}</p>
+                <p><b>高点回撤：</b>{selectedCard.volume_price.high_drawdown.toFixed(2)}%</p>
+                <p><b>量比 / 上攻效率：</b>{selectedCard.volume_price.volume_ratio.toFixed(2)} / {selectedCard.volume_price.attack_efficiency.toFixed(2)}</p>
+                <small>{selectedCard.volume_price.vwap_reliable ? '真实分钟数据已确认' : '分钟数据不足，结论已降级'}</small>
+              </> : <p>暂无可靠量价快照，不生成确定性结论。</p>}
+            </article>
+            <article>
+              <h4>当前操作与风险边界</h4>
+              {selectedExecution ? <>
+                <p><b>状态：</b>{chineseLabel(selectedExecution.state)}</p>
+                <p><b>建议：</b>{chineseEvidence(selectedExecution.recommended_action)}</p>
+                <p><b>建议仓位：</b>{(selectedExecution.recommended_position_ratio * 100).toFixed(0)}% · 可卖 {selectedExecution.sellable_quantity} 股</p>
+                <p><b>结构 / 硬止损：</b>{selectedExecution.structure_stop_price.toFixed(2)} / {selectedExecution.hard_stop_price.toFixed(2)}</p>
+                <small>{selectedExecution.invalid_conditions[0] || '等待失效条件确认'}</small>
+              </> : <p>暂无持仓执行状态。</p>}
+            </article>
+            <article className="cockpit-evidence-card">
+              <h4>证据、反向证据与恢复条件</h4>
+              <div><b>支持证据</b>{(selectedExecution?.evidence ?? selectedCard?.evidence ?? []).slice(0, 3).map(item => <p key={item}>+ {chineseEvidence(item)}</p>)}</div>
+              <div><b>反向证据</b>{(selectedExecution?.counter_evidence ?? selectedCard?.counter_evidence ?? []).slice(0, 3).map(item => <p key={item}>- {chineseEvidence(item)}</p>)}</div>
+              <div><b>恢复条件</b>{(selectedExecution?.recovery_conditions ?? []).slice(0, 3).map(item => <p key={item}>· {chineseEvidence(item)}</p>)}</div>
+            </article>
+            <article className="cockpit-timeline-card">
+              <h4>盘中事件时间线</h4>
+              <div className="cockpit-timeline">
+                {(selectedReview?.timeline ?? selectedCard?.timeline ?? []).slice(0, 8).map(event => (
+                  <div key={`${event.id}-${event.captured_at}`}><time>{formatEventTime(event.captured_at)}</time><b>{chineseLabel(event.event_type)}</b><span>{chineseEvidence(event.evidence?.[0] || chineseLabel(event.severity))}</span></div>
+                ))}
+              </div>
+              {!(selectedReview?.timeline ?? selectedCard?.timeline ?? []).length && <p>暂无盘中采样事件。</p>}
+            </article>
+          </div>
+        )}
+      </section>
+
       <div className="panel command-list active-recommendations">
         <header><h3><CheckCircle2 size={16} />待确认操作建议</h3><span className="stream-state">{activeAlerts.length} 条</span></header>
         {activeAlerts.length ? activeAlerts.map(alert => (
@@ -353,6 +440,16 @@ export function TodayDecisionSummary() {
     })
   }
 
+  function loadDecisionCards(nextHoldings: HoldingOut[]) {
+    Promise.allSettled(nextHoldings.slice(0, 8).map(item =>
+      fetchJsonWithTimeout(`${API_BASE}/api/stocks/${item.code}/decision-card`, 8000).then(card => [item.code, card] as const),
+    )).then(results => {
+      const next: Record<string, StockDecisionCard> = {}
+      results.forEach(result => { if (result.status === 'fulfilled') next[result.value[0]] = result.value[1] })
+      setDecisionCards(next)
+    })
+  }
+
   function loadSingleIntradayReview(code: string) {
     fetchJsonWithTimeout(`${API_BASE}/api/stocks/${code}/intraday-review`, 6000)
       .then(review => {
@@ -374,6 +471,23 @@ function formatEventTime(value: string) {
   const time = new Date(value)
   if (Number.isNaN(time.getTime())) return value
   return time.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', hour12: false })
+}
+
+function inferMarketCycle(temperature?: string, marketMode?: string) {
+  const text = `${temperature || ''}${marketMode || ''}`
+  if (/退潮|冰点|极弱|防守/.test(text)) return '退潮防守'
+  if (/高潮|过热|加速/.test(text)) return '高潮分歧'
+  if (/强|活跃|主升/.test(text)) return '主升活跃'
+  return '轮动分歧'
+}
+
+function inferEarningEffect(theme: ThemeRadar | null, seesaw: MarketSeesaw | null) {
+  const strongThemes = theme?.themes.filter(item => item.score >= 70).length ?? 0
+  const inflowTargets = seesaw?.inflow_targets.filter(item => item.net_inflow > 0).length ?? 0
+  if (strongThemes >= 3 && inflowTargets >= 3) return '较强'
+  if (strongThemes >= 1 || inflowTargets >= 2) return '局部活跃'
+  if (!theme && !seesaw) return '--'
+  return '偏弱'
 }
 
 export function WorkspaceLinkCard({ title, desc, onClick }: { title: string; desc: string; onClick: () => void }) {

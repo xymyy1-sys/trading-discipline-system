@@ -49,7 +49,9 @@ def test_watchlist_recommendations_combine_theme_and_limit_quality(client, monke
     assert response.status_code == 200
     data = response.json()
     assert data[0]["code"] == "600001"
-    assert data[0]["tier"] == "重点观察"
+    assert data[0]["tier"] == "等待确认"
+    assert data[0]["gate_passed"] is False
+    assert "未建立盘前预期" in data[0]["missing_conditions"]
     assert data[0]["limit_quality"] == "封板稳定、未炸板"
     assert any("题材排名" in reason for reason in data[0]["reasons"])
 
