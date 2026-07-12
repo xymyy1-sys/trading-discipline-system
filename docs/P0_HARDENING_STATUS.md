@@ -35,6 +35,7 @@ Deferred by request:
   - Added `/api/holdings/{holding_id}/state-history` for acceptance checks.
 - V2.2 second batch:
   - Standardized reverse T output to `REVERSE_T` while accepting old `INVERSE_T` inputs and stored values.
+  - Added dedicated `TTradingEngine` service for T eligibility, plan creation, plan updates, and T-type normalization.
   - Expanded expectation vocabulary with `EXTREME_STRONG` and `EBB`; actual result now uses V2.2 core labels `STRONGER`, `MATCHED`, `WEAKER`, and `INVALID` while old labels remain readable.
   - Execution and review calibration treat `INVALID` as expectation failure/risk evidence.
   - Cross-sector migration now requires at least three evidence criteria and outputs a confidence percentage before emitting `SECTOR_MIGRATION_CONFIRMED`.
@@ -49,7 +50,7 @@ Deferred by request:
 - Strengthen cross-sector migration scoring with original theme outflow, new theme inflow, stock weakening, and leader-switch evidence.
 - Add a front-end SSE connection health indicator and recovery notification UX beyond the current event list.
 - Add frontend state-history timeline and intraday evidence trajectory display.
-- Continue deeper TTradingEngine work: dedicated `TTradingEngine` service, positive/reverse T execution feedback, and UI guardrails.
+- Continue deeper TTradingEngine work: positive/reverse T execution feedback and UI guardrails.
 - Continue expectation transition UI polish and editable thresholds by script type.
 - Add formal acceptance report exports for SSE demo, full single-stock intraday timeline, and T+1 validation.
 

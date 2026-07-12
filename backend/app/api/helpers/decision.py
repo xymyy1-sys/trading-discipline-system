@@ -22,6 +22,12 @@ from app.schemas.trading import (
     TTradePlanIn,
     TTradePlanOut,
 )
+from app.services.t_trading_engine import (
+    build_t_eligibility as engine_build_t_eligibility,
+    create_t_plan as engine_create_t_plan,
+    normalize_t_type,
+    update_t_plan as engine_update_t_plan,
+)
 
 
 def _today() -> str:
@@ -38,15 +44,6 @@ def _json_list(raw: str | None) -> list[str]:
     except Exception:
         return []
     return [str(item) for item in value] if isinstance(value, list) else []
-
-
-def normalize_t_type(value: str | None) -> str:
-    value = str(value or "NO_T").upper()
-    if value == "INVERSE_T":
-        return "REVERSE_T"
-    if value in {"POSITIVE_T", "REVERSE_T", "NO_T"}:
-        return value
-    return "NO_T"
 
 
 def current_expectation_stage(now: datetime | None = None) -> str:
@@ -274,136 +271,15 @@ def update_expectation_snapshot(
 
 
 def build_t_eligibility(db: Session, holding: Holding) -> TEligibilityOut:
-    execution = build_position_execution_state(db, holding)
-    forbidden: list[str] = []
-    evidence: list[str] = []
-    current = holding.current_price
-    sellable = int(execution.sellable_quantity or 0)
-    today_buy = int(execution.today_buy_quantity or 0)
-    yesterday_quantity = int(execution.yesterday_quantity or sellable)
-    suggested_qty = max(0, int(sellable * 0.25 // 100) * 100) if sellable >= 100 else 0
-    if execution.state in {"EXIT_REQUIRED", "REDUCE_REQUIRED"}:
-        forbidden.append(f"当前执行状态为 {execution.state}，先处理降风险，不做T。")
-    if not execution.t_eligible:
-        forbidden.append("持仓执行状态机判定当前不具备做T资格。")
-    if sellable <= 0:
-        forbidden.append("没有昨日可卖底仓。")
-    if execution.profit_snapshot and execution.profit_snapshot.current_profit_pct < 0:
-        forbidden.append("当前浮亏，做T容易演变为补仓摊低成本。")
-    eligible = not forbidden and suggested_qty > 0
-    has_profit_protection = bool(execution.profit_snapshot and execution.profit_snapshot.protection_level != "NONE")
-    has_reversal_setup = any(
-        keyword in item
-        for item in execution.evidence
-        for keyword in ("高点回撤", "冲高回落", "利润回撤", "冲击涨停")
-    )
-    reverse_candidate = (
-        eligible
-        and execution.state in {"PROFIT_PROTECTION", "DIVERGENCE_HOLD", "PROFIT_EXPANSION", "NORMAL_HOLD"}
-        and has_profit_protection
-        and has_reversal_setup
-        and execution.data_quality == "realtime"
-        and execution.volume_price_state in {"HIGH_DRAWDOWN", "VWAP_STRONG", "REPAIR_CONFIRMED", "VOLUME_PRICE_NEUTRAL"}
-        and not any("跌破真实分钟VWAP" in item or "时间止损" in item for item in execution.evidence)
-    )
-    if eligible:
-        evidence.append("原持仓逻辑未证伪，且仍有可卖底仓。")
-        if reverse_candidate:
-            evidence.append("允许倒T候选：先卖出昨日可卖底仓的一小部分，只有缩量回踩并重新修复后才接回。")
-        else:
-            evidence.append("只允许正T小比例卖出，等待重新确认后接回。")
-    if reverse_candidate:
-        buyback_low = round(max(execution.structure_stop_price, current * 0.965), 2) if current else 0
-        buyback_high = round(current * 0.985, 2) if current else 0
-        suggested_sell_price = round(current, 2)
-        conditions = [
-            "先卖出计划数量，不先低吸；接回必须等回踩缩量企稳。",
-            "重新站回真实分钟VWAP，或至少连续3根1分钟K线不再创新低。",
-            "主动卖出额下降，主动买入重新占优。",
-            "所属板块资金停止下降或重新回流。",
-        ]
-    else:
-        buyback_low = round(current * 0.975, 2) if current else 0
-        buyback_high = round(current * 0.99, 2) if current else 0
-        suggested_sell_price = round(max(current * 1.02, current), 2) if current else 0
-        conditions = [
-            "回踩VWAP附近缩量企稳。",
-            "5分钟内重新站回VWAP。",
-            "所属板块资金停止下降或重新回流。",
-            "主动买入重新占优，不能继续创新低。",
-        ]
-    return TEligibilityOut(
-        holding_id=int(holding.id),
-        code=holding.code,
-        name=holding.name,
-        t_type="REVERSE_T" if reverse_candidate else "POSITIVE_T" if eligible else "NO_T",
-        eligible=eligible,
-        sellable_quantity=sellable,
-        today_buy_quantity=today_buy,
-        yesterday_quantity=yesterday_quantity,
-        suggested_quantity=suggested_qty,
-        suggested_sell_price=suggested_sell_price,
-        buyback_price_low=buyback_low,
-        buyback_price_high=buyback_high,
-        buyback_conditions=conditions,
-        forbidden_reasons=forbidden,
-        evidence=evidence or execution.evidence[:3],
-        current_action=execution.recommended_action,
-    )
+    return engine_build_t_eligibility(db, holding)
 
 
 def create_t_plan(db: Session, holding: Holding, payload: TTradePlanIn | None = None) -> TTradePlanOut:
-    eligibility = build_t_eligibility(db, holding)
-    payload_provided = payload is not None
-    payload = payload or TTradePlanIn()
-    if not eligibility.eligible:
-        t_type = "NO_T"
-        quantity = 0
-        evidence = eligibility.forbidden_reasons
-    else:
-        requested_type = payload.t_type if payload_provided else eligibility.t_type
-        t_type = normalize_t_type(requested_type if requested_type != "NO_T" else eligibility.t_type)
-        if t_type not in {"POSITIVE_T", "REVERSE_T"}:
-            t_type = eligibility.t_type
-        quantity = payload.planned_sell_quantity or eligibility.suggested_quantity
-        evidence = eligibility.evidence
-    row = TTradePlan(
-        holding_id=int(holding.id),
-        trade_date=_today(),
-        code=holding.code,
-        name=holding.name,
-        t_type=t_type,
-        planned_sell_price=payload.planned_sell_price or eligibility.suggested_sell_price,
-        planned_sell_quantity=quantity,
-        buyback_price_low=payload.buyback_price_low or eligibility.buyback_price_low,
-        buyback_price_high=payload.buyback_price_high or eligibility.buyback_price_high,
-        buyback_conditions_json=_json_dumps(payload.buyback_conditions or eligibility.buyback_conditions),
-        cancel_conditions_json=_json_dumps(payload.cancel_conditions or [
-            "跌破结构止损或反抽VWAP失败。",
-            "板块资金继续流出。",
-            "接回条件未满足，T仓卖出转为永久减仓。",
-            "倒T低吸后未确认修复，不允许继续加第二笔。",
-        ]),
-        status="planned" if t_type != "NO_T" else "forbidden",
-        evidence_json=_json_dumps(evidence),
-    )
-    db.add(row)
-    db.commit()
-    db.refresh(row)
-    return _t_plan_out(row)
+    return engine_create_t_plan(db, holding, payload)
 
 
 def update_t_plan(db: Session, row: TTradePlan, payload: Any) -> TTradePlanOut:
-    for key, value in payload.model_dump(exclude_unset=True).items():
-        if value is not None:
-            setattr(row, key, value)
-    if row.actual_sell_price and row.actual_buyback_price and row.actual_quantity:
-        row.cost_reduction = round((row.actual_sell_price - row.actual_buyback_price) * row.actual_quantity, 2)
-        if row.status == "planned":
-            row.status = "completed"
-    db.commit()
-    db.refresh(row)
-    return _t_plan_out(row)
+    return engine_update_t_plan(db, row, payload)
 
 
 def decision_card(db: Session, code: str) -> StockDecisionCardOut:

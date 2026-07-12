@@ -95,7 +95,7 @@ def test_inverse_t_requires_profit_protection_and_reversal_setup(db_session, mon
         recommended_action="继续持有",
         structure_stop_price=10.4,
     )
-    monkeypatch.setattr("app.api.helpers.decision.build_position_execution_state", lambda db, row: execution)
+    monkeypatch.setattr("app.services.t_trading_engine.build_position_execution_state", lambda db, row: execution)
 
     eligibility = build_t_eligibility(db_session, holding)
 
@@ -132,7 +132,7 @@ def test_inverse_t_payload_is_normalized_to_reverse_t(db_session, monkeypatch):
         recommended_action="继续持有",
         structure_stop_price=10.4,
     )
-    monkeypatch.setattr("app.api.helpers.decision.build_position_execution_state", lambda db, row: execution)
+    monkeypatch.setattr("app.services.t_trading_engine.build_position_execution_state", lambda db, row: execution)
 
     plan = create_t_plan(db_session, holding)
 
