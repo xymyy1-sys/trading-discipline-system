@@ -225,6 +225,12 @@ export default function Positions() {
     if (state === 'PROFIT_EXPANSION') return 'var(--up)'
     return 'var(--ink-muted)'
   }
+  const timeLabel = (value: string | null | undefined) => {
+    if (!value) return '--'
+    const date = new Date(value)
+    if (Number.isNaN(date.getTime())) return value
+    return date.toLocaleTimeString('zh-CN', { hour12: false, hour: '2-digit', minute: '2-digit' })
+  }
   const sendFeedback = (state: PositionExecutionState, status: string) => {
     const recommendationId = state.recommendation?.id
     if (!recommendationId) return
@@ -247,7 +253,7 @@ export default function Positions() {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        t_type: state.t_eligible ? 'POSITIVE_T' : 'NO_T',
+        t_type: 'NO_T',
         planned_sell_price: 0,
         planned_sell_quantity: 0,
         buyback_price_low: 0,
@@ -496,6 +502,33 @@ export default function Positions() {
                 </div>
                 <div className="execution-evidence">
                   {(item.evidence.length ? item.evidence : ['暂无强触发证据，按原计划观察。']).slice(0, 3).map(line => <p key={line}>{line}</p>)}
+                </div>
+                <div className="execution-mini-sections">
+                  <div>
+                    <b>状态迁移</b>
+                    {(item.state_history?.length ? item.state_history.slice(0, 3) : []).map(history => (
+                      <p key={history.id ?? `${history.captured_at}-${history.new_state}`}>
+                        <span>{timeLabel(history.captured_at)}</span>
+                        {history.old_state || '初始'} → {history.new_state} · {history.reason}
+                      </p>
+                    ))}
+                    {!item.state_history?.length && <p><span>--</span>等待下一次状态变化</p>}
+                  </div>
+                  <div>
+                    <b>盘中事件</b>
+                    {(item.events?.length ? item.events.slice(0, 3) : []).map(event => (
+                      <p key={event.id ?? `${event.captured_at}-${event.event_type}`}>
+                        <span>{timeLabel(event.captured_at)}</span>
+                        {event.event_type} · {event.confirmed ? '已确认' : '观察'} · {event.evidence?.[0] ?? event.severity}
+                      </p>
+                    ))}
+                    {!item.events?.length && <p><span>--</span>暂无新事件</p>}
+                  </div>
+                  <div>
+                    <b>做T口径</b>
+                    <p><span>可卖</span>{item.sellable_quantity.toLocaleString()} 股 · 今日买入 {item.today_buy_quantity.toLocaleString()} 股</p>
+                    <p><span>类型</span>{item.t_eligible ? item.t_type : 'NO_T'} · {item.t_eligible ? '等待计划生成' : '禁止做T'}</p>
+                  </div>
                 </div>
                 <div className="execution-feedback">
                   <button type="button" onClick={() => createTPlan(item)}>
