@@ -26,6 +26,7 @@ from app.models.trading import (
     IntradayEvidenceEvent,
     NextDayPlan,
     PositionExecutionState,
+    PositionStateHistory,
     ProfitProtectionSnapshot,
     TradeLog,
     VolumePriceSnapshot,
@@ -35,6 +36,7 @@ from app.schemas.trading import (
     ExpectationSnapshotOut,
     IntradayEvidenceEventOut,
     PositionExecutionStateOut,
+    PositionStateHistoryOut,
     ProfitProtectionSnapshotOut,
     VolumePriceSnapshotOut,
 )
@@ -288,6 +290,90 @@ def _action_from_score(score: int, hard_exit: bool, has_profit: bool) -> tuple[s
     return "PROFIT_EXPANSION" if has_profit else "NORMAL_HOLD", "继续持有", 0.0, "INFO"
 
 
+def _high_open_failed_breakout_event(
+    holding: Holding,
+    quote: dict[str, Any],
+    current: float,
+    vwap: float,
+    high_drawdown_pct: float,
+    seesaw: Any | None,
+    vwap_reliable: bool,
+    volume_price: VolumePriceSnapshot | VolumePriceSnapshotOut | None,
+) -> dict[str, Any] | None:
+    prev_close = _safe_float(quote.get("prev_close")) or _safe_float(getattr(volume_price, "prev_close", 0))
+    open_price = _safe_float(quote.get("open")) or _safe_float(getattr(volume_price, "open_price", 0))
+    high_price = _safe_float(quote.get("high")) or _safe_float(getattr(volume_price, "high_price", 0))
+    if not prev_close or not open_price or not high_price or not current:
+        return None
+
+    open_pct = (open_price - prev_close) / prev_close * 100
+    high_pct = (high_price - prev_close) / prev_close * 100
+    active_sell = _safe_float(getattr(volume_price, "active_sell_amount", 0))
+    active_buy = _safe_float(getattr(volume_price, "active_buy_amount", 0))
+    attack_efficiency = _safe_float(getattr(volume_price, "attack_efficiency", 0))
+    sector_pullback = float(getattr(seesaw, "theme_flow_pullback_pct", 0) or 0) if seesaw else 0.0
+    sector_net = float(getattr(seesaw, "sector_net_inflow", 0) or 0) if seesaw else 0.0
+
+    evidence: list[str] = []
+    matched = 0
+    if open_pct >= 3:
+        matched += 1
+        evidence.append(f"高开 {open_pct:.2f}%，存在一致性兑现压力。")
+    if high_pct >= 7 or high_price >= prev_close * 1.095:
+        matched += 1
+        evidence.append(f"盘中最高涨幅 {high_pct:.2f}%，接近/冲击涨停区。")
+    if high_drawdown_pct >= 4:
+        matched += 1
+        evidence.append(f"从日内高点回撤 {high_drawdown_pct:.2f}%，冲高延续性不足。")
+    if vwap_reliable and vwap and current < vwap:
+        matched += 1
+        evidence.append(f"当前价 {current:.2f} 跌破真实分钟VWAP {vwap:.2f}。")
+    if active_sell > active_buy and active_sell > 0:
+        matched += 1
+        evidence.append(f"主动卖出额 {active_sell:.2f} 亿高于主动买入额 {active_buy:.2f} 亿。")
+    if attack_efficiency > 0 and attack_efficiency < 0.2:
+        matched += 1
+        evidence.append(f"上攻效率仅 {attack_efficiency:.2f}，新增成交对价格推动减弱。")
+    if sector_pullback >= 20 or sector_net < 0:
+        matched += 1
+        evidence.append("所属板块资金从峰值回落或转为净流出。")
+
+    if matched < 3:
+        return None
+
+    level = "YELLOW"
+    severity = "warning"
+    priority = 72
+    if (vwap_reliable and vwap and current < vwap and high_drawdown_pct >= 4) or matched >= 5:
+        level = "ORANGE"
+        severity = "critical"
+        priority = 88
+    if (vwap_reliable and vwap and current < vwap and high_drawdown_pct >= 7 and (active_sell > active_buy or sector_pullback >= 20 or sector_net < 0)):
+        level = "RED"
+        severity = "critical"
+        priority = 98
+
+    action = {
+        "YELLOW": "停止加仓，提高止盈保护，观察VWAP。",
+        "ORANGE": "冲板失败/跌破VWAP风险，建议减仓30%-50%。",
+        "RED": "交易逻辑证伪风险，建议退出，禁止补仓和摊低成本。",
+    }[level]
+    evidence.append(action)
+    return {
+        "captured_at": datetime.now(),
+        "scope": "stock",
+        "target_code": holding.code,
+        "target_name": holding.name,
+        "event_type": "HIGH_OPEN_FAILED_BREAKOUT",
+        "severity": severity,
+        "value": round(current, 2),
+        "previous_value": round(vwap or prev_close, 2),
+        "priority": priority,
+        "group_key": "stock:high-open-failed-breakout",
+        "evidence": [f"{level} 风险："] + evidence,
+    }
+
+
 def _build_events(
     holding: Holding,
     current: float,
@@ -301,6 +387,9 @@ def _build_events(
     expectation_result: str = "",
     vwap_reliable: bool = False,
     time_stop_reasons: list[str] | None = None,
+    quote: dict[str, Any] | None = None,
+    volume_price: VolumePriceSnapshot | VolumePriceSnapshotOut | None = None,
+    high_drawdown_pct: float = 0,
 ) -> list[dict[str, Any]]:
     now = datetime.now()
     events: list[dict[str, Any]] = []
@@ -427,6 +516,18 @@ def _build_events(
             "group_key": "stock:time-stop",
             "evidence": [reason],
         })
+    high_open_event = _high_open_failed_breakout_event(
+        holding,
+        quote or {},
+        current,
+        vwap,
+        high_drawdown_pct,
+        seesaw,
+        vwap_reliable,
+        volume_price,
+    )
+    if high_open_event:
+        events.append(high_open_event)
     return events
 
 
@@ -571,6 +672,32 @@ def _dedupe_events(db: Session, events: list[dict[str, Any]], cooldown_minutes: 
         event["confirmed"] = required_occurrences <= 1
         persisted.append(event)
     return persisted
+
+
+def _state_history_out(row: PositionStateHistory) -> PositionStateHistoryOut:
+    return PositionStateHistoryOut(
+        id=row.id,
+        holding_id=row.holding_id,
+        code=row.code,
+        name=row.name,
+        trade_date=row.trade_date,
+        old_state=row.old_state,
+        new_state=row.new_state,
+        captured_at=row.captured_at,
+        reason=row.reason,
+        evidence=_json_list(row.evidence_json),
+    )
+
+
+def _recent_state_history(db: Session, holding_id: int, limit: int = 20) -> list[PositionStateHistoryOut]:
+    rows = (
+        db.query(PositionStateHistory)
+        .filter(PositionStateHistory.holding_id == holding_id)
+        .order_by(PositionStateHistory.captured_at.desc(), PositionStateHistory.id.desc())
+        .limit(limit)
+        .all()
+    )
+    return [_state_history_out(row) for row in rows]
 
 
 def build_position_execution_state(
@@ -762,6 +889,9 @@ def build_position_execution_state(
         expectation_result=expectation_result,
         vwap_reliable=vwap_reliable,
         time_stop_reasons=time_stop_reasons,
+        quote=quote,
+        volume_price=volume_price,
+        high_drawdown_pct=high_drawdown_pct,
     )
     events.extend(_recovery_events(db, holding, volume_price_state, current, vwap))
 
@@ -803,8 +933,10 @@ def build_position_execution_state(
         .filter(PositionExecutionState.holding_id == int(holding.id), PositionExecutionState.trade_date == _trade_date())
         .first()
     )
+    created_state = state_row is None
     if state_row is None:
         state_row = PositionExecutionState(holding_id=int(holding.id), code=holding.code, name=holding.name, trade_date=_trade_date())
+    previous_state = "" if created_state else str(state_row.state or "")
     state_row.state = state
     state_row.expectation_state = (
         expectation_result
@@ -839,6 +971,19 @@ def build_position_execution_state(
         db.add(snapshot)
         db.add(recommendation)
         db.flush()
+        if previous_state != state:
+            history = PositionStateHistory(
+                holding_id=int(holding.id),
+                code=holding.code,
+                name=holding.name,
+                trade_date=_trade_date(),
+                old_state=previous_state,
+                new_state=state,
+                captured_at=now,
+                reason=action,
+                evidence_json=_json_dumps((evidence + invalid_conditions)[:10]),
+            )
+            db.add(history)
         for event in _dedupe_events(db, events):
             row = IntradayEvidenceEvent(
                 trade_date=_trade_date(),
@@ -869,7 +1014,7 @@ def build_position_execution_state(
         for row in persisted_events:
             db.refresh(row)
 
-    return _execution_state_out(state_row, snapshot, recommendation, persisted_events or events)
+    return _execution_state_out(state_row, snapshot, recommendation, persisted_events or events, db=db)
 
 
 def _execution_state_out(
@@ -877,6 +1022,7 @@ def _execution_state_out(
     snapshot: ProfitProtectionSnapshot,
     recommendation: ActionRecommendation,
     events: list[IntradayEvidenceEvent | dict[str, Any]],
+    db: Session | None = None,
 ) -> PositionExecutionStateOut:
     event_out: list[IntradayEvidenceEventOut] = []
     for event in events:
@@ -963,6 +1109,7 @@ def _execution_state_out(
             triggered=snapshot.triggered,
             recommended_action=snapshot.recommended_action,
         ),
+        state_history=_recent_state_history(db, state.holding_id) if db is not None and state.holding_id else [],
         data_quality=state.data_quality,
         data_time=state.data_time,
         updated_at=state.updated_at,

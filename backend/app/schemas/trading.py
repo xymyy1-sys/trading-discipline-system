@@ -155,6 +155,22 @@ class ProfitProtectionSnapshotOut(BaseModel):
         from_attributes = True
 
 
+class PositionStateHistoryOut(BaseModel):
+    id: int | None = None
+    holding_id: int
+    code: str
+    name: str = ""
+    trade_date: str
+    old_state: str = ""
+    new_state: str
+    captured_at: datetime
+    reason: str = ""
+    evidence: list[str] = Field(default_factory=list)
+
+    class Config:
+        from_attributes = True
+
+
 class PositionExecutionStateOut(BaseModel):
     id: int | None = None
     holding_id: int
@@ -186,6 +202,7 @@ class PositionExecutionStateOut(BaseModel):
     events: list[IntradayEvidenceEventOut] = Field(default_factory=list)
     recommendation: ActionRecommendationOut | None = None
     profit_snapshot: ProfitProtectionSnapshotOut | None = None
+    state_history: list[PositionStateHistoryOut] = Field(default_factory=list)
     data_quality: str = "manual"
     data_time: str = ""
     updated_at: datetime

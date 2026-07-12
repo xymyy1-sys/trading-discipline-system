@@ -2,13 +2,13 @@ from __future__ import annotations
 
 import asyncio
 import json
+import sys
 from datetime import datetime, time
 
-from app.api.helpers.decision import current_expectation_stage, quote_for_code
-from app.api.helpers.execution import build_position_execution_state
-from app.api.helpers.volume_price import build_volume_price_snapshot
+from app.api.helpers.decision import current_expectation_stage
 from app.core.database import SessionLocal
 from app.models.trading import Holding, IntradayCollectionRun, IntradayEvidenceEvent
+from app.services.intraday_evidence_engine import collect_holding_evidence
 
 COLLECTOR_INTERVAL_SECONDS = 60
 COLLECTOR_ENABLED = True
@@ -52,16 +52,8 @@ def run_intraday_collection_once(trigger: str = "manual") -> IntradayCollectionR
         if not holdings:
             notes.append("暂无持仓，后台采集跳过。")
         for holding in holdings:
-            quote = quote_for_code(holding.code)
-            volume = build_volume_price_snapshot(
-                db,
-                holding.code,
-                name=holding.name,
-                stage=stage,
-                quote=quote,
-            )
+            collect_holding_evidence(db, holding, stage=stage, now=started)
             snapshot_count += 1
-            build_position_execution_state(db, holding, quote=quote, volume_price=volume)
             notes.append(f"{holding.code} {holding.name} 已采集 {stage}。")
         run.status = "success"
     except Exception as exc:
@@ -95,6 +87,8 @@ async def _collector_loop() -> None:
 
 def start_intraday_collector() -> None:
     global _collector_task
+    if "pytest" in sys.modules:
+        return
     if _collector_task is None or _collector_task.done():
         _collector_task = asyncio.create_task(_collector_loop())
 

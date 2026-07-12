@@ -2,7 +2,17 @@ from types import SimpleNamespace
 from datetime import datetime, timedelta
 
 from app.api.helpers.execution import _confirmation_deadline, _confirmation_policy, build_position_execution_state
-from app.models.trading import ExpectationSnapshot, ExitCard, Holding, IntradayEvidenceEvent, NextDayPlan, TradeLog, VolumePriceSnapshot
+from app.models.trading import (
+    ExpectationSnapshot,
+    ExitCard,
+    Holding,
+    IntradayEvidenceEvent,
+    NextDayPlan,
+    PositionStateHistory,
+    TradeLog,
+    VolumePriceSnapshot,
+)
+from app.services.intraday_evidence_engine import collect_holding_evidence, nearest_sample_label
 
 
 def test_position_execution_profit_drawdown_requires_reduce(db_session):
@@ -632,3 +642,179 @@ def test_sector_migration_event_when_external_flow_takes_over(db_session):
     )
 
     assert any(event.event_type == "SECTOR_MIGRATION_CONFIRMED" for event in state.events)
+
+
+def test_position_state_history_records_transitions(db_session):
+    holding = Holding(
+        code="600021",
+        name="状态历史",
+        quantity=1000,
+        cost_price=10,
+        current_price=10.5,
+        total_asset=100000,
+        position_type="盈利趋势仓",
+        next_discipline="按状态迁移记录",
+    )
+    db_session.add(holding)
+    db_session.commit()
+    db_session.refresh(holding)
+
+    first = build_position_execution_state(
+        db_session,
+        holding,
+        quote={
+            "price": 10.5,
+            "high": 10.8,
+            "low": 10.3,
+            "open": 10.4,
+            "vwap": 10.45,
+            "minute_bars": [
+                {"price": 10.4, "volume": 1000, "amount": 10400},
+                {"price": 10.5, "volume": 1000, "amount": 10500},
+                {"price": 10.45, "volume": 1000, "amount": 10450},
+            ],
+            "note": "实时行情",
+        },
+    )
+    second = build_position_execution_state(
+        db_session,
+        holding,
+        quote={"price": 9.1, "high": 10.8, "low": 9.0, "open": 10.4, "note": "实时行情"},
+    )
+
+    rows = (
+        db_session.query(PositionStateHistory)
+        .filter(PositionStateHistory.holding_id == holding.id)
+        .order_by(PositionStateHistory.id.asc())
+        .all()
+    )
+    assert first.state_history
+    assert second.state_history
+    assert len(rows) >= 2
+    assert rows[0].old_state == ""
+    assert rows[-1].new_state == "EXIT_REQUIRED"
+    assert rows[-1].reason == "全部退出"
+
+
+def test_high_open_failed_breakout_event_escalates_to_red(db_session):
+    holding = Holding(
+        code="600022",
+        name="高开失败",
+        quantity=1000,
+        cost_price=10,
+        current_price=10.2,
+        total_asset=100000,
+        position_type="打板仓",
+        next_discipline="高开冲板失败禁止补仓",
+    )
+    db_session.add(holding)
+    db_session.commit()
+    db_session.refresh(holding)
+    volume = VolumePriceSnapshot(
+        trade_date="2026-07-12",
+        code="600022",
+        name="高开失败",
+        stage="冲板失败",
+        price=10.2,
+        change_pct=2,
+        open_price=10.5,
+        high_price=11.0,
+        low_price=10.1,
+        prev_close=10,
+        amount=18,
+        vwap=10.55,
+        vwap_source="minute",
+        minute_bar_count=8,
+        vwap_reliable=True,
+        high_drawdown=7.3,
+        active_buy_amount=3.0,
+        active_sell_amount=5.2,
+        attack_efficiency=0.1,
+        pattern="冲高回落跌破VWAP",
+        data_quality="realtime",
+        data_source="测试行情",
+        evidence_json="[]",
+        counter_evidence_json="[]",
+    )
+    seesaw = SimpleNamespace(
+        risk_level="中高",
+        signal="板块资金回落",
+        theme_flow_pullback_pct=30,
+        sector_net_inflow=-5,
+        sector_ebb_trigger=["板块资金峰值回落。"],
+        stock_weakening_trigger=[],
+        profit_drawdown_trigger=[],
+    )
+
+    state = build_position_execution_state(
+        db_session,
+        holding,
+        quote={
+            "price": 10.2,
+            "prev_close": 10,
+            "open": 10.5,
+            "high": 11.0,
+            "low": 10.1,
+            "vwap": 10.55,
+            "minute_bars": [
+                {"price": 10.8, "volume": 1000, "amount": 10800},
+                {"price": 10.6, "volume": 1000, "amount": 10600},
+                {"price": 10.2, "volume": 1000, "amount": 10200},
+            ],
+            "note": "实时行情",
+        },
+        seesaw=seesaw,
+        volume_price=volume,
+    )
+
+    high_open_events = [event for event in state.events if event.event_type == "HIGH_OPEN_FAILED_BREAKOUT"]
+    assert high_open_events
+    assert high_open_events[0].severity == "critical"
+    assert any("RED 风险" in item for item in high_open_events[0].evidence)
+
+
+def test_intraday_evidence_engine_saves_sample_event(monkeypatch, db_session):
+    holding = Holding(
+        code="600023",
+        name="证据采样",
+        quantity=1000,
+        cost_price=10,
+        current_price=10.6,
+        total_asset=100000,
+        position_type="盈利趋势仓",
+        next_discipline="记录盘中证据",
+    )
+    db_session.add(holding)
+    db_session.commit()
+    db_session.refresh(holding)
+
+    quote = {
+        "price": 10.6,
+        "prev_close": 10,
+        "open": 10.4,
+        "high": 10.8,
+        "low": 10.3,
+        "vwap": 10.5,
+        "volume": 3000,
+        "amount": 31500,
+        "minute_bars": [
+            {"time": "09:31", "price": 10.4, "volume": 1000, "amount": 10400},
+            {"time": "09:32", "price": 10.5, "volume": 1000, "amount": 10500},
+            {"time": "09:33", "price": 10.6, "volume": 1000, "amount": 10600},
+        ],
+        "note": "实时行情",
+    }
+    monkeypatch.setattr("app.services.intraday_evidence_engine.quote_for_code", lambda code: quote)
+
+    _, state, sample = collect_holding_evidence(
+        db_session,
+        holding,
+        stage="09:35确认",
+        now=datetime(2026, 7, 12, 9, 35),
+    )
+
+    assert nearest_sample_label(datetime(2026, 7, 12, 9, 36)) == "09:35"
+    assert sample.event_type == "INTRADAY_EVIDENCE_SNAPSHOT"
+    assert sample.confirmed is True
+    assert sample.recommendation_id == state.recommendation.id
+    assert "09:35" in sample.group_key

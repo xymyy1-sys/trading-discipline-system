@@ -15,6 +15,7 @@ from app.schemas.trading import (
     AccountAssetIn,
     AccountAssetOut,
     PositionExecutionStateOut,
+    PositionStateHistoryOut,
     RecommendationFeedbackIn,
     RecommendationFeedbackOut,
     IntradayCollectorStatusOut,
@@ -42,6 +43,7 @@ from app.models.trading import (
     IntradayCollectionRun,
     IntradayEvidenceEvent,
     PositionExecutionState,
+    PositionStateHistory,
     ProfitProtectionSnapshot,
     RecommendationFeedback,
     TTradePlan,
@@ -169,6 +171,36 @@ def get_holding_execution_state(
         quotes = {}
     quote = quotes.get(_quote_lookup_code(holding.code, quotes), {})
     return build_position_execution_state(db, holding, quote=quote)
+
+
+@router.get("/holdings/{holding_id}/state-history", response_model=list[PositionStateHistoryOut])
+def get_holding_state_history(
+    holding_id: int,
+    limit: int = 50,
+    db: Session = Depends(get_db),
+) -> list[PositionStateHistoryOut]:
+    rows = (
+        db.query(PositionStateHistory)
+        .filter(PositionStateHistory.holding_id == holding_id)
+        .order_by(PositionStateHistory.captured_at.desc(), PositionStateHistory.id.desc())
+        .limit(max(1, min(limit, 200)))
+        .all()
+    )
+    return [
+        PositionStateHistoryOut(
+            id=row.id,
+            holding_id=row.holding_id,
+            code=row.code,
+            name=row.name,
+            trade_date=row.trade_date,
+            old_state=row.old_state,
+            new_state=row.new_state,
+            captured_at=row.captured_at,
+            reason=row.reason,
+            evidence=json.loads(row.evidence_json or "[]"),
+        )
+        for row in rows
+    ]
 
 
 @router.get("/holdings/{holding_id}/profit-protection", response_model=list[ProfitProtectionSnapshotOut])

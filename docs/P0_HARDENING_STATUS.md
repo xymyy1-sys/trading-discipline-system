@@ -26,6 +26,13 @@ Deferred by request:
 - Risk recovery event: `RISK_RECOVERY_CONFIRMED`.
 - Minute-bar volume metrics: active buy/sell amount, attack efficiency, volume acceleration, attack amount, pullback amount, and pullback sell ratio evidence.
 - Frontend real-time risk event panel in the Today Decision workspace.
+- V2.2 first batch:
+  - Added `position_state_history` with old/new state, reason, evidence, and timestamp.
+  - Execution state refresh now records state transitions instead of only overwriting the latest state.
+  - Added `IntradayEvidenceEngine` service to centralize quote collection, volume-price snapshot, execution state refresh, and one intraday evidence snapshot per collection.
+  - Intraday sample events use `INTRADAY_EVIDENCE_SNAPSHOT` with price, volume, VWAP, expectation state, volume-price state, sector state, and action.
+  - Added `HIGH_OPEN_FAILED_BREAKOUT` real-time pattern detection with yellow/orange/red risk evidence for high-open failed breakout scenarios.
+  - Added `/api/holdings/{holding_id}/state-history` for acceptance checks.
 
 ## Still Open
 
@@ -36,6 +43,9 @@ Deferred by request:
 - Persist attack/pullback segment metrics into dedicated columns if later analytics need filtering and aggregation.
 - Strengthen cross-sector migration scoring with original theme outflow, new theme inflow, stock weakening, and leader-switch evidence.
 - Add a front-end SSE connection health indicator and recovery notification UX beyond the current event list.
+- Add frontend state-history timeline and intraday evidence trajectory display.
+- Continue V2.2 TTradingEngine cleanup: standardize `REVERSE_T` naming while preserving existing `INVERSE_T` compatibility.
+- Expand expectation management enums and transition labels to the full V2.2 vocabulary.
 - Add formal acceptance report exports for SSE demo, full single-stock intraday timeline, and T+1 validation.
 
 ## Latest Validation Commands

@@ -209,6 +209,21 @@ class PositionExecutionState(Base):
     )
 
 
+class PositionStateHistory(Base):
+    __tablename__ = "position_state_history"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    holding_id: Mapped[int] = mapped_column(Integer, index=True)
+    code: Mapped[str] = mapped_column(String(16), index=True)
+    name: Mapped[str] = mapped_column(String(64), default="")
+    trade_date: Mapped[str] = mapped_column(String(16), index=True)
+    old_state: Mapped[str] = mapped_column(String(48), default="")
+    new_state: Mapped[str] = mapped_column(String(48), index=True)
+    captured_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc), index=True)
+    reason: Mapped[str] = mapped_column(Text, default="")
+    evidence_json: Mapped[str] = mapped_column(Text, default="[]")
+
+
 class ProfitProtectionSnapshot(Base):
     __tablename__ = "profit_protection_snapshots"
 
