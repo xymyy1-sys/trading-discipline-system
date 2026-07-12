@@ -44,7 +44,12 @@ export function WorkspacePage({
 }: WorkspacePageProps) {
   const [active, setActive] = useState(defaultModule ?? modules[0]?.key)
   const selected = modules.find(item => item.key === active) ?? modules[0]
-  const ActiveComponent = selected?.Component
+  const [visitedModules, setVisitedModules] = useState<Set<string>>(() => new Set(selected?.key ? [selected.key] : []))
+
+  useEffect(() => {
+    if (!selected?.key) return
+    setVisitedModules(previous => previous.has(selected.key) ? previous : new Set(previous).add(selected.key))
+  }, [selected?.key])
 
   return (
     <section className="workspace-page">
@@ -83,7 +88,11 @@ export function WorkspacePage({
       </nav>
 
       <section className="workspace-module">
-        {ActiveComponent ? <ActiveComponent /> : null}
+        {modules.map(module => visitedModules.has(module.key) ? (
+          <div key={module.key} hidden={module.key !== selected?.key}>
+            <module.Component />
+          </div>
+        ) : null)}
       </section>
     </section>
   )

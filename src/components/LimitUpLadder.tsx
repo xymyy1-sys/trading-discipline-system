@@ -31,8 +31,6 @@ export default function LimitUpLadder() {
 
   useEffect(() => {
     loadData()
-    const timer = setInterval(() => loadData(), 300000)
-    return () => clearInterval(timer)
   }, [loadData])
 
   const filteredGroups = useMemo(() => {

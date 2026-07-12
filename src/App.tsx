@@ -1,5 +1,5 @@
 import { useEffect, useState, Suspense, lazy } from 'react'
-import { Routes, Route, useNavigate, useLocation, Navigate } from 'react-router-dom'
+import { useNavigate, useLocation } from 'react-router-dom'
 import {
   Activity,
   BookOpenCheck,
@@ -36,6 +36,8 @@ const navItems = [
   ['复盘校准', BookOpenCheck, '/复盘校准'],
 ] as const
 
+const workspacePaths = new Set<string>(navItems.map(([, , path]) => path))
+
 const oldPathToWorkspace: Record<string, string> = {
   '/题材雷达': '/选股中心',
   '/资金流证据': '/选股中心',
@@ -66,6 +68,8 @@ export default function App() {
   const activePath = location.pathname === '/' ? '/今日决策' : decodeURIComponent(location.pathname)
   const activeWorkspacePath = oldPathToWorkspace[activePath] ?? activePath
   const activeLabel = routeLabels[activePath] ?? routeLabels[activeWorkspacePath] ?? '今日决策'
+  const normalizedWorkspacePath = workspacePaths.has(activeWorkspacePath) ? activeWorkspacePath : '/今日决策'
+  const [visitedWorkspaces, setVisitedWorkspaces] = useState<Set<string>>(() => new Set([normalizedWorkspacePath]))
 
   useEffect(() => {
     fetch(`${API_BASE}/api/health`)
@@ -92,6 +96,19 @@ export default function App() {
     window.addEventListener('nav', handler)
     return () => window.removeEventListener('nav', handler)
   }, [navigate])
+
+  useEffect(() => {
+    const destination = oldPathToWorkspace[activePath]
+    if (destination) {
+      navigate(destination, { replace: true })
+      return
+    }
+    if (!workspacePaths.has(activePath)) {
+      navigate('/今日决策', { replace: true })
+      return
+    }
+    setVisitedWorkspaces(previous => previous.has(activePath) ? previous : new Set(previous).add(activePath))
+  }, [activePath, navigate])
 
   return (
     <main className="terminal-shell">
@@ -154,19 +171,12 @@ export default function App() {
           </div>
         </header>
 
-        <Suspense fallback={<div className="loading-fallback">载入中...</div>}>
-          <Routes>
-            <Route path="/" element={<Navigate to="/今日决策" replace />} />
-            <Route path="/今日决策" element={<TodayDecisionWorkspace />} />
-            <Route path="/选股中心" element={<StockSelectionWorkspace />} />
-            <Route path="/打板预期" element={<LimitExpectationWorkspace />} />
-            <Route path="/持仓执行" element={<PositionExecutionWorkspace />} />
-            <Route path="/复盘校准" element={<ReviewCalibrationWorkspace />} />
-            {Object.entries(oldPathToWorkspace).map(([path, destination]) => (
-              <Route key={path} path={path} element={<Navigate to={destination} replace />} />
-            ))}
-            <Route path="*" element={<Navigate to="/今日决策" replace />} />
-          </Routes>
+        <Suspense fallback={<div className="loading-fallback">首次打开工作区...</div>}>
+          {visitedWorkspaces.has('/今日决策') && <div hidden={normalizedWorkspacePath !== '/今日决策'}><TodayDecisionWorkspace /></div>}
+          {visitedWorkspaces.has('/选股中心') && <div hidden={normalizedWorkspacePath !== '/选股中心'}><StockSelectionWorkspace /></div>}
+          {visitedWorkspaces.has('/打板预期') && <div hidden={normalizedWorkspacePath !== '/打板预期'}><LimitExpectationWorkspace /></div>}
+          {visitedWorkspaces.has('/持仓执行') && <div hidden={normalizedWorkspacePath !== '/持仓执行'}><PositionExecutionWorkspace /></div>}
+          {visitedWorkspaces.has('/复盘校准') && <div hidden={normalizedWorkspacePath !== '/复盘校准'}><ReviewCalibrationWorkspace /></div>}
         </Suspense>
       </section>
     </main>

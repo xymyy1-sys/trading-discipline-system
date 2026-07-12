@@ -55,8 +55,6 @@ export default function Dashboard() {
 
   useEffect(() => {
     loadRadar()
-    const timer = setInterval(() => loadRadar(), 300000)
-    return () => clearInterval(timer)
   }, [])
 
   const selected = useMemo(() => {

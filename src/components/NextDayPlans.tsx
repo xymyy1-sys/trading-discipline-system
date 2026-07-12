@@ -51,13 +51,6 @@ export default function NextDayPlans() {
         .catch(() => {})
     }
     loadSeesaw()
-    const timer = window.setInterval(() => {
-      if (document.visibilityState === 'visible') {
-        loadPlans(true)
-        loadSeesaw()
-      }
-    }, 30000)
-    return () => window.clearInterval(timer)
   }, [loadPlans])
 
   const selected = useMemo(() => plans.find(p => p.id === selectedId) ?? null, [plans, selectedId])

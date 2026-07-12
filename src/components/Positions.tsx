@@ -151,17 +151,11 @@ export default function Positions() {
   }
   useEffect(() => {
     fetchAccountAsset()
-    refreshQuotes()
+    fetchHoldings()
     fetchSeesaw()
     fetchExecutionStates()
     fetchTimeStopRules()
     fetchTPlans()
-    const timer = window.setInterval(() => {
-      refreshQuotes()
-      fetchSeesaw()
-      fetchExecutionStates()
-    }, 30000)
-    return () => window.clearInterval(timer)
   }, [])
 
   const totalMarketValue = holdings.reduce((s, h) => s + h.market_value, 0)
