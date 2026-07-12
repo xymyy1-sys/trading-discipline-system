@@ -1,6 +1,6 @@
 # V2 P0 Hardening Status
 
-Status: V2 first-phase foundation completed, P0 hardening in progress.
+Status: V2 product and P0 hardening code complete; GitHub CI and target-server production verification pending.
 
 Historical replay is implemented against persisted evidence. A complete 600584 acceptance pass still requires the target trading-day evidence dataset to be present.
 
@@ -92,7 +92,7 @@ Historical replay is implemented against persisted evidence. A complete 600584 a
   - Stock decision cards now display attack/pullback segment metrics alongside VWAP and drawdown.
   - Segment metrics remain derived only from real minute bars or explicit quote fields; missing minute data still downgrades deterministic signals.
 
-## Still Open
+## Production / optional follow-up
 
 - Put the public deployment behind HTTPS, set `AUTH_COOKIE_SECURE=true`, close firewall port 8000, and rotate any previously exposed credentials.
 - Add optional multi-user roles if the system will be shared with other operators. The current deployment remains deliberately single-user.
