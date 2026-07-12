@@ -208,7 +208,7 @@ def _model_calibration_metrics(
     suggestions: list[CalibrationSuggestionOut] = []
 
     expectation_samples = [item for item in expectations if item.expectation_result and item.expectation_result != "UNKNOWN"]
-    expectation_fail = sum(1 for item in expectation_samples if item.expectation_result in {"WEAKER", "SLIGHTLY_WEAKER"})
+    expectation_fail = sum(1 for item in expectation_samples if item.expectation_result in {"WEAKER", "INVALID", "SLIGHTLY_WEAKER"})
     expectation_success = sum(1 for item in expectation_samples if item.expectation_result in {"MATCHED", "STRONGER"})
     metrics.append(_metric(
         key="expectation_hit",

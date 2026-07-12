@@ -642,6 +642,9 @@ def test_sector_migration_event_when_external_flow_takes_over(db_session):
     )
 
     assert any(event.event_type == "SECTOR_MIGRATION_CONFIRMED" for event in state.events)
+    migration = [event for event in state.events if event.event_type == "SECTOR_MIGRATION_CONFIRMED"][0]
+    assert any("可信度" in item for item in migration.evidence)
+    assert migration.priority >= 75
 
 
 def test_position_state_history_records_transitions(db_session):

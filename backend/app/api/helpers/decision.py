@@ -40,6 +40,15 @@ def _json_list(raw: str | None) -> list[str]:
     return [str(item) for item in value] if isinstance(value, list) else []
 
 
+def normalize_t_type(value: str | None) -> str:
+    value = str(value or "NO_T").upper()
+    if value == "INVERSE_T":
+        return "REVERSE_T"
+    if value in {"POSITIVE_T", "REVERSE_T", "NO_T"}:
+        return value
+    return "NO_T"
+
+
 def current_expectation_stage(now: datetime | None = None) -> str:
     now = now or datetime.now()
     current = now.time()
@@ -95,7 +104,7 @@ def _t_plan_out(row: TTradePlan) -> TTradePlanOut:
         trade_date=row.trade_date,
         code=row.code,
         name=row.name,
-        t_type=row.t_type,
+        t_type=normalize_t_type(row.t_type),
         planned_sell_price=row.planned_sell_price,
         planned_sell_quantity=row.planned_sell_quantity,
         buyback_price_low=row.buyback_price_low,
@@ -139,20 +148,28 @@ def build_expectation_snapshot(
     if not open_pct and quote.get("open") and previous_close:
         open_pct = (_safe_float(quote.get("open")) - previous_close) / previous_close * 100
     base_expectation = "NEUTRAL"
-    if any(key in base_hint for key in ("超预期", "强预期", "主线前排", "打板")):
+    if any(key in base_hint for key in ("一字", "极强", "超强", "核心总龙")):
+        base_expectation = "EXTREME_STRONG"
+    elif any(key in base_hint for key in ("超预期", "强预期", "主线前排", "打板")):
         base_expectation = "STRONG"
     if any(key in base_hint for key in ("弱于预期", "分歧转弱", "退出")):
         base_expectation = "WEAK"
     if any(key in base_hint for key in ("修复", "低吸")):
         base_expectation = "REPAIR"
+    if any(key in base_hint for key in ("退潮", "衰退", "兑现", "禁止")):
+        base_expectation = "EBB"
 
     expected_low, expected_high = (-1.0, 2.0)
-    if base_expectation == "STRONG":
+    if base_expectation == "EXTREME_STRONG":
+        expected_low, expected_high = (5.0, 9.5)
+    elif base_expectation == "STRONG":
         expected_low, expected_high = (2.0, 5.5)
     elif base_expectation == "WEAK":
         expected_low, expected_high = (-4.0, 0.5)
     elif base_expectation == "REPAIR":
         expected_low, expected_high = (-2.0, 2.5)
+    elif base_expectation == "EBB":
+        expected_low, expected_high = (-6.0, -1.0)
     outperform = expected_high + 1.0
     underperform = expected_low - 1.0
     severe_under = min(underperform - 2.0, -3.0)
@@ -183,11 +200,11 @@ def build_expectation_snapshot(
     if open_score >= 16:
         result, transition, suggestion = "STRONGER", "STRONG_TO_STRONGER", "超预期强化，只允许按计划确认，不追最高点。"
     elif open_score >= 8:
-        result, transition, suggestion = "SLIGHTLY_STRONGER", "WEAK_TO_STRONG", "小幅超预期，等待量价确认后再提高仓位。"
+        result, transition, suggestion = "STRONGER", "WEAK_TO_STRONG", "小幅超预期，等待量价确认后再提高仓位。"
     elif open_score <= -18:
-        result, transition, suggestion = "WEAKER", "EXPECTATION_INVALIDATED", "显著低于预期，优先降风险，禁止补仓。"
+        result, transition, suggestion = "INVALID", "EXPECTATION_INVALIDATED", "显著低于预期，优先降风险，禁止补仓。"
     elif open_score <= -8:
-        result, transition, suggestion = "SLIGHTLY_WEAKER", "CONSENSUS_TO_DIVERGENCE", "预期转分歧，观察修复失败就减仓。"
+        result, transition, suggestion = "WEAKER", "CONSENSUS_TO_DIVERGENCE", "预期转分歧，观察修复失败就减仓。"
     else:
         result, transition, suggestion = "MATCHED", "MATCHED", "基本符合预期，按原计划和失效条件执行。"
     confidence = 0.72 if quote else 0.42
@@ -280,7 +297,7 @@ def build_t_eligibility(db: Session, holding: Holding) -> TEligibilityOut:
         for item in execution.evidence
         for keyword in ("高点回撤", "冲高回落", "利润回撤", "冲击涨停")
     )
-    inverse_candidate = (
+    reverse_candidate = (
         eligible
         and execution.state in {"PROFIT_PROTECTION", "DIVERGENCE_HOLD", "PROFIT_EXPANSION", "NORMAL_HOLD"}
         and has_profit_protection
@@ -291,11 +308,11 @@ def build_t_eligibility(db: Session, holding: Holding) -> TEligibilityOut:
     )
     if eligible:
         evidence.append("原持仓逻辑未证伪，且仍有可卖底仓。")
-        if inverse_candidate:
+        if reverse_candidate:
             evidence.append("允许倒T候选：先卖出昨日可卖底仓的一小部分，只有缩量回踩并重新修复后才接回。")
         else:
             evidence.append("只允许正T小比例卖出，等待重新确认后接回。")
-    if inverse_candidate:
+    if reverse_candidate:
         buyback_low = round(max(execution.structure_stop_price, current * 0.965), 2) if current else 0
         buyback_high = round(current * 0.985, 2) if current else 0
         suggested_sell_price = round(current, 2)
@@ -319,7 +336,7 @@ def build_t_eligibility(db: Session, holding: Holding) -> TEligibilityOut:
         holding_id=int(holding.id),
         code=holding.code,
         name=holding.name,
-        t_type="INVERSE_T" if inverse_candidate else "POSITIVE_T" if eligible else "NO_T",
+        t_type="REVERSE_T" if reverse_candidate else "POSITIVE_T" if eligible else "NO_T",
         eligible=eligible,
         sellable_quantity=sellable,
         today_buy_quantity=today_buy,
@@ -337,14 +354,16 @@ def build_t_eligibility(db: Session, holding: Holding) -> TEligibilityOut:
 
 def create_t_plan(db: Session, holding: Holding, payload: TTradePlanIn | None = None) -> TTradePlanOut:
     eligibility = build_t_eligibility(db, holding)
+    payload_provided = payload is not None
     payload = payload or TTradePlanIn()
     if not eligibility.eligible:
         t_type = "NO_T"
         quantity = 0
         evidence = eligibility.forbidden_reasons
     else:
-        t_type = payload.t_type if payload.t_type != "NO_T" else eligibility.t_type
-        if t_type not in {"POSITIVE_T", "INVERSE_T"}:
+        requested_type = payload.t_type if payload_provided else eligibility.t_type
+        t_type = normalize_t_type(requested_type if requested_type != "NO_T" else eligibility.t_type)
+        if t_type not in {"POSITIVE_T", "REVERSE_T"}:
             t_type = eligibility.t_type
         quantity = payload.planned_sell_quantity or eligibility.suggested_quantity
         evidence = eligibility.evidence

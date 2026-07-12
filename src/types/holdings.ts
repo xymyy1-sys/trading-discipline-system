@@ -161,6 +161,19 @@ export interface ProfitProtectionSnapshot {
   recommended_action: string;
 }
 
+export interface PositionStateHistory {
+  id: number | null;
+  holding_id: number;
+  code: string;
+  name: string;
+  trade_date: string;
+  old_state: string;
+  new_state: string;
+  captured_at: string;
+  reason: string;
+  evidence: string[];
+}
+
 export interface PositionExecutionState {
   id: number | null;
   holding_id: number;
@@ -192,6 +205,7 @@ export interface PositionExecutionState {
   events: IntradayEvidenceEvent[];
   recommendation: ActionRecommendation | null;
   profit_snapshot: ProfitProtectionSnapshot | null;
+  state_history: PositionStateHistory[];
   data_quality: string;
   data_time: string;
   updated_at: string;

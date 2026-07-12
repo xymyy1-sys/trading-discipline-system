@@ -41,6 +41,9 @@ from app.schemas.trading import (
     VolumePriceSnapshotOut,
 )
 
+WEAK_EXPECTATION_RESULTS = {"WEAKER", "INVALID", "SLIGHTLY_WEAKER"}
+STRONG_EXPECTATION_RESULTS = {"STRONGER", "SLIGHTLY_STRONGER"}
+
 
 def _json_dumps(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False)
@@ -374,6 +377,48 @@ def _high_open_failed_breakout_event(
     }
 
 
+def _sector_migration_signal(seesaw: Any | None) -> tuple[bool, int, list[str], float, float]:
+    if not seesaw:
+        return False, 0, [], 0.0, 0.0
+    target = str(getattr(seesaw, "external_inflow_target", "") or "")
+    if not target:
+        return False, 0, [], 0.0, 0.0
+
+    evidence: list[str] = []
+    criteria = 0
+    sector_net = float(getattr(seesaw, "sector_net_inflow", 0) or 0)
+    flow_peak = float(getattr(seesaw, "theme_flow_peak", 0) or 0)
+    pullback = float(getattr(seesaw, "theme_flow_pullback_pct", 0) or 0)
+    rank = int(getattr(seesaw, "sector_rank", 0) or 0)
+    risk_level = str(getattr(seesaw, "risk_level", "") or "")
+
+    if target:
+        criteria += 1
+        evidence.append(f"新题材/外部吸金方向为 {target}。")
+    if sector_net < 0 or pullback >= 20:
+        criteria += 1
+        evidence.append(f"原主线资金弱化：净流入 {sector_net:.2f} 亿，峰值回落 {pullback:.2f}%。")
+    if rank > 10:
+        criteria += 1
+        evidence.append(f"原主线资金排名降至第 {rank}，不在前排。")
+    if risk_level in {"高", "中高", "中"}:
+        criteria += 1
+        evidence.append(f"持仓/主线风险等级为 {risk_level}。")
+    stock_triggers = [str(item) for item in list(getattr(seesaw, "stock_weakening_trigger", []) or [])]
+    sector_triggers = [str(item) for item in list(getattr(seesaw, "sector_ebb_trigger", []) or [])]
+    if stock_triggers:
+        criteria += 1
+        evidence.extend(stock_triggers[:2])
+    if sector_triggers:
+        evidence.extend(sector_triggers[:2])
+
+    confidence = min(95, 45 + criteria * 10 + (10 if sector_net < 0 and pullback >= 20 else 0))
+    confirmed = criteria >= 3
+    if confirmed:
+        evidence.insert(0, f"疑似跨板块资金迁移，可信度 {confidence}%。")
+    return confirmed, confidence, evidence[:7], sector_net, flow_peak
+
+
 def _build_events(
     holding: Holding,
     current: float,
@@ -421,7 +466,7 @@ def _build_events(
             "group_key": "stock:volume-price",
             "evidence": (evidence[:3] or ["量价结构转弱。"]) + ([] if vwap_reliable else ["VWAP缺少真实1分钟成交确认，该事件仅作观察。"]),
         })
-    if vwap_reliable and expectation_result in {"WEAKER", "SLIGHTLY_WEAKER"} and volume_price_state in {"VWAP_BREAKDOWN", "VOLUME_PRICE_WEAKENING"}:
+    if vwap_reliable and expectation_result in WEAK_EXPECTATION_RESULTS and volume_price_state in {"VWAP_BREAKDOWN", "VOLUME_PRICE_WEAKENING"}:
         events.append({
             "captured_at": now,
             "scope": "stock",
@@ -463,16 +508,8 @@ def _build_events(
             "group_key": "sector:flow",
             "evidence": [str(getattr(seesaw, "theme_flow_summary", "") or "板块资金从峰值回落。")],
         })
-    if (
-        seesaw
-        and str(getattr(seesaw, "external_inflow_target", "") or "")
-        and str(getattr(seesaw, "risk_level", "")) in {"高", "中高", "中"}
-        and (
-            int(getattr(seesaw, "sector_rank", 0) or 0) > 10
-            or float(getattr(seesaw, "sector_net_inflow", 0) or 0) < 0
-            or float(getattr(seesaw, "theme_flow_pullback_pct", 0) or 0) >= 20
-        )
-    ):
+    migration_confirmed, migration_confidence, migration_evidence, migration_value, migration_previous = _sector_migration_signal(seesaw)
+    if migration_confirmed:
         events.append({
             "captured_at": now,
             "scope": "sector",
@@ -480,13 +517,11 @@ def _build_events(
             "target_name": str(getattr(seesaw, "holding_theme", "") or holding.name),
             "event_type": "SECTOR_MIGRATION_CONFIRMED",
             "severity": "warning",
-            "value": float(getattr(seesaw, "sector_net_inflow", 0) or 0),
-            "previous_value": float(getattr(seesaw, "theme_flow_peak", 0) or 0),
-            "priority": 75,
+            "value": migration_value,
+            "previous_value": migration_previous,
+            "priority": 75 + min(20, max(0, migration_confidence - 70)),
             "group_key": "sector:migration",
-            "evidence": [
-                f"资金迁移至{getattr(seesaw, 'external_inflow_target', '')}，原持仓主线排名/资金弱化，按跨板块资金迁移处理。"
-            ],
+            "evidence": migration_evidence,
         })
     if seesaw and str(getattr(seesaw, "risk_level", "")) in {"高", "中高"}:
         events.append({
@@ -580,7 +615,7 @@ def _time_stop_reasons(
     if limit_up_price and high >= limit_up_price * 0.995 and current < limit_up_price * 0.985:
         reasons.append(f"盘中冲击涨停价 {limit_up_price:.2f} 后未回封，当前 {current:.2f} 已明显脱离封板区。")
 
-    if now.time() >= deadline and expectation_result in {"WEAKER", "SLIGHTLY_WEAKER"} and volume_state not in {"REPAIR_CONFIRMED", "VWAP_STRONG"}:
+    if now.time() >= deadline and expectation_result in WEAK_EXPECTATION_RESULTS and volume_state not in {"REPAIR_CONFIRMED", "VWAP_STRONG"}:
         reasons.append(f"{deadline.strftime('%H:%M')}确认截止后预期仍偏弱且量价未修复，触发时间止损确认。")
     return reasons
 
@@ -775,12 +810,12 @@ def build_position_execution_state(
 
     if protection_level != "NONE":
         evidence.append(f"已进入{protection_level}利润保护，不能无条件放任盈利大幅回吐。")
-    if expectation_result in {"WEAKER", "SLIGHTLY_WEAKER"}:
-        score_add = 2 if expectation_result == "WEAKER" or expectation_gap_score <= -18 else 1
+    if expectation_result in WEAK_EXPECTATION_RESULTS:
+        score_add = 2 if expectation_result in {"WEAKER", "INVALID"} or expectation_gap_score <= -18 else 1
         negative_score += score_add
         evidence.append(f"阶段预期结果 {expectation_result}，预期差 {expectation_gap_score}，执行侧不允许补仓摊低。")
         invalid_conditions.append("预期低于阈值且未出现量价修复前，禁止加仓或做T接回。")
-    elif expectation_result in {"STRONGER", "SLIGHTLY_STRONGER"}:
+    elif expectation_result in STRONG_EXPECTATION_RESULTS:
         counter_evidence.append(f"阶段预期结果 {expectation_result}，暂未构成预期证伪。")
     if volume_state == "VOLUME_PRICE_WEAKENING" and vwap_reliable:
         negative_score += 2
@@ -840,7 +875,7 @@ def build_position_execution_state(
         counter_evidence.append("未取得板块跷跷板数据，本次建议主要依据个股价格和利润保护。")
 
     state, action, reduce_ratio, level = _action_from_score(negative_score, hard_exit, current_profit_pct > 0)
-    if expectation_result in {"WEAKER", "SLIGHTLY_WEAKER"} and volume_state in {"VWAP_BREAKDOWN", "VOLUME_PRICE_WEAKENING"} and not hard_exit:
+    if expectation_result in WEAK_EXPECTATION_RESULTS and volume_state in {"VWAP_BREAKDOWN", "VOLUME_PRICE_WEAKENING"} and not hard_exit:
         state = "EXPECTATION_VOLUME_BREAKDOWN"
         action = "减仓50%" if current_profit_pct >= 0 else "只留观察仓"
         reduce_ratio = max(reduce_ratio, 0.50 if current_profit_pct >= 0 else 0.75)
@@ -860,7 +895,7 @@ def build_position_execution_state(
         or state in {"EXIT_REQUIRED", "REDUCE_REQUIRED", "EXPECTATION_VOLUME_BREAKDOWN"}
         or current < structure_stop_price
         or (vwap_reliable and volume_state in {"VWAP_BREAKDOWN", "VOLUME_PRICE_WEAKENING"})
-        or expectation_result in {"WEAKER", "SLIGHTLY_WEAKER"}
+        or expectation_result in WEAK_EXPECTATION_RESULTS
         or (seesaw and getattr(seesaw, "risk_level", "") in {"高", "中高"})
     )
     t_eligible = not t_forbidden and int(holding.quantity or 0) > 0 and current_profit_pct >= 0 and protection_level != "NONE"

@@ -16,7 +16,7 @@ def test_expectation_snapshot_marks_underperform(db_session):
     )
 
     assert snapshot.base_expectation == "STRONG"
-    assert snapshot.expectation_result in {"WEAKER", "SLIGHTLY_WEAKER"}
+    assert snapshot.expectation_result in {"WEAKER", "INVALID"}
     assert snapshot.expectation_gap_score < 0
     assert "禁止补仓" in snapshot.suggestion or "降风险" in snapshot.suggestion
 
@@ -60,8 +60,8 @@ def test_create_positive_t_plan_when_eligible(db_session):
 
     plan = create_t_plan(db_session, holding)
 
-    assert plan.t_type in {"POSITIVE_T", "INVERSE_T", "NO_T"}
-    if plan.t_type in {"POSITIVE_T", "INVERSE_T"}:
+    assert plan.t_type in {"POSITIVE_T", "REVERSE_T", "NO_T"}
+    if plan.t_type in {"POSITIVE_T", "REVERSE_T"}:
         assert plan.planned_sell_quantity > 0
         assert plan.buyback_conditions
     else:
@@ -100,9 +100,65 @@ def test_inverse_t_requires_profit_protection_and_reversal_setup(db_session, mon
     eligibility = build_t_eligibility(db_session, holding)
 
     assert eligibility.eligible is True
-    assert eligibility.t_type == "INVERSE_T"
+    assert eligibility.t_type == "REVERSE_T"
     assert eligibility.suggested_sell_price == 11
     assert any("先卖出计划数量" in item for item in eligibility.buyback_conditions)
+
+
+def test_inverse_t_payload_is_normalized_to_reverse_t(db_session, monkeypatch):
+    holding = Holding(
+        code="600018",
+        name="兼容倒T",
+        quantity=2000,
+        cost_price=10,
+        current_price=11,
+        total_asset=100000,
+        position_type="盈利趋势仓",
+        next_discipline="兼容旧命名",
+    )
+    db_session.add(holding)
+    db_session.commit()
+    db_session.refresh(holding)
+    execution = SimpleNamespace(
+        sellable_quantity=2000,
+        today_buy_quantity=0,
+        yesterday_quantity=2000,
+        state="PROFIT_PROTECTION",
+        t_eligible=True,
+        profit_snapshot=SimpleNamespace(current_profit_pct=10, protection_level="LEVEL_4"),
+        data_quality="realtime",
+        volume_price_state="HIGH_DRAWDOWN",
+        evidence=["高点回撤 3.20%，利润回撤进入保护区。"],
+        recommended_action="继续持有",
+        structure_stop_price=10.4,
+    )
+    monkeypatch.setattr("app.api.helpers.decision.build_position_execution_state", lambda db, row: execution)
+
+    plan = create_t_plan(db_session, holding)
+
+    assert plan.t_type == "REVERSE_T"
+
+
+def test_expectation_snapshot_supports_extreme_and_ebb_vocab(db_session):
+    extreme = build_expectation_snapshot(
+        db_session,
+        "600024",
+        name="极强预期",
+        quote={"price": 10.8, "prev_close": 10, "open": 10.7, "change_pct": 9},
+        base_hint="极强 核心总龙",
+    )
+    ebb = build_expectation_snapshot(
+        db_session,
+        "600025",
+        name="退潮预期",
+        quote={"price": 9.4, "prev_close": 10, "open": 9.5, "change_pct": -6},
+        base_hint="退潮 禁止接力",
+    )
+
+    assert extreme.base_expectation == "EXTREME_STRONG"
+    assert extreme.expectation_result in {"MATCHED", "STRONGER"}
+    assert ebb.base_expectation == "EBB"
+    assert ebb.expectation_result in {"MATCHED", "WEAKER", "INVALID", "STRONGER"}
 
 
 def test_volume_price_snapshot_detects_vwap_breakdown(db_session):
