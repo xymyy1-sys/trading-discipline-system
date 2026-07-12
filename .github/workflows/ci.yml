@@ -47,3 +47,30 @@ jobs:
           mkdir -p data
           alembic -c alembic.ini upgrade head
           alembic -c alembic.ini current
+
+  deployment:
+    runs-on: ubuntu-latest
+    env:
+      AUTH_PASSWORD: ci-password-is-not-for-production
+      AUTH_SECRET: ci-secret-is-longer-than-thirty-two-characters
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate Compose configuration
+        run: docker compose config --quiet
+      - name: Build production images
+        run: docker compose build
+
+  dependency-security:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: npm audit --omit=dev --audit-level=high
+      - run: pip install pip-audit
+      - run: pip-audit -r backend/requirements.txt
