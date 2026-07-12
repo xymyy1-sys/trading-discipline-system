@@ -16,6 +16,7 @@ settings = get_settings()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    settings.validate_security()
     Base.metadata.create_all(bind=engine)
     start_intraday_collector()
     yield

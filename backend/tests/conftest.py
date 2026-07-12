@@ -1,3 +1,8 @@
+import os
+
+os.environ.setdefault("AUTH_PASSWORD", "test-password-only")
+os.environ.setdefault("AUTH_SECRET", "test-secret-must-be-at-least-32-characters")
+
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
@@ -38,6 +43,8 @@ def fixture_client(db_session):
 
     # Override get_db dependency in app
     app.dependency_overrides[get_db] = override_get_db
+    from app.core.security import require_auth
+    app.dependency_overrides[require_auth] = lambda: "test-user"
     with TestClient(app) as test_client:
         yield test_client
     app.dependency_overrides.clear()

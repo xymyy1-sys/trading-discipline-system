@@ -196,3 +196,18 @@ def test_review_calibration_summary(client, db_session):
         "plan_execution_drift",
     }
     assert any(item["target"] == "预期阈值" for item in data["calibration_suggestions"])
+def test_login_rejects_invalid_password(client):
+    response = client.post("/api/auth/login", json={"username": "admin", "password": "wrong-password"})
+    assert response.status_code == 401
+
+
+def test_protected_api_requires_session(client):
+    from app.core.security import require_auth
+    from app.main import app
+
+    override = app.dependency_overrides.pop(require_auth)
+    try:
+        response = client.get("/api/holdings")
+        assert response.status_code == 401
+    finally:
+        app.dependency_overrides[require_auth] = override

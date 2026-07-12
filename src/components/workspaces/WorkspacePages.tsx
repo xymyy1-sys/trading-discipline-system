@@ -123,7 +123,7 @@ export function TodayDecisionSummary() {
   }, [])
 
   useEffect(() => {
-    const source = new EventSource(`${API_BASE}/api/intraday-events/stream`)
+    const source = new EventSource(`${API_BASE}/api/intraday-events/stream`, { withCredentials: true })
     source.onopen = () => setStreamState('实时推送已连接')
     source.onerror = () => setStreamState('实时推送重连中')
     source.addEventListener('stream-ready', () => {

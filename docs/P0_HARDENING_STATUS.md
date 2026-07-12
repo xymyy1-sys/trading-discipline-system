@@ -8,6 +8,14 @@ Deferred by request:
 
 ## Completed
 
+- Security hardening first batch:
+  - Added single-user login with server-signed, HttpOnly, SameSite session cookies.
+  - Protected all holdings, trades, plans, market, checks, and stock APIs; only health and authentication remain public.
+  - Added login rate limiting and unsafe-request origin validation.
+  - Production frontend now uses same-origin `/api` instead of bypassing Nginx through public port 8000.
+  - Docker no longer publishes backend port 8000; Nginx adds baseline browser security headers.
+  - Deployment fails closed when `AUTH_PASSWORD` or `AUTH_SECRET` is missing or weak.
+
 - Background intraday collector with status and manual run APIs.
 - Intraday collection run records.
 - VWAP reliability fields: source, minute bar count, reliable flag.
@@ -61,6 +69,9 @@ Deferred by request:
   - Segment metrics remain derived only from real minute bars or explicit quote fields; missing minute data still downgrades deterministic signals.
 
 ## Still Open
+
+- Put the public deployment behind HTTPS, set `AUTH_COOKIE_SECURE=true`, close firewall port 8000, and rotate any previously exposed credentials.
+- Add optional multi-user roles and an immutable audit log if the system will be shared with other operators.
 
 - Enable CI in GitHub after the PAT gets `workflow` scope. The workflow file exists locally at `.github/workflows/ci.yml` but cannot be pushed by the current token.
 - Continue minute-bar production monitoring: retries/backoff metrics, provider health history, and alternate provider support beyond Eastmoney.
