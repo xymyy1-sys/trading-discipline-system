@@ -21,6 +21,8 @@ This matrix is derived from all three supplied requirement documents. A feature 
 | Risk position sizing | structure-stop risk budget and script/market/stock/sector/liquidity caps |
 | Consensus/profit pressure | recent-return, opening-expectation, VWAP and turnover-based model in decision card |
 | Daily volume-price breadth | persisted MA5/10/20, 5/10-day returns, 20-day-high distance, historical volume ratio and transparent 30-day volume-weighted chip estimates |
+| Exchange microstructure fields | provider tick direction for active buy/sell and configurable large-order net; Eastmoney F8 turnover and F21 float capitalization persisted with provenance and reliability flags |
+| Sector evidence chart | real fund curves, rank movement, peak/pullback and reversal events plus Eastmoney sector-index minute price/average-price VWAP; missing minute data produces no VWAP conclusion |
 | Account-level risk | daily baseline, loss thresholds, synchronized holding degradation and stop-loss count |
 | Data provenance | source, latency, stale/degraded/estimated/complete flags, payload hash and provider health |
 | Security | signed HttpOnly login, origin checks, rate limits, same-origin API, private backend port, security headers |
@@ -31,8 +33,6 @@ This matrix is derived from all three supplied requirement documents. A feature 
 
 | Requirement area | Current boundary / remaining work |
 | --- | --- |
-| Exchange microstructure fields | Eastmoney tick direction provides true active buy/sell and configurable large-order net evidence when available; Eastmoney F8 turnover and F21 float capitalization are now persisted with explicit free-float provenance and reliability flags |
-| Sector evidence chart | real multi-point curves now expose rank movement, peak, pullback and new-high/reversal/turn-negative events in the chart and ranking; no event is inferred from a single snapshot, while sector VWAP remains unavailable until a trustworthy sector-index minute source is integrated |
 | Production availability | code is deployable; HTTPS certificate, firewall verification, database backup and real-server smoke tests must run on the target server |
 
 ## Deliberate non-goals

@@ -69,7 +69,15 @@ export default function SectorDetailDrawer({
           <MiniStat label="涨跌幅" value={`${(detail?.change_pct ?? item.change_pct).toFixed(2)}%`} tone={(detail?.change_pct ?? item.change_pct) >= 0 ? 'up' : 'down'} />
           <MiniStat label="涨停股" value={`${detail?.limit_up_stocks.length ?? 0}只`} />
           <MiniStat label="强度" value={`${detail?.strength ?? item.strength}/100`} />
+          <MiniStat label="板块指数" value={item.sector_price?.toFixed(2) ?? '--'} tone={item.sector_vwap_reliable ? (item.sector_below_vwap ? 'down' : 'up') : undefined} />
+          <MiniStat label="板块VWAP" value={item.sector_vwap?.toFixed(2) ?? '--'} />
         </div>
+
+        <p className="plain-text">
+          {item.sector_vwap_reliable
+            ? `东方财富板块指数分钟均价口径：当前指数${item.sector_below_vwap ? '低于' : '高于'} VWAP，共 ${item.index_timeline.length} 个真实分钟点。`
+            : '板块指数真实分钟均价暂不可用，不生成板块 VWAP 结论。'}
+        </p>
 
         {((detail?.flow_breakdown?.length ? detail.flow_breakdown : item.flow_breakdown) ?? []).length > 0 && (
           <div className="drawer-flow-breakdown">

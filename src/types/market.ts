@@ -3,6 +3,12 @@ export interface FlowPoint {
   value: number;
 }
 
+export interface SectorIndexPoint {
+  time: string;
+  price: number;
+  vwap: number;
+}
+
 export interface ThemeStockRole {
   code: string;
   name: string;
@@ -110,6 +116,11 @@ export interface SectorFlowItem {
   flow_pullback: number | null;
   flow_pullback_pct: number | null;
   flow_event: 'FLOW_NEW_HIGH' | 'FLOW_PEAK_REVERSAL' | 'FLOW_TURN_NEGATIVE' | null;
+  index_timeline: SectorIndexPoint[];
+  sector_price: number | null;
+  sector_vwap: number | null;
+  sector_vwap_reliable: boolean;
+  sector_below_vwap: boolean | null;
   flow_breakdown: Array<{
     name: string;
     net: number;

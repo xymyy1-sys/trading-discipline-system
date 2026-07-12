@@ -52,6 +52,11 @@ def test_sector_flow_derives_peak_pullback_rank_and_reversal_from_real_curve(mon
         SectorFlowPoint(time="11:00", value=100.0),
         SectorFlowPoint(time="14:00", value=35.0),
     ])
+    monkeypatch.setattr(provider, "_fetch_eastmoney_board_intraday_index", lambda _code: [
+        {"time": "10:00", "price": 1200.0, "vwap": 1198.0},
+        {"time": "11:00", "price": 1197.0, "vwap": 1199.0},
+        {"time": "14:00", "price": 1195.0, "vwap": 1198.5},
+    ])
     monkeypatch.setattr("app.services.market_data._is_trading_time", lambda: False)
     monkeypatch.setattr("app.services.market_data._get_snapshots", lambda _flow_type: [{
         "time": "14:00", "items": [
@@ -70,6 +75,31 @@ def test_sector_flow_derives_peak_pullback_rank_and_reversal_from_real_curve(mon
     assert item.flow_pullback == -80.0
     assert item.flow_pullback_pct == -80.0
     assert item.flow_event == "FLOW_PEAK_REVERSAL"
+    assert item.sector_vwap_reliable is True
+    assert item.sector_below_vwap is True
+    assert item.sector_price == 1195.0
+    assert item.sector_vwap == 1198.5
+
+
+def test_eastmoney_board_index_parses_provider_average_price_as_vwap(monkeypatch):
+    provider = MarketDataProvider()
+
+    class FakeResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"data": {"trends": [
+                "2026-07-10 09:30,1000,1002,1003,999,100,1000000,1001.5",
+                "2026-07-10 09:31,1002,999,1002,998,120,1200000,1000.4",
+                "2026-07-10 09:32,999,998,1000,997,130,1300000,999.6",
+            ]}}
+
+    monkeypatch.setattr("app.services.market_data.requests.get", lambda *_args, **_kwargs: FakeResponse())
+
+    points = provider._fetch_eastmoney_board_intraday_index("BK1036")
+
+    assert points[-1] == {"time": "09:32", "price": 998.0, "vwap": 999.6}
 
 
 def test_sanitize_flow_timeline_last_point_matches_current_net_flow():

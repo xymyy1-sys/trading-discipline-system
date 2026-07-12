@@ -53,11 +53,12 @@ export default function SectorRanking({
             <span className="rank-num">{String(i + 1).padStart(2, '0')}</span>
             <span className="rank-name">{displayName(item)}</span>
             <span className="rank-theme-line">{categoryLine(item)}</span>
-            {(item.rank_change !== null || item.flow_event) && (
+            {(item.rank_change !== null || item.flow_event || item.sector_vwap_reliable) && (
               <span className="rank-evidence">
                 {item.rank_change !== null && `排名${item.rank_change > 0 ? `↑${item.rank_change}` : item.rank_change < 0 ? `↓${Math.abs(item.rank_change)}` : '持平'}`}
                 {item.flow_event && ` · ${flowEventLabel[item.flow_event]}`}
                 {item.flow_pullback_pct !== null && item.flow_pullback_pct < 0 && ` ${item.flow_pullback_pct.toFixed(1)}%`}
+                {item.sector_vwap_reliable && ` · 板块${item.sector_below_vwap ? '跌破' : '站上'}VWAP`}
               </span>
             )}
             <span className="rank-stats">

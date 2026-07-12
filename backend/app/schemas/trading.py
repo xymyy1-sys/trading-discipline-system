@@ -928,6 +928,12 @@ class SectorFlowBreakdownItem(BaseModel):
     ratio: float = 0
 
 
+class SectorIndexPoint(BaseModel):
+    time: str
+    price: float
+    vwap: float
+
+
 class SectorFlowItem(BaseModel):
     name: str
     display_name: str | None = None
@@ -952,6 +958,11 @@ class SectorFlowItem(BaseModel):
     flow_pullback: float | None = None
     flow_pullback_pct: float | None = None
     flow_event: str | None = None
+    index_timeline: list[SectorIndexPoint] = Field(default_factory=list)
+    sector_price: float | None = None
+    sector_vwap: float | None = None
+    sector_vwap_reliable: bool = False
+    sector_below_vwap: bool | None = None
     flow_breakdown: list[SectorFlowBreakdownItem] = Field(default_factory=list)
 
 

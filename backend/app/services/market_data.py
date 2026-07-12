@@ -2,6 +2,7 @@ import html
 import re
 import uuid
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
 from random import Random
 from typing import Any
@@ -780,6 +781,25 @@ class MarketDataProvider:
             for raw in sorted([raw for raw in raw_ordered if _net_of(raw) < 0], key=_net_of)[:10]
             if str(raw.get("board_code") or "").strip()
         )
+        index_curves: dict[str, list[dict[str, Any]]] = {}
+        eastmoney_chart_codes = [
+            str(raw.get("board_code") or "")
+            for raw in raw_ordered
+            if raw.get("provider") == "eastmoney"
+            and period == "今日"
+            and str(raw.get("board_code") or "") in chart_codes
+        ]
+        if eastmoney_chart_codes:
+            with ThreadPoolExecutor(max_workers=min(8, len(eastmoney_chart_codes))) as executor:
+                futures = {
+                    executor.submit(self._fetch_eastmoney_board_intraday_index, code): code
+                    for code in eastmoney_chart_codes
+                }
+                for future in as_completed(futures):
+                    try:
+                        index_curves[futures[future]] = future.result()
+                    except Exception:
+                        continue
         has_eastmoney_intraday_curve = False
         previous_rank: dict[str, int] = {}
         rank_snapshot = snaps[-2] if snapshot_recorded and len(snaps) >= 2 else (snaps[-1] if snaps else None)
@@ -846,6 +866,11 @@ class MarketDataProvider:
                     flow_event = "FLOW_NEW_HIGH"
 
             old_rank = previous_rank.get(name)
+            index_timeline = index_curves.get(board_code, [])
+            latest_index = index_timeline[-1] if index_timeline else None
+            sector_price = float(latest_index["price"]) if latest_index else None
+            sector_vwap = float(latest_index["vwap"]) if latest_index else None
+            sector_vwap_reliable = len(index_timeline) >= 3 and bool(sector_vwap and sector_vwap > 0)
 
             items.append(
                 SectorFlowItem(
@@ -872,6 +897,11 @@ class MarketDataProvider:
                     flow_pullback=flow_pullback,
                     flow_pullback_pct=flow_pullback_pct,
                     flow_event=flow_event,
+                    index_timeline=index_timeline,
+                    sector_price=sector_price,
+                    sector_vwap=sector_vwap,
+                    sector_vwap_reliable=sector_vwap_reliable,
+                    sector_below_vwap=(sector_price < sector_vwap) if sector_vwap_reliable and sector_price is not None and sector_vwap is not None else None,
                     flow_breakdown=[
                         {
                             "name": str(part.get("name") or ""),
@@ -1843,6 +1873,35 @@ class MarketDataProvider:
             points.append(SectorFlowPoint(time=time_label, value=round(_safe_float(parts[1]) / 1e8, 2)))
         if not points:
             raise ValueError("empty eastmoney board intraday flow")
+        return points
+
+    def _fetch_eastmoney_board_intraday_index(self, board_code: str) -> list[dict[str, Any]]:
+        if not board_code:
+            raise ValueError("missing eastmoney board code")
+        resp = requests.get(
+            "https://push2his.eastmoney.com/api/qt/stock/trends2/get",
+            params={
+                "secid": f"90.{board_code}", "ndays": "1", "iscr": "0", "iscca": "0",
+                "fields1": "f1,f2,f3,f4,f5,f6,f7,f8,f9,f10,f11,f12,f13",
+                "fields2": "f51,f52,f53,f54,f55,f56,f57,f58",
+            },
+            headers={"User-Agent": "Mozilla/5.0", "Referer": "https://quote.eastmoney.com/"},
+            timeout=6,
+        )
+        resp.raise_for_status()
+        rows = resp.json().get("data", {}).get("trends") or []
+        points: list[dict[str, Any]] = []
+        for row in rows:
+            parts = str(row).split(",")
+            if len(parts) < 8:
+                continue
+            time_label = parts[0][-5:]
+            price = _safe_float(parts[2])
+            average_price = _safe_float(parts[7])
+            if re.match(r"^\d{2}:\d{2}$", time_label) and price > 0 and average_price > 0:
+                points.append({"time": time_label, "price": round(price, 4), "vwap": round(average_price, 4)})
+        if not points:
+            raise ValueError("empty eastmoney board intraday index")
         return points
 
     def _fetch_akshare_sector_flow_raw(
