@@ -308,3 +308,17 @@ def test_acceptance_report_contains_security_sse_and_t1(client):
     assert report["security"]["authentication_required"] is True
     assert report["sse"]["authenticated"] is True
     assert "t_plus_one_validations" in report
+
+
+def test_data_quality_health_aggregates_provider_history(client, db_session):
+    from datetime import datetime
+    from app.models.trading import DataCaptureSnapshot
+    db_session.add(DataCaptureSnapshot(trade_date="2026-07-12", captured_at=datetime.now(), source="provider-a", data_type="stock_minute", target_code="600001", quality="realtime", latency_ms=120, status="ok", is_complete=True, raw_payload_hash="a" * 64))
+    db_session.add(DataCaptureSnapshot(trade_date="2026-07-12", captured_at=datetime.now(), source="provider-a", data_type="stock_minute", target_code="600002", quality="degraded", latency_ms=280, status="fetch_error", is_degraded=True, raw_payload_hash="b" * 64))
+    db_session.commit()
+    response = client.get("/api/data-quality/health")
+    assert response.status_code == 200
+    provider = response.json()["providers"][0]
+    assert provider["sample_count"] == 2
+    assert provider["degraded_count"] == 1
+    assert provider["average_latency_ms"] == 200

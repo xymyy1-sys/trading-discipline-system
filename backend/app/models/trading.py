@@ -426,6 +426,29 @@ class StrategyTemplate(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
 
 
+class DataCaptureSnapshot(Base):
+    __tablename__ = "data_capture_snapshots"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    trade_date: Mapped[str] = mapped_column(String(16), index=True)
+    captured_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc), index=True)
+    source: Mapped[str] = mapped_column(String(64), index=True)
+    data_type: Mapped[str] = mapped_column(String(32), index=True)
+    target_code: Mapped[str] = mapped_column(String(32), index=True)
+    target_name: Mapped[str] = mapped_column(String(64), default="")
+    raw_value_json: Mapped[str] = mapped_column(Text, default="{}")
+    normalized_value_json: Mapped[str] = mapped_column(Text, default="{}")
+    quality: Mapped[str] = mapped_column(String(32), default="missing")
+    latency_ms: Mapped[int] = mapped_column(Integer, default=0)
+    is_stale: Mapped[bool] = mapped_column(Boolean, default=False)
+    is_degraded: Mapped[bool] = mapped_column(Boolean, default=False)
+    is_estimated: Mapped[bool] = mapped_column(Boolean, default=False)
+    is_complete: Mapped[bool] = mapped_column(Boolean, default=False)
+    status: Mapped[str] = mapped_column(String(32), default="unknown")
+    error_message: Mapped[str] = mapped_column(Text, default="")
+    raw_payload_hash: Mapped[str] = mapped_column(String(64), default="")
+
+
 class TTradePlan(Base):
     __tablename__ = "t_trade_plans"
 

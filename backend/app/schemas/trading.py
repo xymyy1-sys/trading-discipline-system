@@ -508,6 +508,22 @@ class ReplayReportOut(BaseModel):
     summary: list[str] = Field(default_factory=list)
 
 
+class DataProviderHealthOut(BaseModel):
+    source: str
+    sample_count: int
+    success_count: int
+    degraded_count: int
+    stale_count: int
+    average_latency_ms: float
+    latest_status: str
+    latest_at: datetime
+
+
+class DataQualityHealthOut(BaseModel):
+    generated_at: datetime
+    providers: list[DataProviderHealthOut] = Field(default_factory=list)
+
+
 class StopLevelsOut(BaseModel):
     holding_id: int
     code: str

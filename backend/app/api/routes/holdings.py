@@ -29,7 +29,9 @@ from app.schemas.trading import (
     TEligibilityOut,
     TTradePlanIn,
     TTradePlanOut,
-    TTradePlanUpdate
+    TTradePlanUpdate,
+    DataQualityHealthOut,
+    DataProviderHealthOut,
 )
 from app.api.helpers.holdings_calc import (
     _account_state,
@@ -52,6 +54,7 @@ from app.models.trading import (
     RecommendationFeedback,
     TTradePlan,
     TimeStopRule,
+    DataCaptureSnapshot,
 )
 from app.services.intraday_collector import (
     collection_notes,
@@ -60,6 +63,27 @@ from app.services.intraday_collector import (
 )
 
 router = APIRouter()
+
+
+@router.get("/data-quality/health", response_model=DataQualityHealthOut)
+def data_quality_health(db: Session = Depends(get_db)) -> DataQualityHealthOut:
+    rows = db.query(DataCaptureSnapshot).order_by(DataCaptureSnapshot.captured_at.desc()).limit(1000).all()
+    grouped: dict[str, list[DataCaptureSnapshot]] = {}
+    for row in rows:
+        grouped.setdefault(row.source, []).append(row)
+    providers = []
+    for source, samples in grouped.items():
+        providers.append(DataProviderHealthOut(
+            source=source,
+            sample_count=len(samples),
+            success_count=sum(item.status == "ok" and not item.is_degraded for item in samples),
+            degraded_count=sum(item.is_degraded for item in samples),
+            stale_count=sum(item.is_stale for item in samples),
+            average_latency_ms=round(sum(item.latency_ms for item in samples) / len(samples), 1),
+            latest_status=samples[0].status,
+            latest_at=samples[0].captured_at,
+        ))
+    return DataQualityHealthOut(generated_at=datetime.now(), providers=providers)
 
 DEFAULT_TIME_STOP_RULE_ROWS = [
     ("default", "默认剧本", "10:00", 5, 5, 15, 0.985),

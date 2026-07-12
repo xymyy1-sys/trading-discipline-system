@@ -31,6 +31,8 @@ Historical replay is implemented against persisted evidence. A complete 600584 a
 - Added 600584 acceptance checkpoints and a visual replay workspace under Review Calibration.
 - Added expectation, volume-price, and execution effectiveness APIs with explicit sample counts and a 20-sample auto-calibration gate.
 - Added downloadable acceptance reports covering authentication, SSE, collector status, migration version, T+1 validation, and optional single-stock replay evidence.
+- Persisted data-capture quality snapshots with source, latency, stale/degraded/estimated/complete flags, error details, normalized values, and raw payload hashes.
+- Added provider-health history aggregation at `/api/data-quality/health`.
 
 - Background intraday collector with status and manual run APIs.
 - Intraday collection run records.
@@ -90,8 +92,6 @@ Historical replay is implemented against persisted evidence. A complete 600584 a
 - Add optional multi-user roles and an immutable audit log if the system will be shared with other operators.
 
 - Continue minute-bar production monitoring: retries/backoff metrics, provider health history, and alternate provider support beyond Eastmoney.
-- Add a front-end SSE connection health indicator and recovery notification UX beyond the current event list.
-- Add formal acceptance report exports for SSE demo, full single-stock intraday timeline, and T+1 validation.
 
 ## Latest Validation Commands
 
