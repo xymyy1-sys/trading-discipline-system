@@ -23,6 +23,9 @@ class Settings(BaseSettings):
     auth_secret: str = Field(default="", validation_alias="AUTH_SECRET")
     auth_session_hours: int = Field(default=12, validation_alias="AUTH_SESSION_HOURS")
     auth_cookie_secure: bool = Field(default=False, validation_alias="AUTH_COOKIE_SECURE")
+    demo_username: str = Field(default="demo", validation_alias="DEMO_USERNAME")
+    demo_password: str = Field(default="", validation_alias="DEMO_PASSWORD")
+    demo_database_url: str = Field(default="sqlite:///./data/demo_discipline.db", validation_alias="DEMO_DATABASE_URL")
     audit_enabled: bool = Field(default=True, validation_alias="AUDIT_ENABLED")
 
     def validate_security(self) -> None:
@@ -32,6 +35,8 @@ class Settings(BaseSettings):
             raise RuntimeError("AUTH_PASSWORD must contain at least 12 characters")
         if len(self.auth_secret) < 32:
             raise RuntimeError("AUTH_SECRET must contain at least 32 characters")
+        if self.demo_password and len(self.demo_password) < 8:
+            raise RuntimeError("DEMO_PASSWORD must contain at least 8 characters")
 
 
 @lru_cache

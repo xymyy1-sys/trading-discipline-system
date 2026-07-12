@@ -20,19 +20,21 @@ class LoginRequest(BaseModel):
 def login(request: Request, payload: LoginRequest, response: Response, settings: Settings = Depends(get_settings)) -> dict[str, str]:
     if not settings.auth_enabled:
         return {"status": "disabled", "username": ""}
-    valid = hmac.compare_digest(payload.username, settings.auth_username) and hmac.compare_digest(payload.password, settings.auth_password)
+    admin_valid = hmac.compare_digest(payload.username, settings.auth_username) and hmac.compare_digest(payload.password, settings.auth_password)
+    demo_valid = bool(settings.demo_password) and hmac.compare_digest(payload.username, settings.demo_username) and hmac.compare_digest(payload.password, settings.demo_password)
+    valid = admin_valid or demo_valid
     if not valid:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid username or password")
     response.set_cookie(
         SESSION_COOKIE,
-        create_session_token(settings),
+        create_session_token(settings, payload.username),
         max_age=settings.auth_session_hours * 3600,
         httponly=True,
         secure=settings.auth_cookie_secure,
         samesite="strict",
         path="/",
     )
-    return {"status": "authenticated", "username": settings.auth_username}
+    return {"status": "authenticated", "username": payload.username}
 
 
 @router.get("/session")

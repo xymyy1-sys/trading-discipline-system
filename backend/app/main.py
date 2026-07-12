@@ -7,7 +7,7 @@ from slowapi import _rate_limit_exceeded_handler
 
 from app.api.routes import root_router, router
 from app.core.config import get_settings
-from app.core.database import Base, SessionLocal, engine
+from app.core.database import Base, SessionLocal, demo_engine, engine
 from app.core.limiter import limiter
 from app.services.intraday_collector import start_intraday_collector, stop_intraday_collector
 from app.services.audit import record_audit
@@ -20,6 +20,8 @@ settings = get_settings()
 async def lifespan(app: FastAPI):
     settings.validate_security()
     Base.metadata.create_all(bind=engine)
+    if settings.demo_password:
+        Base.metadata.create_all(bind=demo_engine)
     start_intraday_collector()
     yield
     await stop_intraday_collector()

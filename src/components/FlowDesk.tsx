@@ -304,6 +304,7 @@ function DarkTradePanel({ data, loading, query }: { data: DarkTradeOut | null; l
 
   const keyword = query.trim().toLowerCase()
   const items = keyword ? data.items.filter(item => item.name.toLowerCase().includes(keyword) || item.code.toLowerCase().includes(keyword)) : data.items
+  const visibleItems = keyword ? items : items.slice(0, 200)
   return (
     <div className="flow-data-panel">
       <div className="dark-table-head">
@@ -326,13 +327,14 @@ function DarkTradePanel({ data, loading, query }: { data: DarkTradeOut | null; l
             </tr>
           </thead>
           <tbody>
-            {items.map(item => (
+            {visibleItems.map(item => (
               <DarkTradeRow item={item} key={`${item.code}-${item.rank}`} />
             ))}
             {!items.length && <tr><td colSpan={9} className="plain-text">榜单中未找到匹配股票；请尝试完整名称或6位代码。</td></tr>}
           </tbody>
         </table>
       </div>
+      {!keyword && items.length > visibleItems.length ? <p className="flow-note-line">接口共返回 {items.length} 条；为保证页面流畅默认展示前 {visibleItems.length} 条，可输入名称或代码查询全部结果。</p> : null}
       {data.notes.length ? <p className="flow-note-line">{data.notes.join('；')}</p> : null}
     </div>
   )

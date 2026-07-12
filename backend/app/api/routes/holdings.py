@@ -2,10 +2,11 @@ import asyncio
 import json
 import re
 from datetime import datetime
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
-from app.core.database import SessionLocal, get_db
+from app.core.database import DemoSessionLocal, SessionLocal, get_db
+from app.core.config import get_settings
 from app.models.trading import Holding, TradeLog
 from app.schemas.trading import (
     HoldingCreate,
@@ -455,12 +456,14 @@ def update_time_stop_rule(
 
 
 @router.get("/intraday-events/stream")
-async def stream_intraday_events(replay: bool = False) -> StreamingResponse:
+async def stream_intraday_events(request: Request, replay: bool = False) -> StreamingResponse:
+    settings = get_settings()
+    session_factory = DemoSessionLocal if getattr(request.state, "auth_user", "") == settings.demo_username and settings.demo_password else SessionLocal
     async def event_generator():
         last_id: int | None = 0 if replay else None
         heartbeat = 0
         while True:
-            db = SessionLocal()
+            db = session_factory()
             try:
                 if last_id is None:
                     latest = db.query(IntradayEvidenceEvent).order_by(IntradayEvidenceEvent.id.desc()).first()

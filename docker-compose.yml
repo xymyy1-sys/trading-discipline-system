@@ -7,6 +7,9 @@ services:
       AUTH_USERNAME: ${AUTH_USERNAME:-admin}
       AUTH_PASSWORD: ${AUTH_PASSWORD:?Set AUTH_PASSWORD to at least 12 characters}
       AUTH_SECRET: ${AUTH_SECRET:?Set AUTH_SECRET to at least 32 random characters}
+      DEMO_USERNAME: ${DEMO_USERNAME:-demo}
+      DEMO_PASSWORD: ${DEMO_PASSWORD:-}
+      DEMO_DATABASE_URL: sqlite:///./data/demo_discipline.db
       AUTH_COOKIE_SECURE: ${AUTH_COOKIE_SECURE:-false}
       CORS_ORIGINS: ${CORS_ORIGINS:-["http://localhost:5173","http://127.0.0.1:5173"]}
       AUDIT_ENABLED: ${AUDIT_ENABLED:-true}

@@ -2,6 +2,7 @@ from collections.abc import Generator
 
 from sqlalchemy import create_engine
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
+from fastapi import Request
 
 from app.core.config import get_settings
 
@@ -27,13 +28,29 @@ def set_sqlite_pragma(dbapi_connection, connection_record):
 
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
+demo_engine = create_engine(
+    settings.demo_database_url,
+    connect_args={"check_same_thread": False} if settings.demo_database_url.startswith("sqlite") else {},
+)
+
+@event.listens_for(demo_engine, "connect")
+def set_demo_sqlite_pragma(dbapi_connection, connection_record):
+    if settings.demo_database_url.startswith("sqlite"):
+        cursor = dbapi_connection.cursor()
+        cursor.execute("PRAGMA journal_mode=WAL")
+        cursor.execute("PRAGMA synchronous=NORMAL")
+        cursor.close()
+
+DemoSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=demo_engine)
+
 
 class Base(DeclarativeBase):
     pass
 
 
-def get_db() -> Generator[Session, None, None]:
-    db = SessionLocal()
+def get_db(request: Request) -> Generator[Session, None, None]:
+    is_demo = getattr(request.state, "auth_user", "") == settings.demo_username and bool(settings.demo_password)
+    db = DemoSessionLocal() if is_demo else SessionLocal()
     try:
         yield db
     finally:

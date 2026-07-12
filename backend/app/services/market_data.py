@@ -1588,7 +1588,8 @@ class MarketDataProvider:
             "cver": 100,
             "date": date_text,
             "StartPage": 1,
-            "NumPerPage": 200,
+            # 东方财富该接口单页上限为 80，超过会返回“单页数过大”。
+            "NumPerPage": 80,
             "sortflag": 6,
             "desc": 1,
             "market": market,
