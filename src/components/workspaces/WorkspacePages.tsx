@@ -191,15 +191,7 @@ export function TodayDecisionSummary() {
   const highRiskAlerts = (seesaw?.holding_alerts ?? []).filter(item => ['高', '中高', '中'].includes(item.risk_level))
   const totalMarketValue = holdings.reduce((sum, item) => sum + item.market_value, 0)
   const totalProfit = holdings.reduce((sum, item) => sum + item.profit_amount, 0)
-  const trackedReviews = holdings
-    .map(item => intradayReviews[item.code])
-    .filter((item): item is IntradayReview => Boolean(item))
-    .sort((a, b) => {
-      const aTime = a.timeline[0]?.captured_at ?? a.generated_at
-      const bTime = b.timeline[0]?.captured_at ?? b.generated_at
-      return new Date(bTime).getTime() - new Date(aTime).getTime()
-    })
-    .slice(0, 4)
+  const trackedReviews = holdings.map(holding => ({ holding, review: intradayReviews[holding.code] }))
   const selectedHolding = holdings.find(item => item.code === selectedCode) ?? holdings[0]
   const selectedExecution = executionStates.find(item => item.code === selectedHolding?.code) ?? null
   const selectedCard = selectedHolding ? decisionCards[selectedHolding.code] ?? null : null
@@ -386,28 +378,29 @@ export function TodayDecisionSummary() {
       <div className="panel command-list evidence-trajectory">
         <header>
           <h3><Activity size={16} />盘中证据轨迹</h3>
-          <span className="stream-state">{trackedReviews.length ? `跟踪 ${trackedReviews.length} 只` : '等待采样'}</span>
+          <span className="stream-state">覆盖全部持仓 · {holdings.length} 只</span>
         </header>
         {trackedReviews.length ? (
-          trackedReviews.map(review => (
-            <article className="trajectory-card" key={review.code}>
+          trackedReviews.map(({ holding, review }) => (
+            <article className={`trajectory-card ${review ? '' : 'trajectory-empty'}`} key={holding.code}>
               <div className="trajectory-head">
-                <b>{review.name || review.code}</b>
-                <span>{chineseEvidence(review.latest_action || chineseLabel(review.latest_state))}</span>
-                <small>{chineseLabel(review.data_quality)}</small>
+                <b>{holding.name || holding.code}</b>
+                <span>{review ? chineseEvidence(review.latest_action || chineseLabel(review.latest_state)) : '等待盘中采样'}</span>
+                <small>{review ? chineseLabel(review.data_quality) : `${holding.code} · 当前无证据快照`}</small>
               </div>
-              <div className="trajectory-line">
+              {review && <div className="trajectory-line">
                 {review.timeline.slice(0, 4).map(event => (
-                  <div className="trajectory-point" key={`${review.code}-${event.id}-${event.captured_at}`}>
+                  <div className="trajectory-point" key={`${holding.code}-${event.id}-${event.captured_at}`}>
                     <time>{formatEventTime(event.captured_at)}</time>
                     <strong>{chineseLabel(event.event_type)}</strong>
                     <small>{chineseEvidence(event.evidence?.[0] ?? `${chineseLabel(event.severity)} / ${event.confirmed ? '已确认' : '待确认'}`)}</small>
                   </div>
                 ))}
-              </div>
-              {!review.timeline.length && (
+              </div>}
+              {review && !review.timeline.length && (
                 <p className="plain-text">暂无盘中采样；等待后台采集器生成证据快照。</p>
               )}
+              {!review && <p className="plain-text">该持仓尚未生成盘中证据。非交易时段、分钟行情源暂不可用或首次采集未完成时会出现此状态；持仓本身没有丢失。</p>}
             </article>
           ))
         ) : (
@@ -418,13 +411,12 @@ export function TodayDecisionSummary() {
   )
 
   function loadIntradayReviews(nextHoldings: HoldingOut[]) {
-    const topHoldings = nextHoldings.slice(0, 5)
-    if (!topHoldings.length) {
+    if (!nextHoldings.length) {
       setIntradayReviews({})
       return
     }
     Promise.allSettled(
-      topHoldings.map(item =>
+      nextHoldings.map(item =>
         fetchJsonWithTimeout(`${API_BASE}/api/stocks/${item.code}/intraday-review`, 6000)
           .then(review => [item.code, review] as const),
       ),
@@ -441,7 +433,7 @@ export function TodayDecisionSummary() {
   }
 
   function loadDecisionCards(nextHoldings: HoldingOut[]) {
-    Promise.allSettled(nextHoldings.slice(0, 8).map(item =>
+    Promise.allSettled(nextHoldings.map(item =>
       fetchJsonWithTimeout(`${API_BASE}/api/stocks/${item.code}/decision-card`, 8000).then(card => [item.code, card] as const),
     )).then(results => {
       const next: Record<string, StockDecisionCard> = {}

@@ -1,4 +1,4 @@
-import { useEffect, useState, Suspense, lazy } from 'react'
+import { useEffect, useState } from 'react'
 import { useNavigate, useLocation } from 'react-router-dom'
 import {
   Activity,
@@ -14,19 +14,19 @@ import { API_BASE } from './api'
 import './App.css'
 import { TodayDecisionSummary, WorkspacePage } from './components/workspaces/WorkspacePages'
 
-const Dashboard = lazy(() => import('./components/Dashboard'))
-const FlowDesk = lazy(() => import('./components/FlowDesk'))
-const IntelDesk = lazy(() => import('./components/IntelDesk'))
-const LimitUpLadder = lazy(() => import('./components/LimitUpLadder'))
-const Positions = lazy(() => import('./components/Positions'))
-const DecisionCard = lazy(() => import('./components/DecisionCard'))
-const NextDayPlans = lazy(() => import('./components/NextDayPlans'))
-const TradeLog = lazy(() => import('./components/TradeLog'))
-const MonthlyReview = lazy(() => import('./components/MonthlyReview'))
-const ReviewCalibration = lazy(() => import('./components/ReviewCalibration'))
-const CandidatePool = lazy(() => import('./components/CandidatePool'))
-const StrategyTemplates = lazy(() => import('./components/StrategyTemplates'))
-const HistoricalReplay = lazy(() => import('./components/HistoricalReplay'))
+import Dashboard from './components/Dashboard'
+import FlowDesk from './components/FlowDesk'
+import IntelDesk from './components/IntelDesk'
+import LimitUpLadder from './components/LimitUpLadder'
+import Positions from './components/Positions'
+import DecisionCard from './components/DecisionCard'
+import NextDayPlans from './components/NextDayPlans'
+import TradeLog from './components/TradeLog'
+import MonthlyReview from './components/MonthlyReview'
+import ReviewCalibration from './components/ReviewCalibration'
+import CandidatePool from './components/CandidatePool'
+import StrategyTemplates from './components/StrategyTemplates'
+import HistoricalReplay from './components/HistoricalReplay'
 
 const navItems = [
   ['今日决策', Activity, '/今日决策'],
@@ -171,13 +171,11 @@ export default function App() {
           </div>
         </header>
 
-        <Suspense fallback={<div className="loading-fallback">首次打开工作区...</div>}>
-          {visitedWorkspaces.has('/今日决策') && <div hidden={normalizedWorkspacePath !== '/今日决策'}><TodayDecisionWorkspace /></div>}
-          {visitedWorkspaces.has('/选股中心') && <div hidden={normalizedWorkspacePath !== '/选股中心'}><StockSelectionWorkspace /></div>}
-          {visitedWorkspaces.has('/打板预期') && <div hidden={normalizedWorkspacePath !== '/打板预期'}><LimitExpectationWorkspace /></div>}
-          {visitedWorkspaces.has('/持仓执行') && <div hidden={normalizedWorkspacePath !== '/持仓执行'}><PositionExecutionWorkspace /></div>}
-          {visitedWorkspaces.has('/复盘校准') && <div hidden={normalizedWorkspacePath !== '/复盘校准'}><ReviewCalibrationWorkspace /></div>}
-        </Suspense>
+        {visitedWorkspaces.has('/今日决策') && <div hidden={normalizedWorkspacePath !== '/今日决策'}><TodayDecisionWorkspace /></div>}
+        {visitedWorkspaces.has('/选股中心') && <div hidden={normalizedWorkspacePath !== '/选股中心'}><StockSelectionWorkspace /></div>}
+        {visitedWorkspaces.has('/打板预期') && <div hidden={normalizedWorkspacePath !== '/打板预期'}><LimitExpectationWorkspace /></div>}
+        {visitedWorkspaces.has('/持仓执行') && <div hidden={normalizedWorkspacePath !== '/持仓执行'}><PositionExecutionWorkspace /></div>}
+        {visitedWorkspaces.has('/复盘校准') && <div hidden={normalizedWorkspacePath !== '/复盘校准'}><ReviewCalibrationWorkspace /></div>}
       </section>
     </main>
   )

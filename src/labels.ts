@@ -27,6 +27,13 @@ const LABELS: Record<string, string> = {
   HIGH_OPEN_FAILED_BREAKOUT: '高开冲板失败', LIMIT_UP_OPENED: '涨停开板',
   BELOW_VWAP: '位于分时均价线下方', ABOVE_VWAP: '位于分时均价线上方',
   VOLUME_EXPANSION: '放量', VOLUME_CONTRACTION: '缩量',
+  EXPECTATION_VOLUME_BREAKDOWN: '预期与量价同步转弱',
+  EXPECTATION_DOWNGRADE: '预期下调', VWAP_BREAKDOWN: '跌破分时均价线',
+  VWAP_STRONG: '分时均价线上方强势', VOLUME_PRICE_NEUTRAL: '量价中性',
+  HIGH_VOLUME_STAGNATION: '高位放量滞涨', PROFIT_TO_LOSS_RISK: '浮盈转亏风险',
+  DIVERGENCE_RESEAL: '分歧后回封', REPAIR_CONFIRMED: '修复确认',
+  SECTOR_REPAIR: '板块修复', TREND_BREAKOUT: '趋势突破',
+  SLIGHTLY_STRONGER: '略强于预期',
 }
 
 export function chineseLabel(value?: string | null) {
