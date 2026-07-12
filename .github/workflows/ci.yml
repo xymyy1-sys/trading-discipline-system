@@ -1,0 +1,49 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  frontend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run lint
+      - run: npm test -- --run
+      - run: npm run build
+
+  backend:
+    runs-on: ubuntu-latest
+    env:
+      PYTHONPATH: .
+      AUTH_PASSWORD: ci-password-is-not-for-production
+      AUTH_SECRET: ci-secret-is-longer-than-thirty-two-characters
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: backend/requirements.txt
+      - run: pip install -r requirements.txt
+      - run: pytest -q
+      - name: Verify migrations from empty database
+        env:
+          DATABASE_URL: sqlite:///./data/ci_migration.db
+        run: |
+          mkdir -p data
+          alembic -c alembic.ini upgrade head
+          alembic -c alembic.ini current

@@ -8,6 +8,8 @@ Deferred by request:
 
 ## Completed
 
+- Added repository CI for frontend lint/test/build, backend pytest, and empty-database Alembic migration validation.
+
 - Security hardening first batch:
   - Added single-user login with server-signed, HttpOnly, SameSite session cookies.
   - Protected all holdings, trades, plans, market, checks, and stock APIs; only health and authentication remain public.
@@ -75,7 +77,6 @@ Deferred by request:
 - Put the public deployment behind HTTPS, set `AUTH_COOKIE_SECURE=true`, close firewall port 8000, and rotate any previously exposed credentials.
 - Add optional multi-user roles and an immutable audit log if the system will be shared with other operators.
 
-- Enable CI in GitHub after the PAT gets `workflow` scope. The workflow file exists locally at `.github/workflows/ci.yml` but cannot be pushed by the current token.
 - Continue minute-bar production monitoring: retries/backoff metrics, provider health history, and alternate provider support beyond Eastmoney.
 - Strengthen cross-sector migration scoring with original theme outflow, new theme inflow, stock weakening, and leader-switch evidence.
 - Add a front-end SSE connection health indicator and recovery notification UX beyond the current event list.

@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import { API_BASE } from '../api'
 
 import type { MarketGrade as GradeData } from '../types'
@@ -20,9 +20,7 @@ export default function MarketEnv() {
     persistence: '2',
   })
 
-  useEffect(() => { fetchGrade() }, [])
-
-  const fetchGrade = () => {
+  const fetchGrade = useCallback(() => {
     const params = new URLSearchParams({
       turnover_score: config.turnover,
       limit_up_count: config.limitUp,
@@ -34,7 +32,9 @@ export default function MarketEnv() {
       .then(r => r.json())
       .then(setGrade)
       .catch(() => {})
-  }
+  }, [config])
+
+  useEffect(() => { fetchGrade() }, [fetchGrade])
 
   const g = grade
   const info = g ? gradeInfo[g.grade] ?? gradeInfo.B : null
