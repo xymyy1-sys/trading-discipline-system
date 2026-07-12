@@ -68,21 +68,30 @@ def watchlist_recommendations(db: Session = Depends(get_db)) -> list[WatchlistRe
             if not stock.code:
                 continue
             row = rows.setdefault(stock.code, {
-                "code": stock.code, "name": stock.name, "score": 0, "theme": theme.name,
+                "code": stock.code, "name": stock.name, "theme_score": 0, "limit_score": 0, "theme": theme.name,
                 "role": stock.role, "limit_level": 0, "limit_quality": "未进入涨停梯队",
                 "fund_signal": "", "reasons": [], "risks": [], "sources": set(),
             })
             theme_points = min(45, round(theme.score * 0.45))
             rank_points = max(0, 12 - theme.rank)
             role_points = 12 if any(word in stock.role for word in ("龙头", "核心", "前排")) else 5
-            row["score"] += theme_points + rank_points + role_points
-            row["reasons"].append(f"{theme.name}题材排名第{theme.rank}，强度{theme.score}分")
-            row["reasons"].append(f"题材角色：{stock.role or '核心股'}")
+            candidate_theme_score = theme_points + rank_points + role_points + (8 if theme.net_inflow > 0 else 0)
+            if candidate_theme_score <= row["theme_score"]:
+                row["sources"].add(theme_source)
+                continue
+            row["theme_score"] = candidate_theme_score
+            row["theme"] = theme.name
+            row["role"] = stock.role
+            row["reasons"] = [
+                f"{theme.name}题材排名第{theme.rank}，强度{theme.score}分",
+                f"题材角色：{stock.role or '核心股'}",
+            ]
+            row["risks"] = [risk for risk in row["risks"] if "题材资金" not in risk]
             if theme.net_inflow > 0:
-                row["score"] += 8
                 row["fund_signal"] = f"题材净流入{theme.net_inflow:.2f}亿"
                 row["reasons"].append(row["fund_signal"])
             else:
+                row["fund_signal"] = ""
                 row["risks"].append("题材资金尚未形成净流入确认")
             row["sources"].add(theme_source)
 
@@ -92,7 +101,7 @@ def watchlist_recommendations(db: Session = Depends(get_db)) -> list[WatchlistRe
             if not stock.code:
                 continue
             row = rows.setdefault(stock.code, {
-                "code": stock.code, "name": stock.name, "score": 0,
+                "code": stock.code, "name": stock.name, "theme_score": 0, "limit_score": 0,
                 "theme": (stock.concepts[0] if stock.concepts else stock.industry), "role": "涨停前排",
                 "limit_level": 0, "limit_quality": "", "fund_signal": "",
                 "reasons": [], "risks": [], "sources": set(),
@@ -111,19 +120,20 @@ def watchlist_recommendations(db: Session = Depends(get_db)) -> list[WatchlistRe
             elif stock.turnover > 30:
                 quality_score -= 8
                 row["risks"].append(f"换手率{stock.turnover:.1f}%偏高")
-            row["score"] += quality_score
+            row["limit_score"] = max(row["limit_score"], quality_score)
             row["reasons"].append(f"{group.label}，{row['limit_quality']}")
             row["sources"].add(ladder_source)
 
     outputs: list[WatchlistRecommendationOut] = []
     for row in rows.values():
+        score_value = row["theme_score"] + row["limit_score"]
         if "ST" in row["name"].upper():
-            row["score"] -= 50
+            score_value -= 50
             row["risks"].append("风险警示股票不纳入自动观察池")
         if row["code"] in holding_codes:
-            row["score"] -= 15
+            score_value -= 15
             row["risks"].append("当前已持仓，应转入持仓执行而非新增观察")
-        score = max(0, min(100, int(row["score"])))
+        score = max(0, min(100, int(score_value)))
         tier = "重点观察" if score >= 70 and not any("风险警示" in risk for risk in row["risks"]) else "普通观察" if score >= 50 else "暂不纳入"
         outputs.append(WatchlistRecommendationOut(
             code=row["code"], name=row["name"], score=score, tier=tier,
