@@ -342,6 +342,23 @@ def decision_card(db: Session, code: str) -> StockDecisionCardOut:
     expectation = build_expectation_snapshot(db, code, name=name, stage=stage, quote=quote, base_hint=base_hint)
     volume_price = build_volume_price_snapshot(db, code, name=name, stage=stage, quote=quote)
     consensus_risk = build_consensus_risk(quote, expectation, volume_price, _daily_history_metrics(code))
+    cumulative_amount = 0.0
+    cumulative_volume = 0.0
+    minute_chart = []
+    for item in quote.get("minute_bars") or []:
+        price = _safe_float(item.get("price") or item.get("close"))
+        volume_value = _safe_float(item.get("volume"))
+        amount_value = _safe_float(item.get("amount")) or price * volume_value
+        if price <= 0 or volume_value <= 0:
+            continue
+        cumulative_amount += amount_value
+        cumulative_volume += volume_value
+        minute_chart.append({
+            "time": str(item.get("time") or ""), "price": price,
+            "vwap": round(cumulative_amount / cumulative_volume, 4),
+            "amount": round(amount_value / 1e8, 4),
+            "amount_estimated": bool(item.get("amount_estimated") or quote.get("minute_amount_estimated")),
+        })
     execution = build_position_execution_state(db, holding, quote=quote, expectation=expectation, volume_price=volume_price) if holding else None
     t_eligibility = build_t_eligibility(db, holding) if holding else None
     events: list[IntradayEvidenceEventOut] = []
@@ -391,4 +408,5 @@ def decision_card(db: Session, code: str) -> StockDecisionCardOut:
         counter_evidence=(execution.counter_evidence if execution else expectation.counter_evidence),
         data_quality="realtime" if quote else "manual",
         consensus_risk=consensus_risk,
+        minute_chart=minute_chart,
     )

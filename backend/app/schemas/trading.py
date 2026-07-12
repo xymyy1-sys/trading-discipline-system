@@ -439,6 +439,7 @@ class StockDecisionCardOut(BaseModel):
     counter_evidence: list[str] = Field(default_factory=list)
     data_quality: str = "manual"
     consensus_risk: "ConsensusRiskOut | None" = None
+    minute_chart: list["MinuteChartPoint"] = Field(default_factory=list)
 
 
 class ConsensusRiskOut(BaseModel):
@@ -448,6 +449,14 @@ class ConsensusRiskOut(BaseModel):
     factors: list[str] = Field(default_factory=list)
     counter_evidence: list[str] = Field(default_factory=list)
     actions: list[str] = Field(default_factory=list)
+
+
+class MinuteChartPoint(BaseModel):
+    time: str
+    price: float
+    vwap: float
+    amount: float
+    amount_estimated: bool = False
 
 
 class CandidateOut(BaseModel):

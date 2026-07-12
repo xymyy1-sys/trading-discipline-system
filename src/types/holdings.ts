@@ -382,6 +382,15 @@ export interface StockDecisionCard {
   counter_evidence: string[];
   data_quality: string;
   consensus_risk: ConsensusRisk | null;
+  minute_chart: MinuteChartPoint[];
+}
+
+export interface MinuteChartPoint {
+  time: string;
+  price: number;
+  vwap: number;
+  amount: number;
+  amount_estimated: boolean;
 }
 
 export interface ConsensusRisk {

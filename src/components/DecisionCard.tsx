@@ -1,8 +1,14 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { RefreshCcw, Search } from 'lucide-react'
 import { API_BASE } from '../api'
+import * as echarts from 'echarts/core'
+import { BarChart, LineChart, ScatterChart } from 'echarts/charts'
+import { GridComponent, LegendComponent, TooltipComponent } from 'echarts/components'
+import { CanvasRenderer } from 'echarts/renderers'
 
 import type { ExpectationRule, HoldingOut, StockDecisionCard } from '../types'
+
+echarts.use([LineChart, BarChart, ScatterChart, GridComponent, LegendComponent, TooltipComponent, CanvasRenderer])
 
 export default function DecisionCard() {
   const [code, setCode] = useState('')
@@ -143,6 +149,8 @@ export default function DecisionCard() {
               <div><b>可信度</b><span>{(card.expectation.confidence * 100).toFixed(0)}%</span></div>
             </div>
 
+            <DecisionMinuteChart card={card} />
+
             {card.volume_price && (
               <div className="decision-section volume-price-section">
                 <b>量价快照 · {card.volume_price.stage}</b>
@@ -258,6 +266,38 @@ export default function DecisionCard() {
       )}
     </section>
   )
+}
+
+function DecisionMinuteChart({ card }: { card: StockDecisionCard }) {
+  const ref = useRef<HTMLDivElement | null>(null)
+  useEffect(() => {
+    if (!ref.current || !card.minute_chart.length) return
+    const chart = echarts.init(ref.current)
+    const times = card.minute_chart.map(item => item.time)
+    const events = card.timeline.map(item => {
+      const time = new Date(item.captured_at).toLocaleTimeString('zh-CN', { hour12: false, hour: '2-digit', minute: '2-digit' })
+      const point = card.minute_chart.find(row => row.time === time)
+      return point ? [time, point.price, item.event_type] : null
+    }).filter((item): item is [string, number, string] => item !== null)
+    chart.setOption({
+      tooltip: { trigger: 'axis' }, legend: { data: ['价格', 'VWAP', '分钟成交额'] },
+      grid: [{ left: 52, right: 28, top: 38, height: '58%' }, { left: 52, right: 28, top: '76%', height: '15%' }],
+      xAxis: [{ type: 'category', data: times, boundaryGap: false }, { type: 'category', data: times, gridIndex: 1, axisLabel: { show: false } }],
+      yAxis: [{ type: 'value', scale: true }, { type: 'value', gridIndex: 1, name: '亿元' }],
+      series: [
+        { name: '价格', type: 'line', data: card.minute_chart.map(item => item.price), showSymbol: false, lineStyle: { width: 2 } },
+        { name: 'VWAP', type: 'line', data: card.minute_chart.map(item => item.vwap), showSymbol: false, lineStyle: { type: 'dashed' } },
+        { name: '事件', type: 'scatter', data: events, symbolSize: 9, tooltip: { formatter: (params: { data: [string, number, string] }) => `${params.data[0]} ${params.data[2]}` } },
+        { name: '分钟成交额', type: 'bar', xAxisIndex: 1, yAxisIndex: 1, data: card.minute_chart.map(item => item.amount) },
+      ],
+    })
+    const resize = () => chart.resize()
+    window.addEventListener('resize', resize)
+    return () => { window.removeEventListener('resize', resize); chart.dispose() }
+  }, [card])
+  if (!card.minute_chart.length) return <p className="refresh-note">暂无真实分钟线，图表不使用模拟数据补齐。</p>
+  const estimated = card.minute_chart.some(item => item.amount_estimated)
+  return <div className="decision-section"><b>分钟量价与事件轨迹</b><div ref={ref} style={{ height: 360 }} />{estimated && <p className="refresh-note">备用源分钟成交额为估算值，仅用于观察，不作为可靠 VWAP 触发依据。</p>}</div>
 }
 
 function stopSourceLabel(source: string) {
