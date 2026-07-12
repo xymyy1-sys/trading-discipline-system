@@ -8,6 +8,7 @@ import { GridComponent, LegendComponent, TooltipComponent } from 'echarts/compon
 import { CanvasRenderer } from 'echarts/renderers'
 
 import type { ExpectationRule, HoldingOut, StockDecisionCard } from '../types'
+import AiInsightButton from './AiInsightButton'
 
 type DecisionCardMode = 'watchlist' | 'holding'
 type WatchlistStock = { code: string; name: string; score: number; tier: string }
@@ -102,6 +103,7 @@ export default function DecisionCard({ mode = 'watchlist' }: { mode?: DecisionCa
             {loading ? <RefreshCcw size={16} /> : <Search size={16} />}
             查询
           </button>
+          <AiInsightButton scope="stock" target={card?.code || code.trim()} />
         </div>
       </header>
       {message && <p className="refresh-note">{message}</p>}

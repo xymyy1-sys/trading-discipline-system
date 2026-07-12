@@ -38,8 +38,8 @@ export default function AuthGate({ children }: { children: ReactNode }) {
       <form className="auth-card" onSubmit={submit}>
         <LockKeyhole size={30} />
         <div>
-          <span className="eyebrow">私人交易工作台</span>
-          <h1>交易纪律系统</h1>
+          <span className="eyebrow">私人交易决策台</span>
+          <h1>知行交易驾驶舱</h1>
           <p>持仓和交易记录属于敏感数据，请登录后继续。</p>
         </div>
         <label>用户名<input autoComplete="username" value={username} onChange={event => setUsername(event.target.value)} /></label>

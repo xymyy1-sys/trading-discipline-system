@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { Plus, RefreshCcw, Trash2 } from 'lucide-react'
 import { API_BASE } from '../api'
 import { chineseEvidence } from '../labels'
+import AiInsightButton from './AiInsightButton'
 
 type Recommendation = {
   code: string; name: string; score: number; tier: string; theme: string; role: string;
@@ -54,6 +55,7 @@ export default function CandidatePool() {
     <div className="candidate-grid">{recommendations.map(item => <article className={`candidate-card ${item.tier === '重点观察' ? 'pool-A' : item.tier === '等待确认' ? 'pool-B' : 'pool-D'}`} key={`auto-${item.code}`}>
       <div className="candidate-head"><strong>{item.tier} · {item.name || item.code}</strong><b>{item.score}</b></div>
       <button type="button" className="candidate-remove" onClick={() => removeItem(item.code)} title="从观察池剔除"><Trash2 size={14}/>剔除</button>
+      <AiInsightButton scope="stock" target={item.code} />
       <small>{item.code} · {item.theme || '题材待确认'} · {item.role || '角色待确认'}</small>
       {item.category && <p className="candidate-category">{item.category}</p>}
       {item.limit_level > 0 && <p className="candidate-positive">+ {item.limit_level}板 · {item.limit_quality}</p>}

@@ -13,6 +13,7 @@ import { API_BASE } from '../../api'
 import { chineseEvidence, chineseLabel } from '../../labels'
 
 import type { ActionRecommendation, HoldingOut, InformationItem, IntradayEvidenceEvent, IntradayReview, MarketSeesaw, PositionExecutionState, StockDecisionCard, ThemeRadar } from '../../types'
+import AiInsightButton from '../AiInsightButton'
 
 type WorkspaceModule = {
   key: string
@@ -212,6 +213,7 @@ export function TodayDecisionSummary() {
 
   return (
     <section className="decision-command">
+      <div className="ai-market-action"><AiInsightButton scope="market" target="today" label="AI全局复核" /></div>
       <div className="command-card emphasis">
         <span>今日处理优先级</span>
         <strong>{riskStates.length + highRiskAlerts.length}</strong>

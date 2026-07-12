@@ -9,6 +9,7 @@ from app.api.routes.stocks import router as stocks_router
 from app.api.routes.auth import router as auth_router
 from app.api.routes.strategies import router as strategies_router
 from app.api.routes.acceptance import router as acceptance_router
+from app.api.routes.ai import router as ai_router
 from app.core.security import require_auth
 
 # Root router for HTML/root paths
@@ -28,4 +29,5 @@ protected_router.include_router(checks_router)
 protected_router.include_router(stocks_router)
 protected_router.include_router(strategies_router)
 protected_router.include_router(acceptance_router)
+protected_router.include_router(ai_router)
 router.include_router(protected_router)

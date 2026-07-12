@@ -5279,6 +5279,24 @@ h3 {
 .dark-stock-search { display: flex; align-items: center; gap: 8px; margin: 12px 0; padding: 10px 12px; max-width: 420px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); color: var(--ink-muted); }
 .dark-stock-search input { width: 100%; border: 0; outline: 0; background: transparent; color: var(--ink); font: inherit; }
 .candidate-category { display: inline-flex; width: fit-content; margin: 8px 0 3px; padding: 3px 8px; border-radius: 999px; background: #e8f3fb; color: #245b82; font-size: 12px; font-weight: 700; }
+.brand-mark-new { padding: 5px; border: 0; background: linear-gradient(145deg, #edf9ff, #cceaf4); box-shadow: inset 0 0 0 1px rgba(65, 145, 175, .28); }
+.brand-mark-new svg { width: 100%; height: 100%; }
+.brand-shield { fill: #1d5a82; }
+.brand-path { fill: none; stroke: #e6f8ff; stroke-width: 3.2; stroke-linecap: round; stroke-linejoin: round; }
+.brand-bars { fill: none; stroke: #63ccd9; stroke-width: 1.8; stroke-linecap: round; opacity: .85; }
+.ai-insight-btn { display: inline-flex; align-items: center; justify-content: center; gap: 6px; width: fit-content; padding: 7px 11px; border: 1px solid #77afca; border-radius: 8px; background: linear-gradient(135deg, #eef9ff, #dceff8); color: #174f72; font-weight: 700; cursor: pointer; }
+.candidate-card > .ai-insight-btn { margin: 8px 0 4px; }
+.ai-market-action { grid-column: 1 / -1; display: flex; justify-content: flex-end; margin-bottom: -4px; }
+.ai-insight-overlay { position: fixed; inset: 0; z-index: 1000; display: grid; place-items: center; padding: 24px; background: rgba(13, 27, 40, .56); backdrop-filter: blur(3px); }
+.ai-insight-panel { display: grid; grid-template-rows: auto 1fr auto; width: min(860px, 96vw); max-height: 86vh; overflow: hidden; border: 1px solid #9bc5d8; border-radius: 14px; background: var(--panel); box-shadow: 0 24px 70px rgba(0,0,0,.25); }
+.ai-insight-panel header, .ai-insight-panel footer { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 15px 18px; border-bottom: 1px solid var(--line); }
+.ai-insight-panel header div { display: grid; gap: 3px; }
+.ai-insight-panel header strong { font-size: 19px; }
+.ai-insight-panel header span, .ai-insight-panel footer small { color: var(--ink-muted); font-size: 12px; }
+.ai-insight-panel header button { border: 0; background: transparent; color: var(--ink); cursor: pointer; }
+.ai-insight-panel footer { border-top: 1px solid var(--line); border-bottom: 0; }
+.ai-insight-panel footer button { display: inline-flex; align-items: center; gap: 6px; padding: 8px 11px; border: 1px solid var(--line); border-radius: 7px; background: var(--ink); color: var(--panel); }
+.ai-insight-content { overflow: auto; padding: 20px; white-space: pre-wrap; line-height: 1.75; color: var(--ink); }
 
 .expectation-journey { margin: 18px 0; padding: 16px; border: 1px solid #b9d7ef; border-radius: 12px; background: linear-gradient(135deg, #f5fbff, #fff); }
 .expectation-journey-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; margin-bottom: 14px; }

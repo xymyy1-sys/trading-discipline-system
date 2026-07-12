@@ -1,7 +1,7 @@
 {
-  "name": "交易纪律系统",
-  "short_name": "纪律台",
-  "description": "A股短线/超短线交易纪律管理与盘中跷跷板证据雷达",
+  "name": "知行交易驾驶舱",
+  "short_name": "知行驾驶舱",
+  "description": "A股预期管理、证据验证与交易执行决策台",
   "start_url": "/",
   "display": "standalone",
   "background_color": "#eef1f4",

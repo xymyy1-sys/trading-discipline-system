@@ -6,7 +6,6 @@ import {
   Flame,
   Target,
   WalletCards,
-  Crosshair,
   Menu,
   X,
 } from 'lucide-react'
@@ -120,12 +119,10 @@ export default function App() {
     <main className="terminal-shell">
       <aside className={`sidebar ${sidebarOpen ? 'open' : ''}`}>
         <div className="brand" style={{ display: 'flex', width: '100%', alignItems: 'center' }}>
-            <span className="brand-mark" aria-hidden="true">
-              <Crosshair size={22} strokeWidth={1.8} />
-            </span>
+            <BrandIcon />
           <div style={{ flex: 1 }}>
-            <strong>交易纪律系统</strong>
-            <span>A 股交易纪律工作台</span>
+            <strong>知行交易驾驶舱</strong>
+            <span>A股预期与执行决策台</span>
           </div>
           <button className="hamburger-btn" style={{ marginLeft: 'auto' }} onClick={() => setSidebarOpen(false)}>
             <X size={18} />
@@ -162,7 +159,7 @@ export default function App() {
               <Menu size={18} />
             </button>
             <div>
-              <span className="eyebrow">交易纪律工作台</span>
+              <span className="eyebrow">知行交易驾驶舱</span>
               <h1>{activeLabel}</h1>
             </div>
           </div>
@@ -273,6 +270,16 @@ function ReviewCalibrationWorkspace() {
       ]}
     />
   )
+}
+
+function BrandIcon() {
+  return <span className="brand-mark brand-mark-new" aria-hidden="true">
+    <svg viewBox="0 0 48 48">
+      <path className="brand-shield" d="M24 4 40 10v11c0 10.4-6.4 18.4-16 23C14.4 39.4 8 31.4 8 21V10Z" />
+      <path className="brand-path" d="m13 30 7-8 5 4 10-12" />
+      <path className="brand-bars" d="M15 27v6M24 23v10M33 16v17" />
+    </svg>
+  </span>
 }
 
 function Metric({ label, value, tone }: { label: string; value: string; tone: 'neutral' | 'muted' }) {

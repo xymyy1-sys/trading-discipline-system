@@ -566,3 +566,18 @@ class IntradayCollectionRun(Base):
     event_count: Mapped[int] = mapped_column(Integer, default=0)
     notes_json: Mapped[str] = mapped_column(Text, default="[]")
     error_message: Mapped[str] = mapped_column(Text, default="")
+
+
+class AiAnalysisCache(Base):
+    __tablename__ = "ai_analysis_cache"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    scope: Mapped[str] = mapped_column(String(32), index=True)
+    target: Mapped[str] = mapped_column(String(32), index=True)
+    model: Mapped[str] = mapped_column(String(64), default="gpt-5.6-sol")
+    input_hash: Mapped[str] = mapped_column(String(64), default="")
+    content: Mapped[str] = mapped_column(Text, default="")
+    status: Mapped[str] = mapped_column(String(24), default="completed")
+    error_message: Mapped[str] = mapped_column(Text, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc), index=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))

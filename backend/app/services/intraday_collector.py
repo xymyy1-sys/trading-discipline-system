@@ -15,6 +15,7 @@ COLLECTOR_ENABLED = True
 _collector_task: asyncio.Task | None = None
 _collector_running = False
 _close_expectation_date: str | None = None
+_notified_recommendations: set[int] = set()
 
 
 def _json_dumps(value: list[str]) -> str:
@@ -56,9 +57,22 @@ def run_intraday_collection_once(trigger: str = "manual") -> IntradayCollectionR
         elif not holdings:
             notes.append("暂无持仓，后台采集跳过。")
         for holding in holdings:
-            collect_holding_evidence(db, holding, stage=stage, now=started)
+            _volume, state, _sample = collect_holding_evidence(db, holding, stage=stage, now=started)
             snapshot_count += 1
             notes.append(f"{holding.code} {holding.name} 已采集 {stage}。")
+            recommendation = state.recommendation
+            if recommendation and recommendation.id and recommendation.id not in _notified_recommendations and recommendation.level in {"WARNING", "CRITICAL"}:
+                try:
+                    from app.services.dingtalk import send_dingtalk_markdown
+                    send_dingtalk_markdown(
+                        f"{holding.name} 风险提醒",
+                        f"### {holding.name}（{holding.code}）\n\n- 风险级别：{recommendation.level}\n- 操作建议：{recommendation.action}\n- 当前状态：{recommendation.state}\n\n请登录知行交易驾驶舱核对完整证据。",
+                    )
+                    _notified_recommendations.add(recommendation.id)
+                except RuntimeError:
+                    pass
+                except Exception as notify_exc:
+                    notes.append(f"钉钉通知失败：{notify_exc.__class__.__name__}")
         run.status = "success"
     except Exception as exc:
         db.rollback()

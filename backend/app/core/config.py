@@ -6,7 +6,7 @@ from pydantic_settings import BaseSettings
 
 
 class Settings(BaseSettings):
-    app_name: str = "Trading Discipline System"
+    app_name: str = "知行交易驾驶舱"
     database_url: str = Field(
         default="sqlite:///./data/trading_discipline.db",
         validation_alias="DATABASE_URL",
@@ -27,6 +27,12 @@ class Settings(BaseSettings):
     demo_password: str = Field(default="", validation_alias="DEMO_PASSWORD")
     demo_database_url: str = Field(default="sqlite:///./data/demo_discipline.db", validation_alias="DEMO_DATABASE_URL")
     audit_enabled: bool = Field(default=True, validation_alias="AUDIT_ENABLED")
+    openai_api_key: str = Field(default="", validation_alias="OPENAI_API_KEY")
+    openai_model: str = Field(default="gpt-5.6-sol", validation_alias="OPENAI_MODEL")
+    openai_base_url: str = Field(default="https://api.openai.com/v1", validation_alias="OPENAI_BASE_URL")
+    dingtalk_enabled: bool = Field(default=False, validation_alias="DINGTALK_ENABLED")
+    dingtalk_webhook: str = Field(default="", validation_alias="DINGTALK_WEBHOOK")
+    dingtalk_secret: str = Field(default="", validation_alias="DINGTALK_SECRET")
 
     def validate_security(self) -> None:
         if not self.auth_enabled:
