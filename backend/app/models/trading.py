@@ -52,6 +52,18 @@ class AccountState(Base):
     )
 
 
+class AccountDailyRisk(Base):
+    __tablename__ = "account_daily_risk"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    trade_date: Mapped[str] = mapped_column(String(16), unique=True, index=True)
+    opening_asset: Mapped[float] = mapped_column(Float, default=0)
+    current_asset: Mapped[float] = mapped_column(Float, default=0)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc)
+    )
+
+
 class TradeLog(Base):
     __tablename__ = "trade_logs"
 

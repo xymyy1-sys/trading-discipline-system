@@ -148,6 +148,21 @@ export interface ActionRecommendation {
   feedback_status: string;
 }
 
+export interface AccountRisk {
+  trade_date: string;
+  opening_asset: number;
+  current_asset: number;
+  daily_profit_ratio: number;
+  level: string;
+  new_positions_allowed: boolean;
+  recommended_action: string;
+  degraded_position_count: number;
+  stop_loss_count: number;
+  data_complete: boolean;
+  evidence: string[];
+  updated_at: string | null;
+}
+
 export interface ProfitProtectionSnapshot {
   id: number | null;
   holding_id: number;

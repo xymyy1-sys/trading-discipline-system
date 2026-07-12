@@ -15,6 +15,8 @@ from app.schemas.trading import (
     HoldingSyncOut,
     AccountAssetIn,
     AccountAssetOut,
+    AccountRiskIn,
+    AccountRiskOut,
     PositionExecutionStateOut,
     ActionRecommendationOut,
     PositionStateHistoryOut,
@@ -33,6 +35,7 @@ from app.schemas.trading import (
     DataQualityHealthOut,
     DataProviderHealthOut,
 )
+from app.services.account_risk import account_risk
 from app.api.helpers.holdings_calc import (
     _account_state,
     _account_total_asset,
@@ -194,6 +197,16 @@ def update_account_asset(
     db.commit()
     db.refresh(state)
     return AccountAssetOut(total_asset=state.total_asset, updated_at=state.updated_at)
+
+
+@router.get("/account/risk", response_model=AccountRiskOut)
+def get_account_risk(db: Session = Depends(get_db)) -> AccountRiskOut:
+    return account_risk(db)
+
+
+@router.put("/account/risk", response_model=AccountRiskOut)
+def update_account_risk(payload: AccountRiskIn, db: Session = Depends(get_db)) -> AccountRiskOut:
+    return account_risk(db, payload)
 
 @router.post("/holdings", response_model=HoldingOut)
 def create_holding(payload: HoldingCreate, db: Session = Depends(get_db)) -> HoldingOut:

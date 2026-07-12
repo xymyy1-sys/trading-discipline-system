@@ -464,6 +464,26 @@ class CandidateOut(BaseModel):
     updated_at: datetime | None = None
 
 
+class AccountRiskIn(BaseModel):
+    opening_asset: float | None = None
+    current_asset: float | None = None
+
+
+class AccountRiskOut(BaseModel):
+    trade_date: str
+    opening_asset: float = 0
+    current_asset: float = 0
+    daily_profit_ratio: float = 0
+    level: str = "UNKNOWN"
+    new_positions_allowed: bool = False
+    recommended_action: str
+    degraded_position_count: int = 0
+    stop_loss_count: int = 0
+    data_complete: bool = False
+    evidence: list[str] = Field(default_factory=list)
+    updated_at: datetime | None = None
+
+
 class StrategyTemplateIn(BaseModel):
     code: str
     name: str

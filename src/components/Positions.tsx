@@ -9,6 +9,7 @@ import type {
   PositionExecutionState,
   TimeStopRule,
   TTradePlan,
+  AccountRisk,
 } from '../types'
 
 export default function Positions() {
@@ -21,6 +22,8 @@ export default function Positions() {
   const [tPlans, setTPlans] = useState<Record<number, TTradePlan>>({})
   const [ruleMessage, setRuleMessage] = useState('')
   const [accountAsset, setAccountAsset] = useState('')
+  const [openingAsset, setOpeningAsset] = useState('')
+  const [accountRisk, setAccountRisk] = useState<AccountRisk | null>(null)
   const [assetSaving, setAssetSaving] = useState(false)
   const [assetMessage, setAssetMessage] = useState('')
   const [refreshing, setRefreshing] = useState(false)
@@ -128,6 +131,13 @@ export default function Positions() {
     fetch(`${API_BASE}/api/account/asset`)
       .then(r => r.json())
       .then(data => setAccountAsset(data.total_asset ? String(data.total_asset) : ''))
+      .catch(() => {})
+    fetch(`${API_BASE}/api/account/risk`)
+      .then(r => r.json())
+      .then((data: AccountRisk) => {
+        setAccountRisk(data)
+        setOpeningAsset(data.opening_asset ? String(data.opening_asset) : '')
+      })
       .catch(() => {})
   }
   useEffect(() => {
@@ -295,6 +305,25 @@ export default function Positions() {
       .catch(() => setTPlanMessage('做T计划生成失败'))
   }
 
+  const saveAccountRisk = () => {
+    setAssetSaving(true)
+    fetch(`${API_BASE}/api/account/risk`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ opening_asset: Number(openingAsset) || 0, current_asset: Number(accountAsset) || 0 }),
+    })
+      .then(async r => {
+        if (!r.ok) throw new Error(await r.text())
+        return r.json()
+      })
+      .then((data: AccountRisk) => {
+        setAccountRisk(data)
+        setAssetMessage('账户风险基线已保存')
+      })
+      .catch(() => setAssetMessage('账户风险基线保存失败'))
+      .finally(() => setAssetSaving(false))
+  }
+
   const updateTExecution = (plan: TTradePlan, step: 'sell' | 'buyback' | 'reduction') => {
     if (!plan.id) return
     const remaining = Math.max(0, plan.actual_sell_quantity - plan.actual_buyback_quantity)
@@ -409,6 +438,18 @@ export default function Positions() {
           </button>
           {assetMessage && <span className="asset-message">{assetMessage}</span>}
         </div>
+        <div className="asset-editor">
+          <input type="number" placeholder="当日期初资产" value={openingAsset} onChange={e => setOpeningAsset(e.target.value)} />
+          <button className="grade-btn" onClick={saveAccountRisk} disabled={assetSaving}>
+            <ShieldAlert size={16} /> 保存今日风控基线
+          </button>
+        </div>
+        {accountRisk && <div className="account-risk-summary">
+          <strong>账户风险 {accountRisk.level}</strong>
+          <span className={accountRisk.daily_profit_ratio >= 0 ? 'num-up' : 'num-down'}>{accountRisk.data_complete ? `${accountRisk.daily_profit_ratio.toFixed(2)}%` : '待设置期初资产'}</span>
+          <p>{accountRisk.recommended_action}</p>
+          {accountRisk.evidence.map(item => <small key={item}>{item}</small>)}
+        </div>}
       </section>
 
       {timeStopRules.length > 0 && (
