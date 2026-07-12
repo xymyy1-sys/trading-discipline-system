@@ -23,6 +23,7 @@ class Settings(BaseSettings):
     auth_secret: str = Field(default="", validation_alias="AUTH_SECRET")
     auth_session_hours: int = Field(default=12, validation_alias="AUTH_SESSION_HOURS")
     auth_cookie_secure: bool = Field(default=False, validation_alias="AUTH_COOKIE_SECURE")
+    audit_enabled: bool = Field(default=True, validation_alias="AUDIT_ENABLED")
 
     def validate_security(self) -> None:
         if not self.auth_enabled:

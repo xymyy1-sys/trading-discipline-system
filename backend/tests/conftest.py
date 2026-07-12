@@ -2,6 +2,7 @@ import os
 
 os.environ.setdefault("AUTH_PASSWORD", "test-password-only")
 os.environ.setdefault("AUTH_SECRET", "test-secret-must-be-at-least-32-characters")
+os.environ.setdefault("AUDIT_ENABLED", "false")
 
 import pytest
 from fastapi.testclient import TestClient

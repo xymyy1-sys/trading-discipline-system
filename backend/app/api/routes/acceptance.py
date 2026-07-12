@@ -7,11 +7,32 @@ from sqlalchemy.orm import Session
 
 from app.api.helpers.execution import _position_quantities
 from app.core.database import get_db
-from app.models.trading import Holding
+from app.models.trading import AuditLog, Holding
+from app.services.audit import verify_audit_chain
 from app.services.intraday_collector import collector_status
 from app.services.replay_engine import ReplayEngine
 
 router = APIRouter()
+
+
+@router.get("/audit-log")
+def audit_log(limit: int = 100, db: Session = Depends(get_db)):
+    safe_limit = max(1, min(limit, 500))
+    chain_valid, total = verify_audit_chain(db)
+    entries = db.query(AuditLog).order_by(AuditLog.id.desc()).limit(safe_limit).all()
+    return {
+        "chain_valid": chain_valid,
+        "total": total,
+        "entries": [
+            {
+                "id": row.id, "created_at": row.created_at, "actor": row.actor,
+                "method": row.method, "path": row.path, "status_code": row.status_code,
+                "request_id": row.request_id, "previous_hash": row.previous_hash,
+                "entry_hash": row.entry_hash,
+            }
+            for row in entries
+        ],
+    }
 
 
 @router.get("/acceptance/report")
@@ -37,6 +58,7 @@ def acceptance_report(code: str | None = None, trade_date: str | None = None, do
         "sse": {"endpoint": "/api/intraday-events/stream", "authenticated": True, "recovery_ux": True},
         "collector": {"enabled": status["enabled"], "running": status["running"], "interval_seconds": status["interval_seconds"]},
         "migration_version": migration_version,
+        "audit_log": dict(zip(("chain_valid", "entry_count"), verify_audit_chain(db))),
         "t_plus_one_validations": validations,
         "t_plus_one_passed": all(item["passed"] for item in validations),
         "replay": replay.model_dump(mode="json") if replay else None,

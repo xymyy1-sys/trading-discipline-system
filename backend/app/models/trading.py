@@ -449,6 +449,20 @@ class DataCaptureSnapshot(Base):
     raw_payload_hash: Mapped[str] = mapped_column(String(64), default="")
 
 
+class AuditLog(Base):
+    __tablename__ = "audit_logs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc), index=True)
+    actor: Mapped[str] = mapped_column(String(128), default="unknown")
+    method: Mapped[str] = mapped_column(String(12))
+    path: Mapped[str] = mapped_column(String(255))
+    status_code: Mapped[int] = mapped_column(Integer)
+    request_id: Mapped[str] = mapped_column(String(64), default="")
+    previous_hash: Mapped[str] = mapped_column(String(64), default="")
+    entry_hash: Mapped[str] = mapped_column(String(64), unique=True)
+
+
 class TTradePlan(Base):
     __tablename__ = "t_trade_plans"
 

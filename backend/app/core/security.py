@@ -51,6 +51,7 @@ def require_auth(
         return "auth-disabled"
     if not token or not verify_session_token(token, settings):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Authentication required")
+    request.state.auth_user = settings.auth_username
     if request.method not in {"GET", "HEAD", "OPTIONS"}:
         origin = request.headers.get("origin")
         if origin and origin not in settings.cors_origins:
