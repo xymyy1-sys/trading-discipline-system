@@ -237,6 +237,8 @@ def _snapshot_out(row: VolumePriceSnapshot) -> VolumePriceSnapshotOut:
         chip_profit_ratio=getattr(row, "chip_profit_ratio", 0), chip_avg_cost=getattr(row, "chip_avg_cost", 0),
         chip_70_concentration=getattr(row, "chip_70_concentration", 0), chip_90_concentration=getattr(row, "chip_90_concentration", 0),
         chip_metrics_estimated=bool(getattr(row, "chip_metrics_estimated", True)),
+        large_order_net_amount=getattr(row, "large_order_net_amount", 0),
+        large_order_threshold=getattr(row, "large_order_threshold", 0),
         attack_efficiency=row.attack_efficiency,
         volume_acceleration=row.volume_acceleration,
         attack_amount=getattr(row, "attack_amount", 0),
@@ -309,6 +311,8 @@ def build_volume_price_snapshot(
     )
     active_flow_source = "provider_tick_direction" if has_explicit_active_flow else ("minute_price_direction_estimate" if minute_rows else "unavailable")
     active_flow_estimated = bool(minute_rows) and not has_explicit_active_flow
+    large_order_net_amount = sum(_safe_float(item.get("large_order_net_amount")) for item in minute_rows)
+    large_order_threshold = max((_safe_float(item.get("large_order_threshold")) for item in minute_rows), default=0)
     recent_high = _safe_float(daily.get("recent_high"))
     distance_recent_high_pct = (price / recent_high - 1) * 100 if price > 0 and recent_high > 0 else 0
     historical_volume_ratio = (
@@ -370,6 +374,8 @@ def build_volume_price_snapshot(
         chip_profit_ratio=round(_safe_float(daily.get("chip_profit_ratio")), 2), chip_avg_cost=round(_safe_float(daily.get("chip_avg_cost")), 4),
         chip_70_concentration=round(_safe_float(daily.get("chip_70_concentration")), 2), chip_90_concentration=round(_safe_float(daily.get("chip_90_concentration")), 2),
         chip_metrics_estimated=True,
+        large_order_net_amount=round(large_order_net_amount / 1e8, 4),
+        large_order_threshold=round(large_order_threshold, 2),
         attack_efficiency=round(attack_efficiency, 2),
         volume_acceleration=round(volume_acceleration, 2),
         attack_amount=round(attack_amount, 2),

@@ -172,6 +172,7 @@ export default function DecisionCard() {
                   <div><b>历史量比</b><span>{card.volume_price.historical_volume_ratio ? card.volume_price.historical_volume_ratio.toFixed(2) : '--'}</span></div>
                   <div><b>获利筹码估算</b><span>{card.volume_price.chip_profit_ratio.toFixed(1)}%</span></div>
                   <div><b>筹码平均成本</b><span>{card.volume_price.chip_avg_cost ? card.volume_price.chip_avg_cost.toFixed(2) : '--'}</span></div>
+                  <div><b>逐笔大单净额</b><span>{card.volume_price.large_order_threshold ? `${card.volume_price.large_order_net_amount.toFixed(3)}亿` : '--'}</span></div>
                 </div>
                 {card.volume_price.chip_metrics_estimated && <p className="refresh-note">筹码指标按近30日日线成交量加权估算，不冒充行情源官方筹码分布。</p>}
                 <ul>

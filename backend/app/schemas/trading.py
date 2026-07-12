@@ -351,6 +351,8 @@ class VolumePriceSnapshotOut(BaseModel):
     chip_70_concentration: float = 0
     chip_90_concentration: float = 0
     chip_metrics_estimated: bool = True
+    large_order_net_amount: float = 0
+    large_order_threshold: float = 0
     attack_efficiency: float = 0
     volume_acceleration: float = 0
     attack_amount: float = 0

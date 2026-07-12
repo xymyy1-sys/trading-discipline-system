@@ -1,6 +1,6 @@
 import pandas as pd
 
-from app.api.helpers.quotes import _attach_minute_bars, _daily_history_metrics, _eastmoney_minute_bars, _eastmoney_secid, _sina_minute_bars
+from app.api.helpers.quotes import _attach_minute_bars, _daily_history_metrics, _eastmoney_minute_bars, _eastmoney_secid, _eastmoney_tick_flow, _sina_minute_bars
 
 
 def test_eastmoney_secid_handles_a_share_and_etf_markets():
@@ -120,3 +120,18 @@ def test_daily_history_metrics_include_ma_returns_and_estimated_chip_distributio
     assert 0 <= metrics["chip_profit_ratio"] <= 100
     assert metrics["chip_avg_cost"] > 0
     assert metrics["chip_90_concentration"] >= metrics["chip_70_concentration"]
+
+
+def test_eastmoney_tick_flow_aggregates_active_and_large_orders(monkeypatch):
+    class FakeResponse:
+        text = 'data: {"data":{"details":["09:31:01,10.00,300,0,2","09:31:20,10.10,100,0,1","09:32:00,10.20,50,0,4"]}}\n\n'
+
+        def raise_for_status(self):
+            return None
+
+    monkeypatch.setattr("app.api.helpers.quotes.requests.get", lambda *_args, **_kwargs: FakeResponse())
+    flow = _eastmoney_tick_flow("600584", large_order_threshold=200_000)
+    assert flow["09:31"]["active_buy_amount"] == 300_000
+    assert flow["09:31"]["active_sell_amount"] == 101_000
+    assert flow["09:31"]["large_order_net_amount"] == 300_000
+    assert flow["09:31"]["large_order_threshold"] == 200_000

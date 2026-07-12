@@ -398,6 +398,8 @@ class VolumePriceSnapshot(Base):
     chip_70_concentration: Mapped[float] = mapped_column(Float, default=0)
     chip_90_concentration: Mapped[float] = mapped_column(Float, default=0)
     chip_metrics_estimated: Mapped[bool] = mapped_column(Boolean, default=True)
+    large_order_net_amount: Mapped[float] = mapped_column(Float, default=0)
+    large_order_threshold: Mapped[float] = mapped_column(Float, default=0)
     attack_efficiency: Mapped[float] = mapped_column(Float, default=0)
     volume_acceleration: Mapped[float] = mapped_column(Float, default=0)
     attack_amount: Mapped[float] = mapped_column(Float, default=0)

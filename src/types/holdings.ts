@@ -320,6 +320,8 @@ export interface VolumePriceSnapshot {
   chip_70_concentration: number;
   chip_90_concentration: number;
   chip_metrics_estimated: boolean;
+  large_order_net_amount: number;
+  large_order_threshold: number;
   attack_efficiency: number;
   volume_acceleration: number;
   attack_amount: number;

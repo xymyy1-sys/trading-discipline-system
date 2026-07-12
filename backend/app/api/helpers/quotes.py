@@ -334,7 +334,55 @@ def _eastmoney_minute_bars(code: str) -> list[dict[str, Any]]:
             "amount": _safe_float(parts[6]),
             "turnover": _safe_float(parts[10]) if len(parts) > 10 else 0.0,
         })
+    try:
+        tick_flow = _eastmoney_tick_flow(normalized)
+        for bar in bars:
+            flow = tick_flow.get(str(bar.get("time") or ""))
+            if flow:
+                bar.update(flow)
+    except Exception:
+        pass
     return bars
+
+
+def _eastmoney_tick_flow(code: str, large_order_threshold: float = 200_000) -> dict[str, dict[str, float]]:
+    normalized = _quote_code_candidates(code)[0] if _quote_code_candidates(code) else _normalize_code(code)
+    response = requests.get(
+        "https://70.push2.eastmoney.com/api/qt/stock/details/sse",
+        params={
+            "fields1": "f1,f2,f3,f4", "fields2": "f51,f52,f53,f54,f55", "mpi": "2000",
+            "ut": "bd1d9ddb04089700cf9c27f6f7426281", "fltt": "2", "pos": "-0",
+            "secid": _eastmoney_secid(normalized), "wbp2u": "|0|0|0|web",
+        },
+        headers={"User-Agent": "Mozilla/5.0", "Referer": "https://quote.eastmoney.com/"},
+        timeout=6,
+    )
+    response.raise_for_status()
+    payload = None
+    for line in response.text.splitlines():
+        if line.startswith("data:"):
+            payload = json.loads(line[5:].strip())
+            break
+    details = ((payload or {}).get("data") or {}).get("details") or []
+    output: dict[str, dict[str, float]] = {}
+    for detail in details:
+        parts = str(detail).split(",")
+        if len(parts) < 5:
+            continue
+        raw_time, price, hands, _, nature = parts[:5]
+        minute = raw_time[:5]
+        amount = _safe_float(price) * _safe_float(hands) * 100
+        row = output.setdefault(minute, {"active_buy_amount": 0.0, "active_sell_amount": 0.0, "large_order_net_amount": 0.0})
+        if nature == "2":
+            row["active_buy_amount"] += amount
+            if amount >= large_order_threshold:
+                row["large_order_net_amount"] += amount
+        elif nature == "1":
+            row["active_sell_amount"] += amount
+            if amount >= large_order_threshold:
+                row["large_order_net_amount"] -= amount
+        row["large_order_threshold"] = large_order_threshold
+    return output
 
 def _latest_quote_for_holding(holding: Holding) -> dict[str, Any]:
     try:
