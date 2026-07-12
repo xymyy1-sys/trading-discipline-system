@@ -57,6 +57,8 @@ def watchlist_recommendations(db: Session = Depends(get_db)) -> list[WatchlistRe
     for future in pending:
         future.cancel()
     executor.shutdown(wait=False, cancel_futures=True)
+    if radar is None and ladder is None:
+        raise HTTPException(status_code=503, detail="主线题材与涨停行情源暂不可用，请稍后重试；已有观察池和持仓数据未受影响")
 
     holding_codes = {row.code for row in db.query(Holding.code).all()}
     rows: dict[str, dict] = {}

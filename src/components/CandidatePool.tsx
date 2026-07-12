@@ -23,7 +23,7 @@ export default function CandidatePool() {
   const load = () => {
     setLoading(true)
     setError('')
-    Promise.all([
+    Promise.allSettled([
       fetch(`${API_BASE}/api/watchlist-recommendations`).then(r => {
         if (!r.ok) throw new Error(`自动观察池请求失败（${r.status}）`)
         return r.json()
@@ -32,10 +32,20 @@ export default function CandidatePool() {
         if (!r.ok) throw new Error(`已有标的分层请求失败（${r.status}）`)
         return r.json()
       }),
-    ]).then(([nextRecommendations, nextItems]) => {
-      setRecommendations(Array.isArray(nextRecommendations) ? nextRecommendations : [])
-      setItems(Array.isArray(nextItems) ? nextItems : [])
-    }).catch(error => setError(error instanceof Error ? error.message : '观察池加载失败')).finally(() => setLoading(false))
+    ]).then(([recommendationResult, candidateResult]) => {
+      if (recommendationResult.status === 'fulfilled') {
+        setRecommendations(Array.isArray(recommendationResult.value) ? recommendationResult.value : [])
+      } else {
+        setRecommendations([])
+        setError(recommendationResult.reason instanceof Error ? recommendationResult.reason.message : '自动观察池行情源不可用')
+      }
+      if (candidateResult.status === 'fulfilled') {
+        setItems(Array.isArray(candidateResult.value) ? candidateResult.value : [])
+      } else {
+        setItems([])
+        setError(previous => [previous, candidateResult.reason instanceof Error ? candidateResult.reason.message : '已有标的加载失败'].filter(Boolean).join('；'))
+      }
+    }).finally(() => setLoading(false))
   }
   useEffect(load, [])
   return <section className="candidate-pool">
