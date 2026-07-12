@@ -1,4 +1,4 @@
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, wait
 from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -42,17 +42,21 @@ def watchlist_recommendations(db: Session = Depends(get_db)) -> list[WatchlistRe
     from app.services.market_data import MarketDataProvider
 
     provider = MarketDataProvider()
-    with ThreadPoolExecutor(max_workers=2) as executor:
-        theme_future = executor.submit(provider.theme_radar)
-        ladder_future = executor.submit(provider.limit_up_ladder)
-        try:
-            radar = theme_future.result()
-        except Exception:
-            radar = None
-        try:
-            ladder = ladder_future.result()
-        except Exception:
-            ladder = None
+    executor = ThreadPoolExecutor(max_workers=2)
+    theme_future = executor.submit(provider.theme_radar)
+    ladder_future = executor.submit(provider.limit_up_ladder)
+    done, pending = wait((theme_future, ladder_future), timeout=22)
+    try:
+        radar = theme_future.result() if theme_future in done else None
+    except Exception:
+        radar = None
+    try:
+        ladder = ladder_future.result() if ladder_future in done else None
+    except Exception:
+        ladder = None
+    for future in pending:
+        future.cancel()
+    executor.shutdown(wait=False, cancel_futures=True)
 
     holding_codes = {row.code for row in db.query(Holding.code).all()}
     rows: dict[str, dict] = {}
