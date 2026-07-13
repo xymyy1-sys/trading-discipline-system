@@ -146,7 +146,6 @@ def _latest_a_share_quotes_sina(codes: list[str]) -> dict[str, dict[str, Any]]:
 
 def _latest_a_share_quotes_eastmoney(codes: list[str]) -> dict[str, dict[str, Any]]:
     from urllib.parse import urlencode
-    from urllib.request import Request, urlopen
 
     secids = ",".join(
         _eastmoney_secid(candidate)
@@ -162,10 +161,27 @@ def _latest_a_share_quotes_eastmoney(codes: list[str]) -> dict[str, dict[str, An
         "fields": "f12,f14,f2,f3,f6,f8,f15,f16,f17,f18,f21",
         "secids": secids,
     })
-    url = f"https://push2.eastmoney.com/api/qt/ulist.np/get?{params}"
-    request = Request(url, headers={"User-Agent": "Mozilla/5.0"})
-    with urlopen(request, timeout=6) as response:
-        payload = json.loads(response.read().decode("utf-8"))
+    payload = None
+    last_error: Exception | None = None
+    # push2 主站在部分云服务器网络中会返回空响应；两个官方边缘域名
+    # 使用同一接口和字段，可作为真实行情的顺序回退源。
+    for host in ("https://push2.eastmoney.com", "https://push2ex.eastmoney.com", "https://push2delay.eastmoney.com"):
+        try:
+            response = requests.get(
+                f"{host}/api/qt/ulist.np/get?{params}",
+                headers={"User-Agent": "Mozilla/5.0", "Referer": "https://quote.eastmoney.com/"},
+                timeout=6,
+            )
+            response.raise_for_status()
+            payload = response.json()
+            if (payload.get("data") or {}).get("diff"):
+                break
+        except Exception as exc:
+            last_error = exc
+    if not payload or not (payload.get("data") or {}).get("diff"):
+        if last_error:
+            raise last_error
+        return {}
     rows = payload.get("data", {}).get("diff", []) or []
     quotes: dict[str, dict[str, Any]] = {}
     for row in rows:

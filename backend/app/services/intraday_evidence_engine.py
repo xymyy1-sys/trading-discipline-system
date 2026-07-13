@@ -152,3 +152,65 @@ def collect_holding_evidence(
     db.commit()
     sample = save_intraday_sample_event(db, holding, quote, volume, state, now=now)
     return volume, state, sample
+
+
+def collect_tracked_stock_evidence(
+    db: Session,
+    code: str,
+    name: str,
+    base_hint: str,
+    stage: str | None = None,
+    now: datetime | None = None,
+) -> IntradayEvidenceEvent:
+    """Persist expectation/volume/evidence for a watchlist or active limit-up plan."""
+    now = now or datetime.now()
+    fetch_started = time_module.perf_counter()
+    quote = quote_for_code(code)
+    latency_ms = int((time_module.perf_counter() - fetch_started) * 1000)
+    stage = stage or current_expectation_stage(now)
+    volume = build_volume_price_snapshot(db, code, name=name, stage=stage, quote=quote)
+    baseline = db.query(ExpectationSnapshot).filter(
+        ExpectationSnapshot.code == code,
+        ExpectationSnapshot.stage == "次日盘前预期",
+        ExpectationSnapshot.trade_date == _trade_date(now),
+    ).order_by(ExpectationSnapshot.created_at.desc()).first()
+    expectation = build_expectation_snapshot(
+        db, code, name=name, stage=stage, quote=quote,
+        base_hint=baseline.base_expectation if baseline else base_hint,
+    )
+    raw_json = json.dumps(quote, ensure_ascii=False, sort_keys=True, default=str)
+    normalized_json = json.dumps(
+        {"price": volume.price, "vwap": volume.vwap, "pattern": volume.pattern, "expectation": expectation.expectation_result},
+        ensure_ascii=False, sort_keys=True,
+    )
+    db.add(DataCaptureSnapshot(
+        trade_date=_trade_date(now), captured_at=now,
+        source=str(quote.get("minute_bar_source") or quote.get("note") or "unknown"),
+        data_type="tracked_stock_minute", target_code=code, target_name=name,
+        raw_value_json=raw_json, normalized_value_json=normalized_json,
+        quality=volume.data_quality, latency_ms=latency_ms,
+        is_stale=bool(quote.get("minute_bar_trade_date") and quote.get("minute_bar_trade_date") != _trade_date(now)),
+        is_degraded=not volume.vwap_reliable,
+        is_estimated=volume.vwap_source in {"quote_estimated", "range_estimated", "estimated"},
+        is_complete=bool(quote) and volume.price > 0,
+        status=str(quote.get("minute_bar_status") or ("quote_only" if quote else "missing")),
+        error_message=str(quote.get("minute_fetch_error") or ""),
+        raw_payload_hash=hashlib.sha256(raw_json.encode("utf-8")).hexdigest(),
+    ))
+    sample_label = nearest_sample_label(now)
+    event = IntradayEvidenceEvent(
+        trade_date=_trade_date(now), captured_at=now, scope="stock",
+        target_code=code, target_name=name, event_type="INTRADAY_EVIDENCE_SNAPSHOT",
+        severity="info", value=round(volume.price, 2), previous_value=round(volume.vwap, 2),
+        priority=8, group_key=f"tracked:sample:{sample_label}", first_seen_at=now,
+        last_seen_at=now, occurrence_count=1, confirmed=bool(quote),
+        evidence_json=_json_dumps([
+            f"采样点 {sample_label}，价格 {volume.price:.2f}，分时均价 {volume.vwap:.2f}。",
+            f"预期阶段 {stage}，实际表现 {expectation.expectation_result}，预期差 {expectation.expectation_gap_score:+d}。",
+            f"量价状态 {volume.pattern}，数据质量 {volume.data_quality}。",
+        ]),
+    )
+    db.add(event)
+    db.commit()
+    db.refresh(event)
+    return event

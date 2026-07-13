@@ -345,28 +345,30 @@ def build_expectation_snapshot(
     else:
         result, transition, suggestion = "MATCHED", "MATCHED", "基本符合预期，按原计划和失效条件执行。"
     confidence = 0.72 if quote else 0.42
-    row = ExpectationSnapshot(
-        trade_date=_today(),
-        code=code,
-        name=name or code,
-        stage=stage,
-        base_expectation=base_expectation,
-        expected_open_low=expected_low,
-        expected_open_high=expected_high,
-        outperform_threshold=outperform,
-        underperform_threshold=underperform,
-        severe_underperform_threshold=severe_under,
-        actual_open_pct=round(open_pct, 2),
-        actual_change_pct=round(change_pct, 2),
-        expectation_gap_score=open_score,
-        expectation_result=result,
-        state_transition=transition,
-        confidence=confidence,
-        evidence_json=_json_dumps(evidence),
-        counter_evidence_json=_json_dumps(counter),
-        suggestion=suggestion,
-        created_at=datetime.now(),
-    )
+    row = db.query(ExpectationSnapshot).filter(
+        ExpectationSnapshot.trade_date == _today(),
+        ExpectationSnapshot.code == code,
+        ExpectationSnapshot.stage == stage,
+    ).order_by(ExpectationSnapshot.created_at.desc()).first()
+    if row is None:
+        row = ExpectationSnapshot(trade_date=_today(), code=code, stage=stage)
+    row.name = name or code
+    row.base_expectation = base_expectation
+    row.expected_open_low = expected_low
+    row.expected_open_high = expected_high
+    row.outperform_threshold = outperform
+    row.underperform_threshold = underperform
+    row.severe_underperform_threshold = severe_under
+    row.actual_open_pct = round(open_pct, 2)
+    row.actual_change_pct = round(change_pct, 2)
+    row.expectation_gap_score = open_score
+    row.expectation_result = result
+    row.state_transition = transition
+    row.confidence = confidence
+    row.evidence_json = _json_dumps(evidence)
+    row.counter_evidence_json = _json_dumps(counter)
+    row.suggestion = suggestion
+    row.created_at = datetime.now()
     if persist:
         db.add(row)
         db.commit()

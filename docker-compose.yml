@@ -4,6 +4,7 @@ services:
       context: ./backend
     environment:
       DATABASE_URL: sqlite:///./data/trading_discipline.db
+      TZ: Asia/Shanghai
       AUTH_USERNAME: ${AUTH_USERNAME:-admin}
       AUTH_PASSWORD: ${AUTH_PASSWORD:?Set AUTH_PASSWORD to at least 12 characters}
       AUTH_SECRET: ${AUTH_SECRET:?Set AUTH_SECRET to at least 32 random characters}

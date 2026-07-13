@@ -68,6 +68,12 @@ export default function DecisionCard({ mode = 'watchlist' }: { mode?: DecisionCa
     return () => window.removeEventListener('watchlist-updated', syncWatchlist)
   }, [mode])
 
+  useEffect(() => {
+    if (!card?.code) return
+    const timer = window.setInterval(() => loadCard(card.code), 60_000)
+    return () => window.clearInterval(timer)
+  }, [card?.code])
+
   const updateRule = (id: number, patch: Partial<ExpectationRule>) => {
     setRules(current => current.map(rule => rule.id === id ? { ...rule, ...patch } : rule))
   }
@@ -173,7 +179,7 @@ export default function DecisionCard({ mode = 'watchlist' }: { mode?: DecisionCa
 
             <ExpectationJourney card={card} />
 
-            {mode === 'holding' && <DecisionMinuteChart card={card} />}
+            <DecisionMinuteChart card={card} />
 
             {mode === 'holding' && card.volume_price && (
               <div className="decision-section volume-price-section">

@@ -7,8 +7,8 @@ from datetime import datetime, time
 
 from app.api.helpers.decision import current_expectation_stage
 from app.core.database import SessionLocal
-from app.models.trading import Holding, IntradayCollectionRun, IntradayEvidenceEvent
-from app.services.intraday_evidence_engine import collect_holding_evidence
+from app.models.trading import Holding, IntradayCollectionRun, IntradayEvidenceEvent, NextDayPlan, WatchlistEntry
+from app.services.intraday_evidence_engine import collect_holding_evidence, collect_tracked_stock_evidence
 
 COLLECTOR_INTERVAL_SECONDS = 60
 COLLECTOR_ENABLED = True
@@ -49,11 +49,25 @@ def run_intraday_collection_once(trigger: str = "manual") -> IntradayCollectionR
     try:
         event_before = db.query(IntradayEvidenceEvent).count()
         holdings = db.query(Holding).order_by(Holding.updated_at.desc()).all()
+        holding_codes = {row.code for row in holdings}
+        tracked: dict[str, tuple[str, str]] = {}
+        for row in db.query(WatchlistEntry).filter(WatchlistEntry.status == "active").order_by(
+            WatchlistEntry.snapshot_rank.asc(), WatchlistEntry.updated_at.desc()
+        ).limit(10).all():
+            if row.code not in holding_codes:
+                tracked[row.code] = (row.name, "自动观察池")
+        for row in db.query(NextDayPlan).filter(
+            NextDayPlan.plan_date == started.date().isoformat(),
+            NextDayPlan.plan_type == "limit_up_auction",
+        ).all():
+            if row.code not in holding_codes:
+                tracked[row.code] = (row.name, "打板预案")
         stage = current_expectation_stage(started)
         run.holding_count = len(holdings)
         if not _is_market_watch_time(started):
             notes.append("当前不在交易采样时段（交易日09:15-15:00），不生成盘后证据和操作建议。")
             holdings = []
+            tracked = {}
         elif not holdings:
             notes.append("暂无持仓，后台采集跳过。")
         for holding in holdings:
@@ -73,6 +87,10 @@ def run_intraday_collection_once(trigger: str = "manual") -> IntradayCollectionR
                     pass
                 except Exception as notify_exc:
                     notes.append(f"钉钉通知失败：{notify_exc.__class__.__name__}")
+        for code, (name, base_hint) in tracked.items():
+            collect_tracked_stock_evidence(db, code, name, base_hint, stage=stage, now=started)
+            snapshot_count += 1
+            notes.append(f"{code} {name}（{base_hint}）已采集 {stage}。")
         run.status = "success"
     except Exception as exc:
         db.rollback()
