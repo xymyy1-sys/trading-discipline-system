@@ -241,6 +241,35 @@ def test_dark_trade_maps_eastmoney_fields_to_yi(monkeypatch):
     assert item.leading_stock == "哈药股份"
 
 
+def test_dark_trade_falls_back_from_premarket_placeholder_to_last_completed_day(monkeypatch):
+    provider = MarketDataProvider()
+    calls = []
+
+    def fake_fetch(scope, date_text):
+        calls.append(date_text)
+        if date_text == "20260713":
+            return ([{"3": 90, "4": "BK0001", "6": 0, "7": 0, "8": 0}], date_text)
+        return ([{
+            "3": 90,
+            "4": "BK1216",
+            "6": 9497014878,
+            "7": 4079387618,
+            "8": 13576402496,
+            "11": 0.06227,
+            "12": 0.90927,
+            "16": "医药生物",
+        }], date_text)
+
+    monkeypatch.setattr(provider, "_fetch_eastmoney_dark_trade_raw", fake_fetch)
+
+    result = provider.dark_trade(scope="行业", trade_date="20260713", force_refresh=True)
+
+    assert calls == ["20260713", "20260710"]
+    assert result.trade_date == "20260710"
+    assert result.items[0].name == "医药生物"
+    assert any("自动回退" in note for note in result.notes)
+
+
 def test_hot_themes_uses_hot_market_rows_and_flow_lookup(monkeypatch):
     provider = MarketDataProvider()
 

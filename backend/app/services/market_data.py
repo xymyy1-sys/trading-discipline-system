@@ -29,6 +29,8 @@ from app.schemas.trading import (
 )
 import requests
 
+_DARK_TRADE_LAST_GOOD: dict[str, DarkTradeOut] = {}
+
 from app.services.cache import (
     _get_response_cache,
     _set_response_cache,
@@ -1022,15 +1024,53 @@ class MarketDataProvider:
         notes = [
             "东方财富暗盘资金为算法统计口径，A股无官方交易所暗盘；用于观察潜在资金行为，不等同真实暗盘成交",
         ]
-        try:
-            rows, remote_date = self._fetch_eastmoney_dark_trade_raw(normalized, date_text)
+        rows: list[dict[str, Any]] = []
+        remote_date = date_text
+        items: list[DarkTradeItem] = []
+        last_error: Exception | None = None
+        attempted_dates: list[str] = []
+        candidate = datetime.strptime(date_text, "%Y%m%d")
+        # 盘前东方财富会先生成当日行业/概念空壳行，个股接口则直接报错。
+        # 最多回看六个交易日，只接受确实带有成交拆单金额的完整榜单。
+        while len(attempted_dates) < 6:
+            if candidate.weekday() < 5:
+                candidate_text = candidate.strftime("%Y%m%d")
+                attempted_dates.append(candidate_text)
+                try:
+                    candidate_rows, candidate_remote_date = self._fetch_eastmoney_dark_trade_raw(
+                        normalized, candidate_text
+                    )
+                    if not self._has_real_dark_trade_values(candidate_rows):
+                        raise ValueError("darktrade placeholder rows")
+                    rows = candidate_rows
+                    remote_date = candidate_remote_date or candidate_text
+                    break
+                except Exception as exc:
+                    last_error = exc
+            candidate -= timedelta(days=1)
+
+        if rows:
             items = [self._build_dark_trade_item(row, normalized) for row in rows]
+            if str(remote_date) != date_text:
+                notes.append(
+                    f"当日完整榜单尚未生成，已自动回退至最近有效交易日 {remote_date}。"
+                )
             notes.append(f"接口本次返回 {len(items)} 条；仅代表东方财富该算法榜单覆盖范围，不代表全市场股票总数")
-        except Exception as exc:
-            notes.append(f"东方财富暗盘资金接口暂不可用: {exc.__class__.__name__}")
-            rows = []
-            remote_date = date_text
-            items = []
+        else:
+            cached_good = _DARK_TRADE_LAST_GOOD.get(normalized)
+            if cached_good is not None and cached_good.items:
+                result = cached_good.model_copy(deep=True)
+                result.updated_at = datetime.utcnow()
+                result.source = f"{cached_good.source}+last-good-cache"
+                result.notes = [
+                    *cached_good.notes,
+                    "实时接口暂不可用，当前展示本进程最后一次成功获取的榜单。",
+                ]
+                _set_response_cache(cache_key, result)
+                return result
+            notes.append(
+                f"东方财富成交拆单估算接口暂不可用: {(last_error or ValueError()).__class__.__name__}"
+            )
 
         result = DarkTradeOut(
             source="eastmoney-darktrade" if items else "eastmoney-darktrade-unavailable",
@@ -1040,6 +1080,8 @@ class MarketDataProvider:
             items=items,
             notes=notes,
         )
+        if items:
+            _DARK_TRADE_LAST_GOOD[normalized] = result.model_copy(deep=True)
         _set_response_cache(cache_key, result)
         return result
 
@@ -1951,6 +1993,15 @@ class MarketDataProvider:
         )
         _set_response_cache(cache_key, result)
         return result
+
+    @staticmethod
+    def _has_real_dark_trade_values(rows: list[dict[str, Any]]) -> bool:
+        """Reject the pre-market placeholder board rows returned with all amounts zero."""
+        return any(
+            abs(_safe_float(row.get(field))) > 0
+            for row in rows
+            for field in ("6", "7", "8")
+        )
 
     def _fetch_eastmoney_announcements(self, codes: list[str]) -> list[dict[str, object]]:
         resp = requests.get(

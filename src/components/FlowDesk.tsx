@@ -85,7 +85,11 @@ export default function FlowDesk() {
       .then(({ data, fetchedAt }) => {
         setDarkTrade(data)
         setFetchedAt(fetchedAt)
-        setApiNote(data.items.length ? `东方财富暗盘资金 · ${data.scope}` : '暗盘资金暂不可用')
+        setApiNote(
+          data.items.length
+            ? `东方财富成交拆单估算 · ${data.scope} · 数据日 ${data.trade_date}`
+            : '成交拆单估算暂不可用',
+        )
       })
       .catch(() => setApiNote('后端未启动'))
       .finally(() => setLoading(false))
