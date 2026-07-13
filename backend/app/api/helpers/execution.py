@@ -1042,6 +1042,9 @@ def build_position_execution_state(
         level = "WATCH"
         evidence.append("数据降级：缺少真实1分钟VWAP，不输出确定性减仓、清仓或做T信号。")
         invalid_conditions.append("未恢复真实分钟成交数据前，系统建议只能作为观察提醒。")
+    if reduce_ratio >= 0.75 and action == "减仓50%":
+        action = "只留观察仓"
+        level = "EXIT"
     if current_profit_pct < 0 and state == "NORMAL_HOLD":
         state = "LOSS_OBSERVATION"
         action = "观察但禁止加仓"
