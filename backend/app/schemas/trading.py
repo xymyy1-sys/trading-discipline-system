@@ -68,6 +68,40 @@ class HoldingRefreshOut(BaseModel):
     today_profit_ratio: float = 0
     total_profit_amount: float = 0
     total_profit_ratio: float = 0
+    today_open_profit_amount: float = 0
+    today_realized_profit_amount: float = 0
+
+
+class HoldingAccountSummaryOut(BaseModel):
+    total_asset: float = 0
+    cash_available: float = 0
+    total_market_value: float = 0
+    total_position_ratio: float = 0
+    today_profit_amount: float = 0
+    today_profit_ratio: float = 0
+    today_open_profit_amount: float = 0
+    today_realized_profit_amount: float = 0
+    total_profit_amount: float = 0
+    total_profit_ratio: float = 0
+    calculated_at: datetime
+
+
+class PortfolioExposureItemOut(BaseModel):
+    name: str
+    market_value: float
+    ratio: float
+    holding_count: int
+    codes: list[str] = Field(default_factory=list)
+
+
+class PortfolioExposureOut(BaseModel):
+    generated_at: datetime
+    total_market_value: float
+    industries: list[PortfolioExposureItemOut] = Field(default_factory=list)
+    themes: list[PortfolioExposureItemOut] = Field(default_factory=list)
+    styles: list[PortfolioExposureItemOut] = Field(default_factory=list)
+    risk_factors: list[PortfolioExposureItemOut] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
 
 
 class HoldingSyncOut(BaseModel):
@@ -83,6 +117,8 @@ class HoldingSyncOut(BaseModel):
     today_profit_ratio: float = 0
     total_profit_amount: float = 0
     total_profit_ratio: float = 0
+    today_open_profit_amount: float = 0
+    today_realized_profit_amount: float = 0
 
 
 class AccountAssetIn(BaseModel):
@@ -228,6 +264,8 @@ class RecommendationFeedbackOut(BaseModel):
     recommendation_id: int
     status: str
     reason: str
+    trade_id: int | None = None
+    result: str = "待匹配成交"
     created_at: datetime
 
     class Config:
@@ -288,6 +326,56 @@ class ExpectationSnapshotUpdate(BaseModel):
     evidence: list[str] | None = None
     counter_evidence: list[str] | None = None
     suggestion: str | None = None
+
+
+class ExpectationScenarioOut(BaseModel):
+    id: int
+    scenario_type: str
+    probability: float
+    expected_low: float
+    expected_high: float
+    validation_conditions: list[str] = Field(default_factory=list)
+    invalid_conditions: list[str] = Field(default_factory=list)
+    action_discipline: str = ""
+
+
+class ExpectationRevisionOut(BaseModel):
+    id: int
+    expectation_snapshot_id: int
+    previous_revision_id: int | None = None
+    version: int
+    trade_date: str
+    code: str
+    name: str = ""
+    stage: str
+    trigger: str
+    base_expectation: str
+    expected_open_low: float
+    expected_open_high: float
+    actual_open_pct: float
+    actual_change_pct: float
+    expectation_gap_score: int
+    expectation_result: str
+    state_transition: str
+    confidence: float
+    volume_price_state: str = ""
+    vwap: float = 0
+    price_vs_vwap: float = 0
+    data_quality: str = "manual"
+    evidence: list[str] = Field(default_factory=list)
+    counter_evidence: list[str] = Field(default_factory=list)
+    invalid_conditions: list[str] = Field(default_factory=list)
+    suggestion: str = ""
+    scenarios: list[ExpectationScenarioOut] = Field(default_factory=list)
+    created_at: datetime
+
+
+class ExpectationChainOut(BaseModel):
+    code: str
+    trade_date: str
+    generated_at: datetime
+    current_stage: str
+    revisions: list[ExpectationRevisionOut] = Field(default_factory=list)
 
 
 class ExpectationRuleIn(BaseModel):
@@ -502,6 +590,10 @@ class WatchlistEntryOut(BaseModel):
     name: str
     status: str
     source: str
+    entry_reason: str = ""
+    exit_reason: str = ""
+    observation_days: int = 0
+    converted: bool = False
 
 
 class WatchlistRecommendationOut(BaseModel):
@@ -524,6 +616,9 @@ class WatchlistRecommendationOut(BaseModel):
     risks: list[str] = Field(default_factory=list)
     source: str = ""
     category: str = ""
+    entry_reason: str = ""
+    observation_days: int = 0
+    converted: bool = False
     updated_at: datetime | None = None
 
 
@@ -603,13 +698,19 @@ class ReplayReportOut(BaseModel):
 
 class DataProviderHealthOut(BaseModel):
     source: str
+    data_type: str = ""
     sample_count: int
     success_count: int
     degraded_count: int
     stale_count: int
+    missing_count: int = 0
+    missing_rate: float = 0
     average_latency_ms: float
     latest_status: str
     latest_at: datetime
+    latest_trade_date: str = ""
+    trade_date_consistent: bool = True
+    degraded_source: str = ""
 
 
 class DataQualityHealthOut(BaseModel):
@@ -662,6 +763,9 @@ class IntradayCollectorStatusOut(BaseModel):
     enabled: bool
     interval_seconds: int
     running: bool
+    queue_depth: int = 0
+    open_circuits: list[str] = Field(default_factory=list)
+    failure_counts: dict[str, int] = Field(default_factory=dict)
     last_run: CollectionRunOut | None = None
 
 

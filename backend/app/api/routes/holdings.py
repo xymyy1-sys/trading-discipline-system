@@ -1,4 +1,6 @@
 import asyncio
+import csv
+import io
 import json
 import re
 from datetime import datetime
@@ -14,6 +16,9 @@ from app.schemas.trading import (
     HoldingOut,
     HoldingRefreshOut,
     HoldingSyncOut,
+    HoldingAccountSummaryOut,
+    PortfolioExposureItemOut,
+    PortfolioExposureOut,
     AccountAssetIn,
     AccountAssetOut,
     AccountRiskIn,
@@ -46,10 +51,12 @@ from app.api.helpers.holdings_calc import (
     _holding_account_summary
 )
 from app.api.helpers.execution import build_execution_states, build_position_execution_state
+from app.api.helpers.seesaw import _holding_theme_profile, _sector_family
 from app.api.helpers.quotes import _latest_a_share_quotes, _quote_lookup_code
-from app.api.helpers.decision import build_t_eligibility, create_t_plan, update_t_plan
+from app.api.helpers.decision import build_t_eligibility, build_volume_price_snapshot, create_t_plan, update_t_plan
 from app.models.trading import (
     ActionRecommendation,
+    ActionRecommendationRevision,
     IntradayCollectionRun,
     IntradayEvidenceEvent,
     PositionExecutionState,
@@ -74,20 +81,62 @@ def data_quality_health(db: Session = Depends(get_db)) -> DataQualityHealthOut:
     rows = db.query(DataCaptureSnapshot).order_by(DataCaptureSnapshot.captured_at.desc()).limit(1000).all()
     grouped: dict[str, list[DataCaptureSnapshot]] = {}
     for row in rows:
-        grouped.setdefault(row.source, []).append(row)
+        grouped.setdefault(f"{row.source}:{row.data_type}", []).append(row)
     providers = []
-    for source, samples in grouped.items():
+    latest_trade_date = max((item.trade_date for item in rows if item.trade_date), default="")
+    for samples in grouped.values():
+        source = samples[0].source
+        missing_count = sum(item.status not in {"ok", "success"} or item.quality == "missing" for item in samples)
+        sample_trade_dates = {item.trade_date for item in samples if item.trade_date}
         providers.append(DataProviderHealthOut(
             source=source,
+            data_type=samples[0].data_type,
             sample_count=len(samples),
             success_count=sum(item.status == "ok" and not item.is_degraded for item in samples),
             degraded_count=sum(item.is_degraded for item in samples),
             stale_count=sum(item.is_stale for item in samples),
+            missing_count=missing_count,
+            missing_rate=round(missing_count / len(samples) * 100, 1),
             average_latency_ms=round(sum(item.latency_ms for item in samples) / len(samples), 1),
             latest_status=samples[0].status,
             latest_at=samples[0].captured_at,
+            latest_trade_date=samples[0].trade_date,
+            trade_date_consistent=not latest_trade_date or sample_trade_dates == {latest_trade_date},
+            degraded_source=(source if samples[0].is_degraded else ""),
         ))
     return DataQualityHealthOut(generated_at=datetime.now(), providers=providers)
+
+
+@router.post("/data-quality/captures/{capture_id}/recompute")
+def recompute_capture(capture_id: int, db: Session = Depends(get_db)) -> dict:
+    """从留存的原始响应重算量价快照；原始记录保持不可变。"""
+    capture = db.get(DataCaptureSnapshot, capture_id)
+    if capture is None:
+        raise HTTPException(status_code=404, detail="capture not found")
+    if capture.data_type not in {"stock_minute", "tracked_stock_minute"}:
+        raise HTTPException(status_code=409, detail="this capture type has no registered recompute adapter")
+    try:
+        raw_value = json.loads(capture.raw_value_json or "{}")
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=422, detail="raw capture is invalid JSON") from exc
+    snapshot = build_volume_price_snapshot(
+        db,
+        capture.target_code,
+        name=capture.target_name,
+        stage="原始响应重算",
+        quote=raw_value,
+    )
+    return {
+        "capture_id": capture.id,
+        "raw_payload_hash": capture.raw_payload_hash,
+        "trade_date": capture.trade_date,
+        "code": capture.target_code,
+        "price": snapshot.price,
+        "vwap": snapshot.vwap,
+        "pattern": snapshot.pattern,
+        "data_quality": snapshot.data_quality,
+        "recomputed_at": datetime.now().isoformat(),
+    }
 
 DEFAULT_TIME_STOP_RULE_ROWS = [
     ("default", "默认剧本", "10:00", 5, 5, 15, 0.985),
@@ -235,6 +284,95 @@ def list_holdings(db: Session = Depends(get_db)) -> list[HoldingOut]:
         for item in holdings
     ]
 
+
+@router.get("/holdings/summary", response_model=HoldingAccountSummaryOut)
+def holding_account_summary(db: Session = Depends(get_db)) -> HoldingAccountSummaryOut:
+    holdings = db.query(Holding).order_by(Holding.updated_at.desc()).all()
+    account_total_asset = _account_total_asset(db)
+    outputs = [_holding_out(item, account_total_asset=account_total_asset) for item in holdings]
+    return HoldingAccountSummaryOut(
+        **_holding_account_summary(outputs, account_total_asset, db),
+        calculated_at=datetime.now(),
+    )
+
+
+@router.get("/holdings/portfolio-exposure", response_model=PortfolioExposureOut)
+def holding_portfolio_exposure(db: Session = Depends(get_db)) -> PortfolioExposureOut:
+    holdings = db.query(Holding).order_by(Holding.updated_at.desc()).all()
+    total = sum(float(item.current_price or 0) * int(item.quantity or 0) for item in holdings)
+
+    def aggregate(kind: str) -> list[PortfolioExposureItemOut]:
+        buckets: dict[str, dict[str, object]] = {}
+        for holding in holdings:
+            profile = _holding_theme_profile(holding)
+            if kind == "industry":
+                names = [str(profile.get("industry") or profile.get("primary") or "行业待确认")]
+            elif kind == "theme":
+                names = [str(value) for value in (profile.get("concepts") or profile.get("tags") or [])[:3]] or ["题材待确认"]
+            elif kind == "style":
+                names = [holding.position_type or "风格待确认"]
+            else:
+                names = [_sector_family(str(profile.get("primary") or "")) or "其他风险因子"]
+            value = float(holding.current_price or 0) * int(holding.quantity or 0)
+            for name in dict.fromkeys(names):
+                bucket = buckets.setdefault(name, {"value": 0.0, "codes": []})
+                bucket["value"] = float(bucket["value"]) + value
+                cast_codes = bucket["codes"]
+                if isinstance(cast_codes, list):
+                    cast_codes.append(holding.code)
+        return sorted([
+            PortfolioExposureItemOut(
+                name=name, market_value=round(float(bucket["value"]), 2),
+                ratio=round(float(bucket["value"]) / total, 4) if total else 0,
+                holding_count=len(set(bucket["codes"] if isinstance(bucket["codes"], list) else [])),
+                codes=list(dict.fromkeys(bucket["codes"] if isinstance(bucket["codes"], list) else [])),
+            ) for name, bucket in buckets.items()
+        ], key=lambda item: item.ratio, reverse=True)
+
+    industries, themes, styles, factors = aggregate("industry"), aggregate("theme"), aggregate("style"), aggregate("risk")
+    warnings = []
+    for label, rows in (("行业", industries), ("题材", themes), ("单一风险因子", factors)):
+        if rows and rows[0].ratio >= 0.5:
+            warnings.append(f"{label}“{rows[0].name}”暴露 {rows[0].ratio:.1%}，超过50%集中度警戒线。")
+    return PortfolioExposureOut(
+        generated_at=datetime.now(), total_market_value=round(total, 2), industries=industries,
+        themes=themes, styles=styles, risk_factors=factors, warnings=warnings,
+    )
+
+
+def _csv_download(filename: str, headers: list[str], rows: list[list[object]]) -> StreamingResponse:
+    buffer = io.StringIO()
+    writer = csv.writer(buffer)
+    writer.writerow(headers)
+    writer.writerows(rows)
+    content = "\ufeff" + buffer.getvalue()
+    return StreamingResponse(iter([content]), media_type="text/csv; charset=utf-8", headers={
+        "Content-Disposition": f'attachment; filename="{filename}"',
+        "Cache-Control": "no-store",
+    })
+
+
+@router.get("/exports/holdings.csv")
+def export_holdings(db: Session = Depends(get_db)) -> StreamingResponse:
+    holdings = db.query(Holding).order_by(Holding.code.asc()).all()
+    total_asset = _account_total_asset(db)
+    outputs = [_holding_out(item, account_total_asset=total_asset) for item in holdings]
+    return _csv_download(
+        f"holdings-{datetime.now().date().isoformat()}.csv",
+        ["代码", "名称", "数量", "成本价", "现价", "市值", "浮动盈亏", "仓位类型", "执行纪律", "更新时间"],
+        [[item.code, item.name, item.quantity, item.cost_price, item.current_price, item.market_value, item.profit_amount, item.position_type, item.next_discipline, item.updated_at.isoformat()] for item in outputs],
+    )
+
+
+@router.get("/exports/trades.csv")
+def export_trades(db: Session = Depends(get_db)) -> StreamingResponse:
+    trades = db.query(TradeLog).order_by(TradeLog.traded_at.asc(), TradeLog.id.asc()).all()
+    return _csv_download(
+        f"trades-{datetime.now().date().isoformat()}.csv",
+        ["时间", "代码", "名称", "方向", "价格", "数量", "金额", "成本价", "原因", "模式", "是否合规"],
+        [[item.traded_at.isoformat(), item.code, item.name, item.side, item.price, item.quantity, item.amount, item.cost_price, item.reason, item.mode, "是" if item.compliant else "否"] for item in trades],
+    )
+
 @router.post("/holdings/refresh", response_model=HoldingRefreshOut)
 def refresh_holdings(db: Session = Depends(get_db)) -> HoldingRefreshOut:
     holdings = db.query(Holding).order_by(Holding.updated_at.desc()).all()
@@ -265,7 +403,7 @@ def refresh_holdings(db: Session = Depends(get_db)) -> HoldingRefreshOut:
         success_count=success_count,
         fallback_count=fallback_count,
         notes=notes,
-        **_holding_account_summary(outputs, account_total_asset),
+        **_holding_account_summary(outputs, account_total_asset, db),
     )
 
 @router.get("/holdings/execution-states", response_model=list[PositionExecutionStateOut])
@@ -409,6 +547,9 @@ def get_intraday_collector_status() -> IntradayCollectorStatusOut:
         enabled=bool(status["enabled"]),
         interval_seconds=int(status["interval_seconds"]),
         running=bool(status["running"]),
+        queue_depth=int(status.get("queue_depth") or 0),
+        open_circuits=list(status.get("open_circuits") or []),
+        failure_counts=dict(status.get("failure_counts") or {}),
         last_run=_collection_run_out(status["last_run"]),
     )
 
@@ -513,15 +654,53 @@ def create_recommendation_feedback(
     recommendation = db.get(ActionRecommendation, recommendation_id)
     if recommendation is None:
         raise HTTPException(status_code=404, detail="recommendation not found")
+    allowed_statuses = {"已执行", "部分执行", "不同意", "未成交", "没看到", "纪律违背"}
+    if payload.status not in allowed_statuses:
+        raise HTTPException(status_code=422, detail="unsupported feedback status")
+    matched_trade = None
+    if payload.status in {"已执行", "部分执行", "未成交"}:
+        matched_trade = (
+            db.query(TradeLog)
+            .filter(TradeLog.code == recommendation.code, TradeLog.traded_at >= recommendation.created_at)
+            .order_by(TradeLog.traded_at.desc(), TradeLog.id.desc())
+            .first()
+        )
     feedback = RecommendationFeedback(
         recommendation_id=recommendation_id,
         status=payload.status,
         reason=payload.reason,
+        trade_id=matched_trade.id if matched_trade else None,
+        result="已匹配成交" if matched_trade else ("明确未成交" if payload.status == "未成交" else "待匹配成交"),
     )
     db.add(feedback)
     db.commit()
     db.refresh(feedback)
     return feedback
+
+
+@router.get("/recommendations/{recommendation_id}/history")
+def recommendation_history(recommendation_id: int, db: Session = Depends(get_db)) -> list[dict]:
+    recommendation = db.get(ActionRecommendation, recommendation_id)
+    if recommendation is None:
+        raise HTTPException(status_code=404, detail="recommendation not found")
+    rows = (
+        db.query(ActionRecommendationRevision)
+        .filter(ActionRecommendationRevision.recommendation_id == recommendation_id)
+        .order_by(ActionRecommendationRevision.version.asc(), ActionRecommendationRevision.id.asc())
+        .all()
+    )
+    return [{
+        "version": row.version,
+        "level": row.level,
+        "state": row.state,
+        "action": row.action,
+        "recommended_ratio": row.recommended_ratio,
+        "evidence": json.loads(row.evidence_json or "[]"),
+        "counter_evidence": json.loads(row.counter_evidence_json or "[]"),
+        "invalid_conditions": json.loads(row.invalid_conditions_json or "[]"),
+        "recovery_conditions": json.loads(row.recovery_conditions_json or "[]"),
+        "created_at": row.created_at.isoformat(),
+    } for row in rows]
 
 @router.get("/holdings/{holding_id}/t-eligibility", response_model=TEligibilityOut)
 def get_holding_t_eligibility(
@@ -589,7 +768,7 @@ def sync_holdings_from_trades(db: Session = Depends(get_db)) -> HoldingSyncOut:
         synced_at=datetime.now(),
         trade_count=len(trades),
         notes=notes,
-        **_holding_account_summary(outputs, account_total_asset),
+        **_holding_account_summary(outputs, account_total_asset, db),
     )
 
 @router.put("/holdings/{holding_id}", response_model=HoldingOut)

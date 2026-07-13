@@ -6,8 +6,12 @@ services:
       DATABASE_URL: sqlite:///./data/trading_discipline.db
       TZ: Asia/Shanghai
       AUTH_USERNAME: ${AUTH_USERNAME:-admin}
-      AUTH_PASSWORD: ${AUTH_PASSWORD:?Set AUTH_PASSWORD to at least 12 characters}
-      AUTH_SECRET: ${AUTH_SECRET:?Set AUTH_SECRET to at least 32 random characters}
+      AUTH_PASSWORD: ${AUTH_PASSWORD:-}
+      AUTH_PASSWORD_FILE: ${AUTH_PASSWORD_FILE:-}
+      AUTH_SECRET: ${AUTH_SECRET:-}
+      AUTH_SECRET_FILE: ${AUTH_SECRET_FILE:-}
+      AUTH_TOTP_SECRET: ${AUTH_TOTP_SECRET:-}
+      AUTH_TOTP_SECRET_FILE: ${AUTH_TOTP_SECRET_FILE:-}
       DEMO_USERNAME: ${DEMO_USERNAME:-demo}
       DEMO_PASSWORD: ${DEMO_PASSWORD:-}
       DEMO_DATABASE_URL: sqlite:///./data/demo_discipline.db
@@ -15,12 +19,15 @@ services:
       CORS_ORIGINS: ${CORS_ORIGINS:-["http://localhost:5173","http://127.0.0.1:5173"]}
       AUDIT_ENABLED: ${AUDIT_ENABLED:-true}
       AI_API_KEY: ${AI_API_KEY:-}
+      AI_API_KEY_FILE: ${AI_API_KEY_FILE:-}
       AI_MODEL: ${AI_MODEL:-deepseek-reasoner}
       AI_BASE_URL: ${AI_BASE_URL:-https://api.deepseek.com}
       AI_PROVIDER: ${AI_PROVIDER:-deepseek}
       DINGTALK_ENABLED: ${DINGTALK_ENABLED:-false}
       DINGTALK_WEBHOOK: ${DINGTALK_WEBHOOK:-}
+      DINGTALK_WEBHOOK_FILE: ${DINGTALK_WEBHOOK_FILE:-}
       DINGTALK_SECRET: ${DINGTALK_SECRET:-}
+      DINGTALK_SECRET_FILE: ${DINGTALK_SECRET_FILE:-}
       HTTP_PROXY: ${OUTBOUND_HTTP_PROXY:-}
       HTTPS_PROXY: ${OUTBOUND_HTTP_PROXY:-}
       NO_PROXY: localhost,127.0.0.1,backend,frontend
@@ -31,6 +38,11 @@ services:
     expose:
       - "8000"
     restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=3)"]
       interval: 30s
@@ -47,6 +59,11 @@ services:
     ports:
       - "${FRONTEND_BIND_ADDRESS:-127.0.0.1}:5173:80"
     restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
 
 volumes:
   backend-data:

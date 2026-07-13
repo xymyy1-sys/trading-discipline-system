@@ -1,8 +1,16 @@
-from collections import Counter
+from collections import Counter, defaultdict
 from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
 from sqlalchemy.orm import Session
 from app.core.database import get_db
-from app.models.trading import TradeLog, TradeReview
+from app.models.trading import (
+    ActionRecommendation,
+    ExpectationSnapshot,
+    MarketSnapshot,
+    RecommendationFeedback,
+    TradeLog,
+    TradeReview,
+    VolumePriceSnapshot,
+)
 from app.schemas.trading import (
     TradeLogCreate,
     TradeLogUpdate,
@@ -197,6 +205,53 @@ def volume_price_effectiveness(db: Session = Depends(get_db)) -> EffectivenessRe
 @router.get("/reviews/execution-effectiveness", response_model=EffectivenessReportOut)
 def execution_effectiveness(db: Session = Depends(get_db)) -> EffectivenessReportOut:
     return _effectiveness_report(db, "execution_adoption", 20)
+
+
+@router.get("/reviews/environment-effectiveness")
+def environment_effectiveness(db: Session = Depends(get_db)) -> list[dict]:
+    """按真实市场快照分层统计预期、建议采纳与不利波动。"""
+    latest_grade_by_date: dict[str, tuple[object, str]] = {}
+    for row in db.query(MarketSnapshot).order_by(MarketSnapshot.captured_at.asc()).all():
+        key = row.captured_at.date().isoformat()
+        latest_grade_by_date[key] = (row.captured_at, row.grade or "未评级")
+
+    buckets: dict[str, dict] = defaultdict(lambda: {
+        "expectation_samples": 0, "expectation_hits": 0,
+        "recommendation_samples": 0, "executed_feedback": 0,
+        "feedback_samples": 0, "adverse_samples": [],
+    })
+    for row in db.query(ExpectationSnapshot).all():
+        grade = latest_grade_by_date.get(row.trade_date, (None, "未评级"))[1]
+        buckets[grade]["expectation_samples"] += 1
+        if row.expectation_result in {"MATCHED", "STRONGER"}:
+            buckets[grade]["expectation_hits"] += 1
+    recommendations = db.query(ActionRecommendation).all()
+    recommendation_by_id = {row.id: row for row in recommendations}
+    for row in recommendations:
+        grade = latest_grade_by_date.get(row.trade_date, (None, "未评级"))[1]
+        buckets[grade]["recommendation_samples"] += 1
+    for row in db.query(RecommendationFeedback).all():
+        recommendation = recommendation_by_id.get(row.recommendation_id)
+        if not recommendation:
+            continue
+        grade = latest_grade_by_date.get(recommendation.trade_date, (None, "未评级"))[1]
+        buckets[grade]["feedback_samples"] += 1
+        if row.status in {"已执行", "部分执行"}:
+            buckets[grade]["executed_feedback"] += 1
+    for row in db.query(VolumePriceSnapshot).all():
+        grade = latest_grade_by_date.get(row.trade_date, (None, "未评级"))[1]
+        if row.data_quality != "missing":
+            buckets[grade]["adverse_samples"].append(max(0.0, float(row.high_drawdown or 0)))
+
+    return [{
+        "market_grade": grade,
+        "expectation_samples": values["expectation_samples"],
+        "expectation_hit_rate": round(values["expectation_hits"] / values["expectation_samples"] * 100, 2) if values["expectation_samples"] else 0,
+        "recommendation_samples": values["recommendation_samples"],
+        "execution_adoption_rate": round(values["executed_feedback"] / values["feedback_samples"] * 100, 2) if values["feedback_samples"] else 0,
+        "average_adverse_move": round(sum(values["adverse_samples"]) / len(values["adverse_samples"]), 2) if values["adverse_samples"] else 0,
+        "data_quality": "可统计" if grade != "未评级" else "缺少同日市场环境快照",
+    } for grade, values in sorted(buckets.items())]
 
 
 @router.get("/reviews/calibration-proposal", response_model=CalibrationProposalOut)

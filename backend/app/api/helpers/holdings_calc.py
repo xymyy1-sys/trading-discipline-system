@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+from datetime import datetime, time, timezone
 from typing import Any
 from sqlalchemy.orm import Session
 from app.models.trading import AccountState, Holding, HoldingSyncBaseline, TradeLog
@@ -267,9 +267,28 @@ def _holding_out(holding: Holding, account_total_asset: float | None = None, pri
         low_price=round(_safe_float((quote_meta or {}).get("low")), 2),
     )
 
-def _holding_account_summary(holdings: list[HoldingOut], total_asset: float) -> dict[str, float]:
+def _today_realized_profit(db: Session, now: datetime | None = None) -> float:
+    """Include sell/reduce P/L even after a position has been fully closed."""
+    now = now or datetime.now()
+    day_start = datetime.combine(now.date(), time.min)
+    day_end = datetime.combine(now.date(), time.max)
+    rows = (
+        db.query(TradeLog)
+        .filter(TradeLog.traded_at >= day_start, TradeLog.traded_at <= day_end)
+        .all()
+    )
+    return round(sum(
+        (float(row.price or 0) - float(row.cost_price or 0)) * int(row.quantity or 0)
+        for row in rows
+        if _trade_position_direction(row.side) < 0
+    ), 2)
+
+
+def _holding_account_summary(holdings: list[HoldingOut], total_asset: float, db: Session | None = None) -> dict[str, float]:
     total_market_value = round(sum(item.market_value for item in holdings), 2)
-    today_profit_amount = round(sum(item.today_profit_amount for item in holdings), 2)
+    today_open_profit_amount = round(sum(item.today_profit_amount for item in holdings), 2)
+    today_realized_profit_amount = _today_realized_profit(db) if db is not None else 0.0
+    today_profit_amount = round(today_open_profit_amount + today_realized_profit_amount, 2)
     total_profit_amount = round(sum(item.profit_amount for item in holdings), 2)
     total_position_ratio = total_market_value / total_asset if total_asset else 0.0
     today_profit_ratio = today_profit_amount / total_asset if total_asset else 0.0
@@ -281,6 +300,8 @@ def _holding_account_summary(holdings: list[HoldingOut], total_asset: float) -> 
         "total_position_ratio": round(total_position_ratio, 4),
         "today_profit_amount": today_profit_amount,
         "today_profit_ratio": round(today_profit_ratio, 4),
+        "today_open_profit_amount": today_open_profit_amount,
+        "today_realized_profit_amount": today_realized_profit_amount,
         "total_profit_amount": total_profit_amount,
         "total_profit_ratio": round(total_profit_ratio, 4),
     }

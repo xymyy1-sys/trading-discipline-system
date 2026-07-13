@@ -25,6 +25,8 @@ export default function Positions({ mode = 'overview' }: { mode?: 'overview' | '
   const [accountAsset, setAccountAsset] = useState('')
   const [openingAsset, setOpeningAsset] = useState('')
   const [accountRisk, setAccountRisk] = useState<AccountRisk | null>(null)
+  const [accountSummary, setAccountSummary] = useState<{ today_profit_amount: number; today_open_profit_amount: number; today_realized_profit_amount: number } | null>(null)
+  const [portfolioExposure, setPortfolioExposure] = useState<{ industries: Array<{ name: string; ratio: number; holding_count: number }>; themes: Array<{ name: string; ratio: number; holding_count: number }>; risk_factors: Array<{ name: string; ratio: number; holding_count: number }>; warnings: string[] } | null>(null)
   const [assetSaving, setAssetSaving] = useState(false)
   const [assetMessage, setAssetMessage] = useState('')
   const [refreshing, setRefreshing] = useState(false)
@@ -71,6 +73,17 @@ export default function Positions({ mode = 'overview' }: { mode?: 'overview' | '
       .catch(() => setTPlans({}))
   }
 
+  const fetchAccountSummary = () => {
+    fetch(`${API_BASE}/api/holdings/summary`)
+      .then(r => r.ok ? r.json() : Promise.reject())
+      .then(setAccountSummary)
+      .catch(() => setAccountSummary(null))
+    fetch(`${API_BASE}/api/holdings/portfolio-exposure`)
+      .then(r => r.ok ? r.json() : Promise.reject())
+      .then(setPortfolioExposure)
+      .catch(() => setPortfolioExposure(null))
+  }
+
   const fetchHoldings = () => {
     if (refreshingRef.current) return
     refreshingRef.current = true
@@ -84,6 +97,7 @@ export default function Positions({ mode = 'overview' }: { mode?: 'overview' | '
       })
       .then((data: Holding[]) => applyHoldings(data))
       .then(() => {
+        fetchAccountSummary()
         fetchSeesaw()
         fetchExecutionStates()
       })
@@ -160,7 +174,7 @@ export default function Positions({ mode = 'overview' }: { mode?: 'overview' | '
 
   const totalMarketValue = holdings.reduce((s, h) => s + h.market_value, 0)
   const totalPnL = holdings.reduce((s, h) => s + h.profit_amount, 0)
-  const totalTodayPnL = holdings.reduce((s, h) => s + h.today_profit_amount, 0)
+  const totalTodayPnL = accountSummary?.today_profit_amount ?? holdings.reduce((s, h) => s + h.today_profit_amount, 0)
   const savedTotalAsset = Number(accountAsset) || holdings.find(h => h.total_asset > 0)?.total_asset || 0
   const cashAvailable = savedTotalAsset ? savedTotalAsset - totalMarketValue : 0
   const totalPositionRatio = savedTotalAsset ? totalMarketValue / savedTotalAsset : 0
@@ -271,7 +285,14 @@ export default function Positions({ mode = 'overview' }: { mode?: 'overview' | '
     fetch(`${API_BASE}/api/recommendations/${recommendationId}/execution-feedback`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ status, reason: status === '暂不执行' ? '盘中继续观察，等待反抽确认。' : '' }),
+      body: JSON.stringify({
+        status,
+        reason: status === '不同意' ? '人工判断与系统建议不一致，留待复盘。'
+          : status === '未成交' ? '已尝试执行但订单未成交。'
+          : status === '没看到' ? '建议出现时未及时看到。'
+          : status === '纪律违背' ? '看到建议但未按纪律执行。'
+          : '',
+      }),
     })
       .then(async r => {
         if (!r.ok) throw new Error(await r.text())
@@ -414,6 +435,8 @@ export default function Positions({ mode = 'overview' }: { mode?: 'overview' | '
             {showForm ? <X size={16} /> : <Plus size={16} />}
             {showForm ? '取消' : '添加持仓'}
           </button>
+          {mode === 'overview' && <button className="refresh-btn inline" type="button" onClick={() => { window.location.href = `${API_BASE}/api/exports/holdings.csv` }}>导出持仓</button>}
+          {mode === 'overview' && <button className="refresh-btn inline" type="button" onClick={() => { window.location.href = `${API_BASE}/api/exports/trades.csv` }}>导出交易</button>}
         </div>
       </header>
       {refreshMessage && <p className="refresh-note">{refreshMessage}</p>}
@@ -579,6 +602,7 @@ export default function Positions({ mode = 'overview' }: { mode?: 'overview' | '
           <strong style={{ color: totalTodayPnL >= 0 ? 'var(--up)' : 'var(--down)' }}>
             {money(totalTodayPnL)}
           </strong>
+          {accountSummary && <small title="今日盈亏 = 当前持仓今日浮动盈亏 + 今日卖出/清仓已实现盈亏">持仓 {money(accountSummary.today_open_profit_amount)} · 已实现 {money(accountSummary.today_realized_profit_amount)}</small>}
         </div>
         <div className="summary-card">
           <span>累计浮盈</span>
@@ -587,6 +611,16 @@ export default function Positions({ mode = 'overview' }: { mode?: 'overview' | '
           </strong>
         </div>
       </div>
+
+      {mode === 'overview' && portfolioExposure && (
+        <section className="panel portfolio-exposure-panel">
+          <div className="selected-theme-head"><div><strong>组合暴露</strong><span>按真实持仓市值统计行业、题材和单一风险因子集中度。</span></div></div>
+          {!!portfolioExposure.warnings.length && <div className="portfolio-warning-list">{portfolioExposure.warnings.map(item => <p key={item}>{item}</p>)}</div>}
+          <div className="portfolio-exposure-grid">
+            {([['行业', portfolioExposure.industries], ['题材', portfolioExposure.themes], ['风险因子', portfolioExposure.risk_factors]] as const).map(([label, rows]) => <article key={label}><b>{label}</b>{rows.slice(0, 6).map(item => <div key={item.name}><span>{item.name} · {item.holding_count}只</span><strong>{(item.ratio * 100).toFixed(1)}%</strong><i style={{ width: `${Math.min(100, item.ratio * 100)}%` }} /></div>)}</article>)}
+          </div>
+        </section>
+      )}
 
       {seesaw && (
         <section className="panel seesaw-panel">
@@ -761,7 +795,7 @@ export default function Positions({ mode = 'overview' }: { mode?: 'overview' | '
                     <RefreshCcw size={14} />
                     生成做T计划
                   </button>
-                  {['已执行', '部分执行', '暂不执行', '忽略'].map(status => (
+                  {['已执行', '部分执行', '不同意', '未成交', '没看到', '纪律违背'].map(status => (
                     <button key={status} type="button" onClick={() => sendFeedback(item, status)}>
                       {status === '已执行' ? <CheckCircle2 size={14} /> : <ShieldAlert size={14} />}
                       {status}

@@ -7,6 +7,7 @@ export default function AuthGate({ children }: { children: ReactNode }) {
   const [state, setState] = useState<'checking' | 'anonymous' | 'authenticated'>('checking')
   const [username, setUsername] = useState('admin')
   const [password, setPassword] = useState('')
+  const [otp, setOtp] = useState('')
   const [message, setMessage] = useState('')
   const [submitting, setSubmitting] = useState(false)
 
@@ -21,9 +22,10 @@ export default function AuthGate({ children }: { children: ReactNode }) {
     event.preventDefault()
     setSubmitting(true)
     setMessage('')
-    login(username, password)
+    login(username, password, otp)
       .then(() => {
         setPassword('')
+        setOtp('')
         setState('authenticated')
       })
       .catch(error => setMessage(error instanceof Error ? error.message : '登录失败'))
@@ -44,6 +46,7 @@ export default function AuthGate({ children }: { children: ReactNode }) {
         </div>
         <label>用户名<input autoComplete="username" value={username} onChange={event => setUsername(event.target.value)} /></label>
         <label>密码<input autoComplete="current-password" type="password" value={password} onChange={event => setPassword(event.target.value)} /></label>
+        <label>动态验证码（未启用可留空）<input inputMode="numeric" autoComplete="one-time-code" value={otp} onChange={event => setOtp(event.target.value.replace(/\D/g, '').slice(0, 6))} /></label>
         {message && <p className="auth-error">{message}</p>}
         <button type="submit" disabled={submitting}>{submitting ? '登录中…' : '登录'}</button>
       </form>

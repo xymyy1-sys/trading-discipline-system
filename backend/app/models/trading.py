@@ -320,6 +320,23 @@ class ActionRecommendation(Base):
     acknowledged_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
 
+class ActionRecommendationRevision(Base):
+    __tablename__ = "action_recommendation_revisions"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    recommendation_id: Mapped[int] = mapped_column(Integer, index=True)
+    version: Mapped[int] = mapped_column(Integer, default=1)
+    level: Mapped[str] = mapped_column(String(24), default="INFO")
+    state: Mapped[str] = mapped_column(String(48), default="")
+    action: Mapped[str] = mapped_column(String(64), default="")
+    recommended_ratio: Mapped[float] = mapped_column(Float, default=0)
+    evidence_json: Mapped[str] = mapped_column(Text, default="[]")
+    counter_evidence_json: Mapped[str] = mapped_column(Text, default="[]")
+    invalid_conditions_json: Mapped[str] = mapped_column(Text, default="[]")
+    recovery_conditions_json: Mapped[str] = mapped_column(Text, default="[]")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc), index=True)
+
+
 class RecommendationFeedback(Base):
     __tablename__ = "recommendation_feedback"
 
@@ -327,6 +344,8 @@ class RecommendationFeedback(Base):
     recommendation_id: Mapped[int] = mapped_column(Integer, index=True)
     status: Mapped[str] = mapped_column(String(24), default="暂不执行")
     reason: Mapped[str] = mapped_column(Text, default="")
+    trade_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
+    result: Mapped[str] = mapped_column(String(32), default="待匹配成交")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc))
 
 
@@ -447,6 +466,53 @@ class CalibrationRun(Base):
     rolled_back_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
 
+class ExpectationRevision(Base):
+    __tablename__ = "expectation_revisions"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    expectation_snapshot_id: Mapped[int] = mapped_column(Integer, index=True)
+    previous_revision_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
+    version: Mapped[int] = mapped_column(Integer, default=1)
+    trade_date: Mapped[str] = mapped_column(String(16), index=True)
+    code: Mapped[str] = mapped_column(String(16), index=True)
+    name: Mapped[str] = mapped_column(String(64), default="")
+    stage: Mapped[str] = mapped_column(String(32), index=True)
+    trigger: Mapped[str] = mapped_column(String(48), default="collector")
+    base_expectation: Mapped[str] = mapped_column(String(32), default="UNKNOWN")
+    expected_open_low: Mapped[float] = mapped_column(Float, default=0)
+    expected_open_high: Mapped[float] = mapped_column(Float, default=0)
+    actual_open_pct: Mapped[float] = mapped_column(Float, default=0)
+    actual_change_pct: Mapped[float] = mapped_column(Float, default=0)
+    expectation_gap_score: Mapped[int] = mapped_column(Integer, default=0)
+    expectation_result: Mapped[str] = mapped_column(String(32), default="MATCHED")
+    state_transition: Mapped[str] = mapped_column(String(48), default="MATCHED")
+    confidence: Mapped[float] = mapped_column(Float, default=0)
+    volume_price_state: Mapped[str] = mapped_column(String(64), default="")
+    vwap: Mapped[float] = mapped_column(Float, default=0)
+    price_vs_vwap: Mapped[float] = mapped_column(Float, default=0)
+    data_quality: Mapped[str] = mapped_column(String(32), default="manual")
+    evidence_json: Mapped[str] = mapped_column(Text, default="[]")
+    counter_evidence_json: Mapped[str] = mapped_column(Text, default="[]")
+    invalid_conditions_json: Mapped[str] = mapped_column(Text, default="[]")
+    suggestion: Mapped[str] = mapped_column(Text, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc), index=True)
+
+
+class ExpectationScenario(Base):
+    __tablename__ = "expectation_scenarios"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    revision_id: Mapped[int] = mapped_column(Integer, index=True)
+    scenario_type: Mapped[str] = mapped_column(String(32), index=True)
+    probability: Mapped[float] = mapped_column(Float, default=0)
+    expected_low: Mapped[float] = mapped_column(Float, default=0)
+    expected_high: Mapped[float] = mapped_column(Float, default=0)
+    validation_conditions_json: Mapped[str] = mapped_column(Text, default="[]")
+    invalid_conditions_json: Mapped[str] = mapped_column(Text, default="[]")
+    action_discipline: Mapped[str] = mapped_column(Text, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc), index=True)
+
+
 class WatchlistEntry(Base):
     __tablename__ = "watchlist_entries"
 
@@ -458,6 +524,10 @@ class WatchlistEntry(Base):
     snapshot_date: Mapped[str] = mapped_column(String(16), default="", index=True)
     category: Mapped[str] = mapped_column(String(32), default="")
     snapshot_rank: Mapped[int] = mapped_column(Integer, default=0)
+    entry_reason: Mapped[str] = mapped_column(Text, default="")
+    exit_reason: Mapped[str] = mapped_column(Text, default="")
+    exited_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    converted_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc))
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
 

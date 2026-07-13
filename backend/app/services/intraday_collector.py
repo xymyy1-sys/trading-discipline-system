@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import sys
+import time as clock
 from datetime import datetime, time
 
 from app.api.helpers.decision import current_expectation_stage
@@ -16,6 +17,37 @@ _collector_task: asyncio.Task | None = None
 _collector_running = False
 _close_expectation_date: str | None = None
 _notified_recommendations: set[int] = set()
+_failure_counts: dict[str, int] = {}
+_circuit_until: dict[str, float] = {}
+_queue_depth = 0
+
+
+def _run_with_resilience(key: str, callback, notes: list[str]):
+    """Run one collection job with bounded exponential backoff and a circuit breaker."""
+    now = clock.time()
+    if _circuit_until.get(key, 0) > now:
+        remaining = int(_circuit_until[key] - now)
+        notes.append(f"{key} 熔断中，{remaining}秒后重试；不将单一数据源故障误报为全系统故障。")
+        return None
+    last_error: Exception | None = None
+    for attempt in range(3):
+        try:
+            result = callback()
+            _failure_counts.pop(key, None)
+            _circuit_until.pop(key, None)
+            return result
+        except Exception as exc:
+            last_error = exc
+            if attempt < 2:
+                clock.sleep(0.25 * (2 ** attempt))
+    failures = _failure_counts.get(key, 0) + 1
+    _failure_counts[key] = failures
+    if failures >= 3:
+        _circuit_until[key] = clock.time() + 300
+        notes.append(f"{key} 连续失败{failures}轮，已熔断5分钟。")
+    if last_error:
+        notes.append(f"{key} 采集失败：{last_error.__class__.__name__}。")
+    return None
 
 
 def _json_dumps(value: list[str]) -> str:
@@ -37,6 +69,7 @@ def _is_market_watch_time(now: datetime | None = None) -> bool:
 
 
 def run_intraday_collection_once(trigger: str = "manual") -> IntradayCollectionRun:
+    global _queue_depth
     db = SessionLocal()
     started = datetime.now()
     run = IntradayCollectionRun(started_at=started, trigger=trigger, status="running")
@@ -63,6 +96,7 @@ def run_intraday_collection_once(trigger: str = "manual") -> IntradayCollectionR
             if row.code not in holding_codes:
                 tracked[row.code] = (row.name, "打板预案")
         stage = current_expectation_stage(started)
+        _queue_depth = len(holdings) + len(tracked)
         run.holding_count = len(holdings)
         if not _is_market_watch_time(started):
             notes.append("当前不在交易采样时段（交易日09:15-15:00），不生成盘后证据和操作建议。")
@@ -71,7 +105,16 @@ def run_intraday_collection_once(trigger: str = "manual") -> IntradayCollectionR
         elif not holdings:
             notes.append("暂无持仓，后台采集跳过。")
         for holding in holdings:
-            _volume, state, _sample = collect_holding_evidence(db, holding, stage=stage, now=started)
+            result = _run_with_resilience(
+                f"持仓:{holding.code}",
+                lambda holding=holding: collect_holding_evidence(db, holding, stage=stage, now=started),
+                notes,
+            )
+            _queue_depth = max(0, _queue_depth - 1)
+            if result is None:
+                db.rollback()
+                continue
+            _volume, state, _sample = result
             snapshot_count += 1
             notes.append(f"{holding.code} {holding.name} 已采集 {stage}。")
             recommendation = state.recommendation
@@ -88,7 +131,15 @@ def run_intraday_collection_once(trigger: str = "manual") -> IntradayCollectionR
                 except Exception as notify_exc:
                     notes.append(f"钉钉通知失败：{notify_exc.__class__.__name__}")
         for code, (name, base_hint) in tracked.items():
-            collect_tracked_stock_evidence(db, code, name, base_hint, stage=stage, now=started)
+            result = _run_with_resilience(
+                f"跟踪:{code}",
+                lambda code=code, name=name, base_hint=base_hint: collect_tracked_stock_evidence(db, code, name, base_hint, stage=stage, now=started),
+                notes,
+            )
+            _queue_depth = max(0, _queue_depth - 1)
+            if result is None:
+                db.rollback()
+                continue
             snapshot_count += 1
             notes.append(f"{code} {name}（{base_hint}）已采集 {stage}。")
         run.status = "success"
@@ -99,6 +150,7 @@ def run_intraday_collection_once(trigger: str = "manual") -> IntradayCollectionR
         run.error_message = str(exc)
         notes.append(f"采集失败：{exc}")
     finally:
+        _queue_depth = 0
         event_after = db.query(IntradayEvidenceEvent).count()
         run.snapshot_count = snapshot_count
         run.event_count = max(0, event_after - event_before)
@@ -164,6 +216,9 @@ def collector_status() -> dict[str, object]:
         "enabled": COLLECTOR_ENABLED,
         "interval_seconds": COLLECTOR_INTERVAL_SECONDS,
         "running": _collector_running,
+        "queue_depth": _queue_depth,
+        "open_circuits": [key for key, until in _circuit_until.items() if until > clock.time()],
+        "failure_counts": dict(_failure_counts),
         "last_run": latest_collection_run(),
     }
 

@@ -11,7 +11,16 @@ from app.api.helpers.holdings_calc import _find_holding_by_code
 from app.api.helpers.quotes import _latest_a_share_quotes, _quote_lookup_code, _safe_float
 from app.api.helpers.seesaw import _holding_theme_profile
 from app.api.helpers.volume_price import build_volume_price_snapshot
-from app.models.trading import ExpectationRule, ExpectationSnapshot, Holding, IntradayEvidenceEvent, TTradePlan
+from app.models.trading import (
+    ExpectationRevision,
+    ExpectationRule,
+    ExpectationScenario,
+    ExpectationSnapshot,
+    Holding,
+    IntradayEvidenceEvent,
+    TTradePlan,
+    VolumePriceSnapshot,
+)
 from app.schemas.trading import (
     ExpectationSnapshotIn,
     ExpectationSnapshotOut,
@@ -228,6 +237,96 @@ EXPECTATION_DEFAULTS = {
     "EBB": (-6.0, -1.0),
 }
 
+SCENARIO_LABELS = ("强修复", "弱修复", "延续", "分歧", "退潮")
+
+
+def _scenario_probabilities(base: str) -> dict[str, float]:
+    if base in {"EXTREME_STRONG", "STRONG"}:
+        return {"强修复": 0.15, "弱修复": 0.10, "延续": 0.35, "分歧": 0.25, "退潮": 0.15}
+    if base in {"WEAK", "EBB"}:
+        return {"强修复": 0.10, "弱修复": 0.25, "延续": 0.10, "分歧": 0.20, "退潮": 0.35}
+    if base == "REPAIR":
+        return {"强修复": 0.25, "弱修复": 0.30, "延续": 0.15, "分歧": 0.20, "退潮": 0.10}
+    return {"强修复": 0.15, "弱修复": 0.20, "延续": 0.20, "分歧": 0.30, "退潮": 0.15}
+
+
+def _scenario_rows(revision: ExpectationRevision) -> list[ExpectationScenario]:
+    probability = _scenario_probabilities(revision.base_expectation)
+    ranges = {
+        "强修复": (max(revision.expected_open_low, 1.0), max(revision.expected_open_high, 3.0)),
+        "弱修复": (min(revision.expected_open_low, -1.5), max(revision.expected_open_low, 1.0)),
+        "延续": (revision.expected_open_low, revision.expected_open_high),
+        "分歧": (min(revision.expected_open_low, -2.0), min(revision.expected_open_high, 1.0)),
+        "退潮": (min(revision.expected_open_low, -5.0), min(revision.expected_open_high, -1.0)),
+    }
+    validation = {
+        "强修复": ["竞价高于合理区间中枢", "开盘5分钟站稳真实VWAP", "量能不低于基准"],
+        "弱修复": ["低开后快速收回预期下沿", "回踩不破开盘低点", "主动卖压收敛"],
+        "延续": ["竞价落在合理区间", "价格与VWAP同向", "题材和个股强弱未背离"],
+        "分歧": ["竞价低于区间中枢", "开盘冲高回落", "承接需要二次确认"],
+        "退潮": ["竞价跌破预期下沿", "放量跌破结构支撑", "题材资金同步流出"],
+    }
+    actions = {
+        "强修复": "只按量价确认执行，不追瞬时高点。",
+        "弱修复": "保留验证仓，修复失败立即降风险。",
+        "延续": "按原计划持有并跟踪失效条件。",
+        "分歧": "降低主动进攻仓位，等待方向确认。",
+        "退潮": "优先减仓或退出，禁止补仓摊低。",
+    }
+    return [ExpectationScenario(
+        revision_id=revision.id,
+        scenario_type=label,
+        probability=probability[label],
+        expected_low=round(ranges[label][0], 2),
+        expected_high=round(ranges[label][1], 2),
+        validation_conditions_json=_json_dumps(validation[label]),
+        invalid_conditions_json=_json_dumps([f"实际表现不满足“{condition}”" for condition in validation[label][:2]]),
+        action_discipline=actions[label],
+    ) for label in SCENARIO_LABELS]
+
+
+def _persist_expectation_revision(db: Session, row: ExpectationSnapshot, trigger: str = "collector") -> ExpectationRevision | None:
+    latest = (
+        db.query(ExpectationRevision)
+        .filter(ExpectationRevision.trade_date == row.trade_date, ExpectationRevision.code == row.code)
+        .order_by(ExpectationRevision.version.desc(), ExpectationRevision.id.desc())
+        .first()
+    )
+    fingerprint = (row.stage, row.expectation_result, row.state_transition, row.expectation_gap_score)
+    if latest and fingerprint == (latest.stage, latest.expectation_result, latest.state_transition, latest.expectation_gap_score):
+        return None
+    volume = (
+        db.query(VolumePriceSnapshot)
+        .filter(VolumePriceSnapshot.code == row.code)
+        .order_by(VolumePriceSnapshot.captured_at.desc(), VolumePriceSnapshot.id.desc())
+        .first()
+    )
+    invalid_conditions = [
+        f"竞价/开盘低于 {row.underperform_threshold:+.2f}%",
+        "开盘后跌破真实VWAP且量能转弱",
+        "关键结构支撑失守后不能快速收回",
+    ]
+    revision = ExpectationRevision(
+        expectation_snapshot_id=int(row.id), previous_revision_id=latest.id if latest else None,
+        version=(latest.version + 1) if latest else 1, trade_date=row.trade_date,
+        code=row.code, name=row.name, stage=row.stage, trigger=trigger,
+        base_expectation=row.base_expectation, expected_open_low=row.expected_open_low,
+        expected_open_high=row.expected_open_high, actual_open_pct=row.actual_open_pct,
+        actual_change_pct=row.actual_change_pct, expectation_gap_score=row.expectation_gap_score,
+        expectation_result=row.expectation_result, state_transition=row.state_transition,
+        confidence=row.confidence, volume_price_state=(volume.pattern if volume else ""),
+        vwap=(volume.vwap if volume else 0), price_vs_vwap=(volume.price_vs_vwap if volume else 0),
+        data_quality=(volume.data_quality if volume else "missing"), evidence_json=row.evidence_json,
+        counter_evidence_json=row.counter_evidence_json,
+        invalid_conditions_json=_json_dumps(invalid_conditions), suggestion=row.suggestion,
+        created_at=datetime.now(),
+    )
+    db.add(revision)
+    db.flush()
+    for scenario in _scenario_rows(revision):
+        db.add(scenario)
+    return revision
+
 
 def infer_script_type(base_hint: str) -> str:
     if any(value in base_hint for value in ("打板", "冲板", "首板", "连板")):
@@ -371,6 +470,8 @@ def build_expectation_snapshot(
     row.created_at = datetime.now()
     if persist:
         db.add(row)
+        db.flush()
+        _persist_expectation_revision(db, row, trigger=stage)
         db.commit()
         db.refresh(row)
     return _expectation_out(row)
@@ -408,6 +509,9 @@ def update_expectation_snapshot(
             row.counter_evidence_json = _json_dumps(value)
         else:
             setattr(row, key, value)
+    db.add(row)
+    db.flush()
+    _persist_expectation_revision(db, row, trigger="manual_update")
     db.commit()
     db.refresh(row)
     return _expectation_out(row)

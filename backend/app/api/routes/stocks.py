@@ -20,11 +20,14 @@ from app.api.helpers.decision import (
 )
 from app.api.helpers.volume_price import build_volume_price_snapshot
 from app.core.database import get_db
-from app.models.trading import DataCaptureSnapshot, ExpectationRule, ExpectationSnapshot, Holding, IntradayEvidenceEvent, NextDayPlan, PositionExecutionState, VolumePriceSnapshot, WatchlistEntry
+from app.models.trading import DataCaptureSnapshot, ExpectationRevision, ExpectationRule, ExpectationScenario, ExpectationSnapshot, Holding, IntradayEvidenceEvent, NextDayPlan, PositionExecutionState, VolumePriceSnapshot, WatchlistEntry
 from app.schemas.trading import (
     ExpectationSnapshotIn,
     ExpectationSnapshotOut,
     ExpectationSnapshotUpdate,
+    ExpectationChainOut,
+    ExpectationRevisionOut,
+    ExpectationScenarioOut,
     ExpectationRuleIn,
     ExpectationRuleOut,
     IntradayEvidenceEventOut,
@@ -39,6 +42,30 @@ from app.schemas.trading import (
 )
 
 router = APIRouter()
+
+
+def _expectation_revision_out(row: ExpectationRevision, scenarios: list[ExpectationScenario]) -> ExpectationRevisionOut:
+    return ExpectationRevisionOut(
+        id=row.id, expectation_snapshot_id=row.expectation_snapshot_id,
+        previous_revision_id=row.previous_revision_id, version=row.version,
+        trade_date=row.trade_date, code=row.code, name=row.name, stage=row.stage,
+        trigger=row.trigger, base_expectation=row.base_expectation,
+        expected_open_low=row.expected_open_low, expected_open_high=row.expected_open_high,
+        actual_open_pct=row.actual_open_pct, actual_change_pct=row.actual_change_pct,
+        expectation_gap_score=row.expectation_gap_score, expectation_result=row.expectation_result,
+        state_transition=row.state_transition, confidence=row.confidence,
+        volume_price_state=row.volume_price_state, vwap=row.vwap,
+        price_vs_vwap=row.price_vs_vwap, data_quality=row.data_quality,
+        evidence=_json_list(row.evidence_json), counter_evidence=_json_list(row.counter_evidence_json),
+        invalid_conditions=_json_list(row.invalid_conditions_json), suggestion=row.suggestion,
+        scenarios=[ExpectationScenarioOut(
+            id=item.id, scenario_type=item.scenario_type, probability=item.probability,
+            expected_low=item.expected_low, expected_high=item.expected_high,
+            validation_conditions=_json_list(item.validation_conditions_json),
+            invalid_conditions=_json_list(item.invalid_conditions_json),
+            action_discipline=item.action_discipline,
+        ) for item in scenarios], created_at=row.created_at,
+    )
 
 
 @router.get("/watchlist-recommendations", response_model=list[WatchlistRecommendationOut])
@@ -302,6 +329,9 @@ def watchlist_recommendations(db: Session = Depends(get_db)) -> list[WatchlistRe
             reasons=list(dict.fromkeys(row["reasons"])), risks=list(dict.fromkeys(row["risks"])),
             source=" + ".join(sorted(row["sources"])),
             category=str(row.get("category") or "主线题材观察"),
+            entry_reason=(overrides.get(row["code"]).entry_reason if overrides.get(row["code"]) else "") or (row["reasons"][0] if row["reasons"] else "系统评分入选"),
+            observation_days=max(1, (datetime.now().date() - (overrides.get(row["code"]).created_at.date() if overrides.get(row["code"]) else datetime.now().date())).days + 1),
+            converted=bool(overrides.get(row["code"]) and overrides[row["code"]].converted_at),
             updated_at=max([value for value in (radar.updated_at if radar else None, ladder.updated_at if ladder else None) if value is not None], default=None),
         ))
     output_by_code = {item.code: item for item in outputs}
@@ -312,12 +342,44 @@ def watchlist_recommendations(db: Session = Depends(get_db)) -> list[WatchlistRe
     ).all()
     if not today_auto:
         ranked = [item for item in sorted(outputs, key=lambda item: (-item.score, item.code)) if item.category in {"昨日涨停承接观察", "近几日涨停／炸板承接观察"}]
-        first = [item for item in ranked if item.category == "昨日涨停承接观察"][:5]
-        second = [item for item in ranked if item.category == "近几日涨停／炸板承接观察"][:5]
+        def select_diverse(candidates: list[WatchlistRecommendationOut], limit: int) -> list[WatchlistRecommendationOut]:
+            """同一题材仅保留龙头、换手核心、低位补涨三个不同角色。"""
+            selected_items: list[WatchlistRecommendationOut] = []
+            theme_roles: set[tuple[str, str]] = set()
+            for candidate in candidates:
+                role_bucket = (
+                    "龙头" if candidate.limit_level >= 2 or "龙头" in candidate.role
+                    else "换手核心" if candidate.score >= 70 or "核心" in candidate.role
+                    else "低位补涨"
+                )
+                key = (candidate.theme or "未分类", role_bucket)
+                if key in theme_roles:
+                    continue
+                theme_roles.add(key)
+                selected_items.append(candidate)
+                if len(selected_items) >= limit:
+                    break
+            return selected_items
+
+        first = select_diverse([item for item in ranked if item.category == "昨日涨停承接观察"], 5)
+        second = select_diverse([item for item in ranked if item.category == "近几日涨停／炸板承接观察"], 5)
         selected = (first + second)[:10]
         if len(selected) < 10:
             selected_codes = {item.code for item in selected}
-            selected.extend(item for item in ranked if item.code not in selected_codes and item not in selected)
+            theme_roles = {
+                (item.theme or "未分类", "龙头" if item.limit_level >= 2 or "龙头" in item.role else "换手核心" if item.score >= 70 or "核心" in item.role else "低位补涨")
+                for item in selected
+            }
+            for item in ranked:
+                role_bucket = "龙头" if item.limit_level >= 2 or "龙头" in item.role else "换手核心" if item.score >= 70 or "核心" in item.role else "低位补涨"
+                key = (item.theme or "未分类", role_bucket)
+                if item.code in selected_codes or key in theme_roles:
+                    continue
+                selected.append(item)
+                selected_codes.add(item.code)
+                theme_roles.add(key)
+                if len(selected) >= 10:
+                    break
             selected = selected[:10]
         for rank, item in enumerate(selected, start=1):
             existing = overrides.get(item.code)
@@ -331,11 +393,17 @@ def watchlist_recommendations(db: Session = Depends(get_db)) -> list[WatchlistRe
                 existing.snapshot_date = snapshot_date
                 existing.category = item.category
                 existing.snapshot_rank = rank
+                existing.entry_reason = item.reasons[0] if item.reasons else f"{item.category}评分入选"
                 db.add(existing)
         db.commit()
         today_auto = db.query(WatchlistEntry).filter(WatchlistEntry.source == "auto", WatchlistEntry.snapshot_date == snapshot_date).all()
 
     active_entries = db.query(WatchlistEntry).filter(WatchlistEntry.status == "active").all()
+    for entry in active_entries:
+        if entry.code in holding_codes and entry.converted_at is None:
+            entry.converted_at = datetime.now()
+            db.add(entry)
+    db.commit()
     active_codes = {item.code for item in active_entries if item.source == "manual" or item.snapshot_date == snapshot_date}
     return sorted(
         [output_by_code[code] for code in active_codes if code in output_by_code],
@@ -356,26 +424,29 @@ def add_watchlist_entry(payload: WatchlistEntryIn, db: Session = Depends(get_db)
             resolved_name = ""
     row = db.query(WatchlistEntry).filter(WatchlistEntry.code == code).first()
     if row is None:
-        row = WatchlistEntry(code=code, name=resolved_name or code, status="active", source="manual", category="手动自选")
+        row = WatchlistEntry(code=code, name=resolved_name or code, status="active", source="manual", category="手动自选", entry_reason="用户手动加入观察池")
     else:
         row.name = resolved_name or row.name or code
         row.status = "active"
         row.source = "manual"
         row.category = "手动自选"
+        row.entry_reason = row.entry_reason or "用户手动加入观察池"
+        row.exit_reason = ""
+        row.exited_at = None
         row.updated_at = datetime.now()
     db.add(row); db.commit(); db.refresh(row)
-    return WatchlistEntryOut(code=row.code, name=row.name, status=row.status, source=row.source)
+    return WatchlistEntryOut(code=row.code, name=row.name, status=row.status, source=row.source, entry_reason=row.entry_reason, exit_reason=row.exit_reason, observation_days=max(1, (datetime.now().date() - row.created_at.date()).days + 1), converted=bool(row.converted_at))
 
 
 @router.delete("/watchlist/{code}", response_model=WatchlistEntryOut)
-def exclude_watchlist_entry(code: str, db: Session = Depends(get_db)) -> WatchlistEntryOut:
+def exclude_watchlist_entry(code: str, exit_reason: str = "用户手动剔除", db: Session = Depends(get_db)) -> WatchlistEntryOut:
     row = db.query(WatchlistEntry).filter(WatchlistEntry.code == code).first()
     if row is None:
-        row = WatchlistEntry(code=code, name=code, status="excluded", source="manual")
+        row = WatchlistEntry(code=code, name=code, status="excluded", source="manual", exit_reason=exit_reason, exited_at=datetime.now())
     else:
-        row.status = "excluded"; row.updated_at = datetime.now()
+        row.status = "excluded"; row.exit_reason = exit_reason; row.exited_at = datetime.now(); row.updated_at = datetime.now()
     db.add(row); db.commit(); db.refresh(row)
-    return WatchlistEntryOut(code=row.code, name=row.name, status=row.status, source=row.source)
+    return WatchlistEntryOut(code=row.code, name=row.name, status=row.status, source=row.source, entry_reason=row.entry_reason, exit_reason=row.exit_reason, observation_days=max(1, (datetime.now().date() - row.created_at.date()).days + 1), converted=bool(row.converted_at))
 
 
 def _infer_limit_up_expectation(row: dict) -> tuple[str, float | None, list[str]]:
@@ -510,6 +581,29 @@ def get_stock_decision_card(code: str, db: Session = Depends(get_db)) -> StockDe
 @router.get("/stocks/{code}/expectation", response_model=ExpectationSnapshotOut)
 def get_stock_expectation(code: str, db: Session = Depends(get_db)) -> ExpectationSnapshotOut:
     return build_expectation_snapshot(db, code, stage=current_expectation_stage())
+
+
+@router.get("/stocks/{code}/expectation-chain", response_model=ExpectationChainOut)
+def get_stock_expectation_chain(code: str, trade_date: str = "", db: Session = Depends(get_db)) -> ExpectationChainOut:
+    normalized = code.zfill(6)
+    selected_date = trade_date or date.today().isoformat()
+    revisions = (
+        db.query(ExpectationRevision)
+        .filter(ExpectationRevision.code.in_([code, normalized]), ExpectationRevision.trade_date == selected_date)
+        .order_by(ExpectationRevision.version.asc(), ExpectationRevision.id.asc())
+        .all()
+    )
+    scenario_rows = db.query(ExpectationScenario).filter(
+        ExpectationScenario.revision_id.in_([row.id for row in revisions] or [0])
+    ).order_by(ExpectationScenario.id.asc()).all()
+    scenarios_by_revision: dict[int, list[ExpectationScenario]] = {}
+    for scenario in scenario_rows:
+        scenarios_by_revision.setdefault(scenario.revision_id, []).append(scenario)
+    return ExpectationChainOut(
+        code=normalized, trade_date=selected_date, generated_at=datetime.now(),
+        current_stage=revisions[-1].stage if revisions else current_expectation_stage(),
+        revisions=[_expectation_revision_out(row, scenarios_by_revision.get(row.id, [])) for row in revisions],
+    )
 
 
 @router.get("/stocks/{code}/volume-price", response_model=VolumePriceSnapshotOut)

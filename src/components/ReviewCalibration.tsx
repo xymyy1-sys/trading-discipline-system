@@ -10,6 +10,8 @@ export default function ReviewCalibration() {
   const [status, setStatus] = useState('')
   const [proposal, setProposal] = useState<CalibrationProposal | null>(null)
   const [calibrationRun, setCalibrationRun] = useState<CalibrationRun | null>(null)
+  const [dataHealth, setDataHealth] = useState<Array<{ source: string; data_type: string; sample_count: number; missing_rate: number; degraded_count: number; stale_count: number; average_latency_ms: number; latest_status: string; latest_at: string; latest_trade_date: string; trade_date_consistent: boolean; degraded_source: string }>>([])
+  const [environmentStats, setEnvironmentStats] = useState<Array<{ market_grade: string; expectation_samples: number; expectation_hit_rate: number; recommendation_samples: number; execution_adoption_rate: number; average_adverse_move: number; data_quality: string }>>([])
 
   const load = () => {
     setLoading(true)
@@ -28,6 +30,14 @@ export default function ReviewCalibration() {
       .then(r => r.ok ? r.json() : Promise.reject())
       .then(setProposal)
       .catch(() => setProposal(null))
+    fetch(`${API_BASE}/api/data-quality/health`)
+      .then(r => r.ok ? r.json() : Promise.reject())
+      .then(data => setDataHealth(data.providers || []))
+      .catch(() => setDataHealth([]))
+    fetch(`${API_BASE}/api/reviews/environment-effectiveness`)
+      .then(r => r.ok ? r.json() : Promise.reject())
+      .then(data => setEnvironmentStats(Array.isArray(data) ? data : []))
+      .catch(() => setEnvironmentStats([]))
   }
 
   const applyCalibration = async () => {
@@ -93,6 +103,32 @@ export default function ReviewCalibration() {
       </div>
 
       <div className="calibration-grid model-grid">
+        <section className="panel calibration-panel data-health-matrix">
+          <h3><Activity size={16} />数据源健康矩阵</h3>
+          <p className="plain-text">显示每类真实采集的更新时间、延迟、缺失率、降级状态与交易日一致性；没有留痕的数据源不会显示为健康。</p>
+          <div className="health-table-wrap"><table><thead><tr><th>来源 / 数据</th><th>最近更新</th><th>交易日</th><th>延迟</th><th>缺失率</th><th>降级/陈旧</th><th>状态</th></tr></thead><tbody>
+            {dataHealth.map(item => <tr key={`${item.source}-${item.data_type}`} className={!item.trade_date_consistent || item.missing_rate >= 20 ? 'health-bad' : item.degraded_count || item.stale_count ? 'health-warn' : ''}>
+              <td><b>{item.source}</b><small>{item.data_type}</small></td>
+              <td>{new Date(item.latest_at).toLocaleString('zh-CN', { hour12: false })}</td>
+              <td>{item.latest_trade_date || '--'}{!item.trade_date_consistent && <em>不一致</em>}</td>
+              <td>{item.average_latency_ms.toFixed(0)}ms</td><td>{item.missing_rate.toFixed(1)}%</td>
+              <td>{item.degraded_count}/{item.stale_count}{item.degraded_source && <small>{item.degraded_source}</small>}</td>
+              <td>{chineseLabel(item.latest_status)} · {item.sample_count}样本</td>
+            </tr>)}
+            {!dataHealth.length && <tr><td colSpan={7}>暂无数据留痕，不能判定数据源健康。</td></tr>}
+          </tbody></table></div>
+        </section>
+        <section className="panel calibration-panel data-health-matrix">
+          <h3><Activity size={16} />按市场环境分层校准</h3>
+          <p className="plain-text">只使用同日真实市场快照、预期验证、执行反馈和量价快照统计；缺少环境快照时单列为“未评级”。</p>
+          <div className="health-table-wrap"><table><thead><tr><th>环境</th><th>预期样本</th><th>命中率</th><th>建议样本</th><th>采纳率</th><th>平均不利波动</th><th>质量</th></tr></thead><tbody>
+            {environmentStats.map(item => <tr key={item.market_grade}>
+              <td><b>{item.market_grade}</b></td><td>{item.expectation_samples}</td><td>{item.expectation_hit_rate.toFixed(1)}%</td>
+              <td>{item.recommendation_samples}</td><td>{item.execution_adoption_rate.toFixed(1)}%</td><td>{item.average_adverse_move.toFixed(2)}%</td><td>{item.data_quality}</td>
+            </tr>)}
+            {!environmentStats.length && <tr><td colSpan={7}>暂无足够的跨日环境校准样本。</td></tr>}
+          </tbody></table></div>
+        </section>
         <section className="panel calibration-panel">
           <h3><Activity size={16} />模型有效性</h3>
           <div className="model-metric-list">

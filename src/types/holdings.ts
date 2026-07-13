@@ -265,6 +265,52 @@ export interface ExpectationSnapshot {
   created_at: string;
 }
 
+export interface ExpectationScenario {
+  id: number;
+  scenario_type: string;
+  probability: number;
+  expected_low: number;
+  expected_high: number;
+  validation_conditions: string[];
+  invalid_conditions: string[];
+  action_discipline: string;
+}
+
+export interface ExpectationRevision {
+  id: number;
+  version: number;
+  trade_date: string;
+  stage: string;
+  trigger: string;
+  base_expectation: string;
+  expected_open_low: number;
+  expected_open_high: number;
+  actual_open_pct: number;
+  actual_change_pct: number;
+  expectation_gap_score: number;
+  expectation_result: string;
+  state_transition: string;
+  confidence: number;
+  volume_price_state: string;
+  vwap: number;
+  price_vs_vwap: number;
+  data_quality: string;
+  evidence: string[];
+  counter_evidence: string[];
+  invalid_conditions: string[];
+  suggestion: string;
+  scenarios: ExpectationScenario[];
+  created_at: string;
+}
+
+export interface ExpectationChain {
+  code: string;
+  trade_date: string;
+  generated_at: string;
+  current_stage: string;
+  revisions: ExpectationRevision[];
+}
+
 export interface ExpectationRule {
   id: number;
   script_type: string;

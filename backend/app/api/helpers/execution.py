@@ -20,6 +20,7 @@ from app.api.helpers.quotes import (
 from app.api.helpers.seesaw import _market_seesaw_monitor
 from app.models.trading import (
     ActionRecommendation,
+    ActionRecommendationRevision,
     ExpectationSnapshot,
     ExitCard,
     Holding,
@@ -1193,6 +1194,24 @@ def build_position_execution_state(
         db.add(snapshot)
         db.add(recommendation)
         db.flush()
+        if changed:
+            latest_revision = (
+                db.query(ActionRecommendationRevision)
+                .filter(ActionRecommendationRevision.recommendation_id == recommendation.id)
+                .order_by(ActionRecommendationRevision.version.desc(), ActionRecommendationRevision.id.desc())
+                .first()
+            )
+            db.add(ActionRecommendationRevision(
+                recommendation_id=recommendation.id,
+                version=(latest_revision.version + 1) if latest_revision else 1,
+                level=recommendation.level, state=recommendation.state,
+                action=recommendation.action, recommended_ratio=recommendation.recommended_ratio,
+                evidence_json=recommendation.evidence_json,
+                counter_evidence_json=recommendation.counter_evidence_json,
+                invalid_conditions_json=recommendation.invalid_conditions_json,
+                recovery_conditions_json=recommendation.recovery_conditions_json,
+                created_at=now,
+            ))
         if previous_state != state:
             history = PositionStateHistory(
                 holding_id=int(holding.id),

@@ -4,6 +4,49 @@ def test_health_check(client):
     data = response.json()
     assert data["status"] == "ok"
 
+
+def test_holding_summary_includes_today_closed_position_profit(client, db_session):
+    from datetime import datetime
+    from app.models.trading import AccountState, Holding, TradeLog
+
+    db_session.add(AccountState(id=1, total_asset=100000))
+    db_session.add(Holding(code="600001", name="仍持仓", quantity=100, cost_price=10, current_price=11, total_asset=100000))
+    db_session.add(TradeLog(
+        code="600002", name="今日清仓", traded_at=datetime.now(), side="卖出",
+        price=12, quantity=100, amount=1200, total_asset=100000,
+        position_ratio=0.012, cost_price=10, stop_loss_price=9.6,
+        reason="按计划清仓", mode="标准短线模式", compliant=True, human_tags="",
+    ))
+    db_session.commit()
+
+    response = client.get("/api/holdings/summary")
+    assert response.status_code == 200
+    data = response.json()
+    assert data["today_realized_profit_amount"] == 200
+    assert data["today_profit_amount"] == data["today_open_profit_amount"] + 200
+
+
+def test_expectation_chain_is_append_only_and_has_scenarios(client, monkeypatch):
+    from app.api.helpers import decision
+
+    monkeypatch.setattr(decision, "quote_for_code", lambda code: {
+        "name": "预期链测试", "price": 10.5, "prev_close": 10, "open": 10.2,
+        "open_pct": 2.0, "change_pct": 5.0, "note": "实时行情",
+    })
+    first = client.get("/api/stocks/600003/expectation")
+    assert first.status_code == 200
+    second = client.post("/api/expectations", json={
+        "code": "600003", "name": "预期链测试", "stage": "午后确认",
+        "base_hint": "强预期", "actual_open_pct": -5, "actual_change_pct": -6,
+    })
+    assert second.status_code == 200
+    chain = client.get(f"/api/stocks/600003/expectation-chain?trade_date={second.json()['trade_date']}")
+    assert chain.status_code == 200
+    data = chain.json()
+    assert len(data["revisions"]) == 2
+    assert [item["version"] for item in data["revisions"]] == [1, 2]
+    assert len(data["revisions"][-1]["scenarios"]) == 5
+
 def test_market_sector_flow(client):
     response = client.get("/api/market/sector-flow")
     assert response.status_code == 200

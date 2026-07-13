@@ -20,7 +20,11 @@ class Settings(BaseSettings):
     auth_enabled: bool = Field(default=True, validation_alias="AUTH_ENABLED")
     auth_username: str = Field(default="admin", validation_alias="AUTH_USERNAME")
     auth_password: str = Field(default="", validation_alias="AUTH_PASSWORD")
+    auth_password_file: str = Field(default="", validation_alias="AUTH_PASSWORD_FILE")
     auth_secret: str = Field(default="", validation_alias="AUTH_SECRET")
+    auth_secret_file: str = Field(default="", validation_alias="AUTH_SECRET_FILE")
+    auth_totp_secret: str = Field(default="", validation_alias="AUTH_TOTP_SECRET")
+    auth_totp_secret_file: str = Field(default="", validation_alias="AUTH_TOTP_SECRET_FILE")
     auth_session_hours: int = Field(default=12, validation_alias="AUTH_SESSION_HOURS")
     auth_cookie_secure: bool = Field(default=False, validation_alias="AUTH_COOKIE_SECURE")
     demo_username: str = Field(default="demo", validation_alias="DEMO_USERNAME")
@@ -28,12 +32,28 @@ class Settings(BaseSettings):
     demo_database_url: str = Field(default="sqlite:///./data/demo_discipline.db", validation_alias="DEMO_DATABASE_URL")
     audit_enabled: bool = Field(default=True, validation_alias="AUDIT_ENABLED")
     ai_api_key: str = Field(default="", validation_alias="AI_API_KEY")
+    ai_api_key_file: str = Field(default="", validation_alias="AI_API_KEY_FILE")
     ai_model: str = Field(default="deepseek-reasoner", validation_alias="AI_MODEL")
     ai_base_url: str = Field(default="https://api.deepseek.com", validation_alias="AI_BASE_URL")
     ai_provider: str = Field(default="deepseek", validation_alias="AI_PROVIDER")
     dingtalk_enabled: bool = Field(default=False, validation_alias="DINGTALK_ENABLED")
     dingtalk_webhook: str = Field(default="", validation_alias="DINGTALK_WEBHOOK")
+    dingtalk_webhook_file: str = Field(default="", validation_alias="DINGTALK_WEBHOOK_FILE")
     dingtalk_secret: str = Field(default="", validation_alias="DINGTALK_SECRET")
+    dingtalk_secret_file: str = Field(default="", validation_alias="DINGTALK_SECRET_FILE")
+
+    def model_post_init(self, __context: object) -> None:
+        for value_field, file_field in (
+            ("auth_password", "auth_password_file"),
+            ("auth_secret", "auth_secret_file"),
+            ("auth_totp_secret", "auth_totp_secret_file"),
+            ("ai_api_key", "ai_api_key_file"),
+            ("dingtalk_webhook", "dingtalk_webhook_file"),
+            ("dingtalk_secret", "dingtalk_secret_file"),
+        ):
+            secret_path = str(getattr(self, file_field, "") or "").strip()
+            if secret_path:
+                object.__setattr__(self, value_field, Path(secret_path).read_text(encoding="utf-8").strip())
 
     def validate_security(self) -> None:
         if not self.auth_enabled:

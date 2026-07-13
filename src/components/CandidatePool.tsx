@@ -10,6 +10,7 @@ type Recommendation = {
   expectation_status: string; volume_price_status: string; expectation_gap: number | null;
   risk_reward_ratio: number | null; gate_passed: boolean; missing_conditions: string[];
   reasons: string[]; risks: string[]; source: string; category: string; updated_at: string | null;
+  entry_reason: string; observation_days: number; converted: boolean;
 }
 
 export default function CandidatePool() {
@@ -43,7 +44,8 @@ export default function CandidatePool() {
       .catch(error => { setNotice(''); setError(error instanceof Error ? error.message : '手动加入观察池失败') })
   }
   const removeItem = (code: string) => {
-    fetch(`${API_BASE}/api/watchlist/${code}`, { method: 'DELETE' })
+    const exitReason = window.prompt('请记录剔除原因，便于复盘观察池转化率：', '用户手动剔除') || '用户手动剔除'
+    fetch(`${API_BASE}/api/watchlist/${code}?exit_reason=${encodeURIComponent(exitReason)}`, { method: 'DELETE' })
       .then(r => { if (!r.ok) throw new Error('剔除失败'); setNotice('已剔除；今日不会自动递补'); load() })
       .catch(() => setError('剔除观察标的失败'))
   }
@@ -57,6 +59,7 @@ export default function CandidatePool() {
       <button type="button" className="candidate-remove" onClick={() => removeItem(item.code)} title="从观察池剔除"><Trash2 size={14}/>剔除</button>
       <AiInsightButton scope="stock" target={item.code} />
       <small>{item.code} · {item.theme || '题材待确认'} · {item.role || '角色待确认'}</small>
+      <small className="candidate-lifecycle">观察第 {item.observation_days || 1} 天 · {item.entry_reason || '系统评分入选'}{item.converted ? ' · 已转为持仓' : ''}</small>
       {item.category && <p className="candidate-category">{item.category}</p>}
       {item.limit_level > 0 && <p className="candidate-positive">+ {item.limit_level}板 · {item.limit_quality}</p>}
       <div className="candidate-gates">

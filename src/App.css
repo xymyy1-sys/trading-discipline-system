@@ -5300,6 +5300,7 @@ h3 {
 .brand-bars { fill: none; stroke: #63ccd9; stroke-width: 1.8; stroke-linecap: round; opacity: .85; }
 .ai-insight-btn { display: inline-flex; align-items: center; justify-content: center; gap: 6px; width: fit-content; padding: 7px 11px; border: 1px solid #77afca; border-radius: 8px; background: linear-gradient(135deg, #eef9ff, #dceff8); color: #174f72; font-weight: 700; cursor: pointer; }
 .candidate-card > .ai-insight-btn { margin: 8px 0 4px; }
+.candidate-lifecycle { display: block; margin-top: 5px; color: var(--ink-muted); }
 .ai-market-action { grid-column: 1 / -1; display: flex; justify-content: flex-end; margin-bottom: -4px; }
 .ai-insight-overlay { position: fixed; inset: 0; z-index: 1000; display: grid; place-items: center; padding: 24px; background: rgba(13, 27, 40, .56); backdrop-filter: blur(3px); }
 .ai-insight-panel { display: grid; grid-template-rows: auto 1fr auto; width: min(860px, 96vw); max-height: 86vh; overflow: hidden; border: 1px solid #9bc5d8; border-radius: 14px; background: var(--panel); box-shadow: 0 24px 70px rgba(0,0,0,.25); }
@@ -5314,6 +5315,7 @@ h3 {
 .privacy-toggle { display: inline-flex; align-items: center; gap: 7px; padding: 9px 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); color: var(--ink); font-weight: 700; cursor: pointer; }
 .privacy-toggle.active { border-color: #28749d; background: #e7f4fa; color: #174f72; }
 .privacy-mode .pos-summary strong,
+.privacy-mode .pos-summary small,
 .privacy-mode .sensitive-card strong,
 .privacy-mode .sensitive-card small,
 .privacy-mode .account-risk-summary span,
@@ -5329,6 +5331,7 @@ h3 {
 .privacy-mode .holding-cockpit .cockpit-detail-grid p,
 .privacy-mode .holding-cockpit .cockpit-detail-grid small,
 .privacy-mode .active-recommendations small,
+.privacy-mode .portfolio-exposure-panel strong,
 .privacy-mode .evidence-trajectory .trajectory-summary-latest span,
 .privacy-mode .evidence-trajectory .trajectory-summary-latest small {
   font-size: 0 !important;
@@ -5336,6 +5339,7 @@ h3 {
   text-shadow: none !important;
 }
 .privacy-mode .pos-summary strong::after,
+.privacy-mode .pos-summary small::after,
 .privacy-mode .sensitive-card strong::after,
 .privacy-mode .sensitive-card small::after,
 .privacy-mode .account-risk-summary span::after,
@@ -5351,6 +5355,7 @@ h3 {
 .privacy-mode .holding-cockpit .cockpit-detail-grid p::after,
 .privacy-mode .holding-cockpit .cockpit-detail-grid small::after,
 .privacy-mode .active-recommendations small::after,
+.privacy-mode .portfolio-exposure-panel strong::after,
 .privacy-mode .evidence-trajectory .trajectory-summary-latest span::after,
 .privacy-mode .evidence-trajectory .trajectory-summary-latest small::after {
   content: '******';
@@ -5405,3 +5410,34 @@ h3 {
   .cockpit-timeline > div { grid-template-columns: 58px minmax(0, 1fr); }
   .cockpit-timeline span { grid-column: 2; }
 }
+
+.expectation-version-panel { margin: 14px 0; padding: 16px; border: 1px solid #bfdbfe; border-radius: 14px; background: linear-gradient(180deg, #f8fbff, #f4f8fc); }
+.expectation-version-strip { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 10px; margin-top: 14px; }
+.expectation-version-strip article { display: flex; flex-direction: column; gap: 6px; min-height: 125px; padding: 12px; border: 1px solid var(--line); border-left: 4px solid #3b82f6; border-radius: 10px; background: #fff; }
+.expectation-version-strip article.weaker { border-left-color: #f59e0b; background: #fffbeb; }
+.expectation-version-strip article.invalid { border-left-color: #dc2626; background: #fff7f7; }
+.expectation-version-strip small, .expectation-version-strip span { color: var(--ink-muted); }
+.expectation-version-strip p { margin: 0; line-height: 1.5; }
+.expectation-scenario-tree { display: grid; grid-template-columns: repeat(5, minmax(150px, 1fr)); gap: 8px; margin-top: 12px; }
+.expectation-scenario-tree article { padding: 11px; border: 1px solid var(--line); border-radius: 10px; background: #fff; }
+.expectation-scenario-tree article > div { display: flex; justify-content: space-between; gap: 8px; }
+.expectation-scenario-tree article strong { color: #2563eb; }
+.expectation-scenario-tree article span, .expectation-scenario-tree article small { color: var(--ink-muted); }
+.expectation-scenario-tree article p { margin: 7px 0; line-height: 1.45; }
+@media (max-width: 1100px) { .expectation-scenario-tree { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+.data-health-matrix { grid-column: 1 / -1; }
+.health-table-wrap { overflow-x: auto; }
+.health-table-wrap table { width: 100%; border-collapse: collapse; }
+.health-table-wrap th, .health-table-wrap td { padding: 10px; border-bottom: 1px solid var(--line); text-align: left; white-space: nowrap; }
+.health-table-wrap td:first-child { display: grid; gap: 2px; }
+.health-table-wrap small { display: block; color: var(--ink-muted); }
+.health-table-wrap em { margin-left: 6px; color: var(--down); font-style: normal; font-weight: 700; }
+.health-table-wrap tr.health-warn { background: #fffbeb; }
+.health-table-wrap tr.health-bad { background: #fff1f2; }
+.portfolio-exposure-panel { margin: 14px 0; }
+.portfolio-warning-list p { margin: 8px 0; padding: 9px 12px; border-left: 4px solid var(--down); background: #fff1f2; color: #991b1b; }
+.portfolio-exposure-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
+.portfolio-exposure-grid article { padding: 12px; border: 1px solid var(--line); border-radius: 10px; }
+.portfolio-exposure-grid article > div { position: relative; display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; margin-top: 10px; padding-bottom: 7px; overflow: hidden; }
+.portfolio-exposure-grid article > div i { position: absolute; bottom: 0; left: 0; height: 3px; border-radius: 2px; background: #3b82f6; }
+@media (max-width: 900px) { .portfolio-exposure-grid { grid-template-columns: 1fr; } }

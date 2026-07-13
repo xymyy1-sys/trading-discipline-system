@@ -7,7 +7,7 @@ import { BarChart, LineChart, ScatterChart } from 'echarts/charts'
 import { GridComponent, LegendComponent, TooltipComponent } from 'echarts/components'
 import { CanvasRenderer } from 'echarts/renderers'
 
-import type { ExpectationRule, HoldingOut, StockDecisionCard } from '../types'
+import type { ExpectationChain, ExpectationRule, HoldingOut, StockDecisionCard } from '../types'
 import AiInsightButton from './AiInsightButton'
 
 type DecisionCardMode = 'watchlist' | 'holding'
@@ -24,6 +24,7 @@ export default function DecisionCard({ mode = 'watchlist' }: { mode?: DecisionCa
   const [message, setMessage] = useState('')
   const [rules, setRules] = useState<ExpectationRule[]>([])
   const [showRules, setShowRules] = useState(false)
+  const [expectationChain, setExpectationChain] = useState<ExpectationChain | null>(null)
 
   const loadCard = (target = code) => {
     const normalized = target.trim()
@@ -41,6 +42,10 @@ export default function DecisionCard({ mode = 'watchlist' }: { mode?: DecisionCa
       .then((data: StockDecisionCard) => {
         setCard(data)
         setCode(data.code)
+        return fetch(`${API_BASE}/api/stocks/${data.code}/expectation-chain?trade_date=${encodeURIComponent(data.expectation.trade_date)}`)
+          .then(response => response.ok ? response.json() : Promise.reject())
+          .then((chain: ExpectationChain) => setExpectationChain(chain))
+          .catch(() => setExpectationChain(null))
       })
       .catch(() => setMessage('个股决策卡读取失败'))
       .finally(() => setLoading(false))
@@ -178,6 +183,8 @@ export default function DecisionCard({ mode = 'watchlist' }: { mode?: DecisionCa
             </div>
 
             <ExpectationJourney card={card} />
+
+            <ExpectationVersionChain chain={expectationChain} />
 
             <DecisionMinuteChart card={card} />
 
@@ -331,6 +338,41 @@ function ExpectationJourney({ card }: { card: StockDecisionCard }) {
         <article><small>④ 实际与预期差</small><b>{gapText}</b><p>当前涨幅 {expectation.actual_change_pct >= 0 ? '+' : ''}{expectation.actual_change_pct.toFixed(2)}%</p></article>
         <article><small>⑤ 执行修正</small><b>{chineseLabel(expectation.expectation_result)}</b><p>{expectation.suggestion}</p></article>
       </div>
+    </section>
+  )
+}
+
+function ExpectationVersionChain({ chain }: { chain: ExpectationChain | null }) {
+  if (!chain?.revisions.length) {
+    return <p className="refresh-note">预期版本链将在本次采集后开始沉淀；历史快照不会伪造补齐。</p>
+  }
+  const latest = chain.revisions[chain.revisions.length - 1]
+  return (
+    <section className="expectation-version-panel">
+      <div className="expectation-journey-head">
+        <div><strong>预期 × 量价版本链</strong><span>阶段修正只追加、不覆盖；每个结论同时保存当时的量价状态、反证和失效条件。</span></div>
+        <span className="expectation-date">{chain.revisions.length} 个版本</span>
+      </div>
+      <div className="expectation-version-strip">
+        {chain.revisions.map(item => (
+          <article key={item.id} className={item.expectation_result === 'INVALID' ? 'invalid' : item.expectation_result === 'WEAKER' ? 'weaker' : ''}>
+            <small>V{item.version} · {item.stage}</small>
+            <b>{chineseLabel(item.expectation_result)} · 预期差 {item.expectation_gap_score >= 0 ? '+' : ''}{item.expectation_gap_score}</b>
+            <span>开盘 {item.actual_open_pct >= 0 ? '+' : ''}{item.actual_open_pct.toFixed(2)}% · {item.volume_price_state ? chineseLabel(item.volume_price_state) : '量价待确认'}</span>
+            <p>{item.suggestion}</p>
+          </article>
+        ))}
+      </div>
+      {!!latest.scenarios.length && <div className="expectation-scenario-tree">
+        {latest.scenarios.map(item => (
+          <article key={item.id}>
+            <div><b>{item.scenario_type}</b><strong>{(item.probability * 100).toFixed(0)}%</strong></div>
+            <span>区间 {item.expected_low.toFixed(1)}% ～ {item.expected_high.toFixed(1)}%</span>
+            <p>{item.validation_conditions.slice(0, 2).join('；')}</p>
+            <small>{item.action_discipline}</small>
+          </article>
+        ))}
+      </div>}
     </section>
   )
 }
