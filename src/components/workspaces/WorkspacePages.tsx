@@ -112,6 +112,7 @@ export function TodayDecisionSummary() {
   const [streamNotice, setStreamNotice] = useState('')
   const [streamReconnects, setStreamReconnects] = useState(0)
   const streamInterrupted = useRef(false)
+  const holdingCodesRef = useRef<Set<string>>(new Set())
   const [seesaw, setSeesaw] = useState<MarketSeesaw | null>(null)
   const [theme, setTheme] = useState<ThemeRadar | null>(null)
   const [loading, setLoading] = useState(false)
@@ -130,11 +131,20 @@ export function TodayDecisionSummary() {
       const [holdingRes, executionRes, seesawRes, themeRes, alertRes, intelRes] = results
       if (holdingRes.status === 'fulfilled' && Array.isArray(holdingRes.value)) {
         setHoldings(holdingRes.value)
+        holdingCodesRef.current = new Set(holdingRes.value.map((item: HoldingOut) => item.code))
         setSelectedCode(current => current || holdingRes.value[0]?.code || '')
         loadIntradayReviews(holdingRes.value)
         loadDecisionCards(holdingRes.value)
       }
-      if (executionRes.status === 'fulfilled' && Array.isArray(executionRes.value)) setExecutionStates(executionRes.value)
+      if (executionRes.status === 'fulfilled' && Array.isArray(executionRes.value)) {
+        setExecutionStates(executionRes.value)
+        const holdingRiskEvents = (executionRes.value as PositionExecutionState[])
+          .flatMap(item => item.events ?? [])
+          .filter(isRiskEvent)
+          .sort((left, right) => +new Date(right.captured_at) - +new Date(left.captured_at))
+          .slice(0, 8)
+        setRealtimeEvents(holdingRiskEvents)
+      }
       if (seesawRes.status === 'fulfilled') setSeesaw(seesawRes.value)
       if (themeRes.status === 'fulfilled') setTheme(themeRes.value)
       if (alertRes.status === 'fulfilled' && Array.isArray(alertRes.value)) setActiveAlerts(alertRes.value)
@@ -185,6 +195,7 @@ export function TodayDecisionSummary() {
     source.addEventListener('intraday-risk', event => {
       try {
         const payload = JSON.parse((event as MessageEvent).data) as IntradayEvidenceEvent
+        if (!holdingCodesRef.current.has(payload.target_code) || !isRiskEvent(payload)) return
         setRealtimeEvents(prev => [payload, ...prev.filter(item => item.id !== payload.id)].slice(0, 8))
         setStreamLastAt(new Date().toLocaleTimeString('zh-CN', { hour12: false }))
         if (payload.target_code) loadSingleIntradayReview(payload.target_code)
@@ -196,10 +207,17 @@ export function TodayDecisionSummary() {
   }, [])
 
   const riskStates = useMemo(
-    () => executionStates.filter(item => ['EXIT_REQUIRED', 'REDUCE_REQUIRED', 'PROFIT_PROTECTION', 'DIVERGENCE_HOLD'].includes(item.state)),
+    () => executionStates.filter(item => ['EXIT_REQUIRED', 'REDUCE_REQUIRED', 'EXPECTATION_INVALIDATED', 'EXPECTATION_VOLUME_BREAKDOWN', 'PROFIT_PROTECTION', 'DIVERGENCE_HOLD'].includes(item.state) || item.recommended_reduce_ratio > 0),
     [executionStates],
   )
+  const expectationRisks = useMemo(() => holdings.flatMap(holding => {
+    const card = decisionCards[holding.code]
+    if (!card || !['INVALID', 'WEAKER'].includes(card.expectation.expectation_result)) return []
+    const execution = executionStates.find(item => item.code === holding.code)
+    return [{ holding, card, execution }]
+  }), [holdings, decisionCards, executionStates])
   const highRiskAlerts = (seesaw?.holding_alerts ?? []).filter(item => ['高', '中高', '中'].includes(item.risk_level))
+  const riskTargetCount = new Set([...riskStates.map(item => item.code), ...expectationRisks.map(item => item.holding.code), ...highRiskAlerts.map(item => item.code)]).size
   const totalMarketValue = holdings.reduce((sum, item) => sum + item.market_value, 0)
   const totalProfit = holdings.reduce((sum, item) => sum + item.profit_amount, 0)
   const trackedReviews = holdings.map(holding => ({ holding, review: intradayReviews[holding.code] }))
@@ -216,7 +234,7 @@ export function TodayDecisionSummary() {
       <div className="ai-market-action"><AiInsightButton scope="market" target="today" label="AI全局复核" /></div>
       <div className="command-card emphasis">
         <span>今日处理优先级</span>
-        <strong>{riskStates.length + highRiskAlerts.length}</strong>
+        <strong>{riskTargetCount}</strong>
         <small>持仓执行风险 + 资金跷跷板告警</small>
       </div>
       <div className="command-card sensitive-card">
@@ -244,9 +262,16 @@ export function TodayDecisionSummary() {
             <RefreshCcw size={14} />刷新
           </button>
         </header>
-        {riskStates.length || highRiskAlerts.length ? (
+        {expectationRisks.length || riskStates.length || highRiskAlerts.length ? (
           <>
-            {riskStates.slice(0, 4).map(item => (
+            {expectationRisks.slice(0, 5).map(({ holding, card, execution }) => (
+              <article key={`expectation-${holding.code}`} className="expectation-risk-task">
+                <b>{holding.name}</b>
+                <span>{card.expectation.expectation_result === 'INVALID' ? '预期证伪' : '弱于预期'} · {chineseEvidence(execution?.recommended_action || card.expectation.suggestion)}</span>
+                <small>合理开盘 {card.expectation.expected_open_low.toFixed(2)}%～{card.expectation.expected_open_high.toFixed(2)}%，实际 {card.expectation.actual_open_pct >= 0 ? '+' : ''}{card.expectation.actual_open_pct.toFixed(2)}%，预期差 {card.expectation.expectation_gap_score}；{chineseEvidence(execution?.evidence[0] || card.expectation.evidence[0] || '等待执行状态同步')}</small>
+              </article>
+            ))}
+            {riskStates.filter(item => !expectationRisks.some(risk => risk.holding.code === item.code)).slice(0, 4).map(item => (
               <article key={`exec-${item.holding_id}`}>
                 <b>{item.name}</b>
                 <span>{chineseEvidence(item.recommended_action)}</span>
@@ -290,8 +315,8 @@ export function TodayDecisionSummary() {
           realtimeEvents.map(event => (
             <article key={`${event.id}-${event.event_type}`}>
               <b>{event.target_name || event.target_code}</b>
-              <span>{chineseLabel(event.event_type)}</span>
-              <small>{chineseEvidence(event.evidence?.[0] ?? `${chineseLabel(event.severity)} / 优先级 ${event.priority}`)}</small>
+              <span>{chineseLabel(event.event_type)} · {riskActionForEvent(event, executionStates)}</span>
+              <small>{riskDetailForEvent(event, decisionCards, executionStates)}</small>
             </article>
           ))
         ) : (
@@ -477,6 +502,31 @@ function formatEventTime(value: string) {
   const time = new Date(value)
   if (Number.isNaN(time.getTime())) return value
   return time.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', hour12: false })
+}
+
+function isRiskEvent(event: IntradayEvidenceEvent) {
+  return ['warning', 'critical'].includes(event.severity) || [
+    'EXPECTATION_INVALIDATED', 'EXPECTATION_VOLUME_BREAKDOWN', 'VWAP_BROKEN',
+    'VOLUME_PRICE_WEAKENING', 'HIGH_DRAWDOWN', 'PROFIT_DRAWDOWN_WARNING',
+    'TIME_STOP_TRIGGERED', 'SECTOR_FLOW_PEAK_REVERSAL', 'PROFIT_TO_LOSS_RISK',
+  ].includes(event.event_type)
+}
+
+function riskActionForEvent(event: IntradayEvidenceEvent, states: PositionExecutionState[]) {
+  const state = states.find(item => item.code === event.target_code)
+  return chineseEvidence(state?.recommended_action || (event.severity === 'critical' ? '立即降低风险' : '核对并按计划处理'))
+}
+
+function riskDetailForEvent(
+  event: IntradayEvidenceEvent,
+  cards: Record<string, StockDecisionCard>,
+  states: PositionExecutionState[],
+) {
+  const card = cards[event.target_code]
+  const state = states.find(item => item.code === event.target_code)
+  const base = chineseEvidence(event.evidence?.[0] || `${chineseLabel(event.severity)} / 优先级 ${event.priority}`)
+  if (!card || !['INVALID', 'WEAKER'].includes(card.expectation.expectation_result)) return base
+  return `合理开盘 ${card.expectation.expected_open_low.toFixed(2)}%～${card.expectation.expected_open_high.toFixed(2)}%，实际 ${card.expectation.actual_open_pct >= 0 ? '+' : ''}${card.expectation.actual_open_pct.toFixed(2)}%，预期差 ${card.expectation.expectation_gap_score}；${base}；建议：${chineseEvidence(state?.recommended_action || card.expectation.suggestion)}`
 }
 
 function inferMarketCycle(temperature?: string, marketMode?: string) {

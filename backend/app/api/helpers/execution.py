@@ -546,6 +546,20 @@ def _build_events(
 ) -> list[dict[str, Any]]:
     now = datetime.now()
     events: list[dict[str, Any]] = []
+    if expectation_result == "INVALID":
+        events.append({
+            "captured_at": now,
+            "scope": "stock",
+            "target_code": holding.code,
+            "target_name": holding.name,
+            "event_type": "EXPECTATION_INVALIDATED",
+            "severity": "critical",
+            "value": round(current, 2),
+            "previous_value": round(vwap, 2),
+            "priority": 100,
+            "group_key": "stock:expectation-invalidated",
+            "evidence": [next((item for item in evidence if item.startswith("预期证伪：")), "实际竞价/开盘显著低于合理预期区间，预期已经证伪。")],
+        })
     if vwap and current < vwap and vwap_reliable:
         events.append({
             "captured_at": now,
@@ -929,6 +943,7 @@ def build_position_execution_state(
     hard_exit = False
     expectation_result = _expectation_result(expectation)
     expectation_gap_score = _expectation_score(expectation)
+    hard_expectation_invalidation = expectation_result == "INVALID" or expectation_gap_score <= -18
     volume_pattern = _volume_pattern(volume_price)
     high_drawdown_pct = ((high - current) / high * 100) if high and current else 0.0
     if volume_price is not None:
@@ -1004,12 +1019,23 @@ def build_position_execution_state(
         counter_evidence.append("未取得板块跷跷板数据，本次建议主要依据个股价格和利润保护。")
 
     state, action, reduce_ratio, level = _action_from_score(negative_score, hard_exit, current_profit_pct > 0)
+    if hard_expectation_invalidation and not hard_exit:
+        expected_low = _safe_float(getattr(expectation, "expected_open_low", 0))
+        expected_high = _safe_float(getattr(expectation, "expected_open_high", 0))
+        actual_open = _safe_float(getattr(expectation, "actual_open_pct", 0))
+        state = "EXPECTATION_INVALIDATED"
+        if current_profit_pct >= 0:
+            action, reduce_ratio, level = "减仓50%", max(reduce_ratio, 0.50), "REDUCE"
+        else:
+            action, reduce_ratio, level = "只留观察仓", max(reduce_ratio, 0.75), "EXIT"
+        evidence.insert(0, f"预期证伪：合理开盘 {expected_low:+.2f}%～{expected_high:+.2f}%，实际竞价/开盘 {actual_open:+.2f}%，预期差 {expectation_gap_score}。")
+        invalid_conditions.insert(0, "真实竞价/开盘显著低于合理区间，未出现明确修复前必须先降低持仓风险。")
     if expectation_result in WEAK_EXPECTATION_RESULTS and volume_state in {"VWAP_BREAKDOWN", "VOLUME_PRICE_WEAKENING"} and not hard_exit:
         state = "EXPECTATION_VOLUME_BREAKDOWN"
         action = "减仓50%" if current_profit_pct >= 0 else "只留观察仓"
         reduce_ratio = max(reduce_ratio, 0.50 if current_profit_pct >= 0 else 0.75)
         level = "REDUCE" if current_profit_pct >= 0 else "EXIT"
-    if not vwap_reliable and action in {"减仓25%", "减仓50%", "只留观察仓", "全部退出"} and not hard_exit:
+    if not vwap_reliable and action in {"减仓25%", "减仓50%", "只留观察仓", "全部退出"} and not hard_exit and not hard_expectation_invalidation:
         state = "DEGRADED_DATA_OBSERVATION"
         action = "观察但禁止加仓"
         reduce_ratio = 0.0

@@ -63,6 +63,8 @@ export function chineseEvidence(value: string) {
     [/execution state\s+/gi, '执行状态：'],
   ]
   replacements.forEach(([pattern, replacement]) => { text = text.replace(pattern, replacement) })
-  Object.entries(LABELS).forEach(([key, label]) => { text = text.replaceAll(key, label) })
+  Object.entries(LABELS)
+    .sort(([left], [right]) => right.length - left.length)
+    .forEach(([key, label]) => { text = text.replaceAll(key, label) })
   return text
 }

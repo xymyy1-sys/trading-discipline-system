@@ -171,7 +171,7 @@ export default function DecisionCard({ mode = 'watchlist' }: { mode?: DecisionCa
             <div className="decision-kpi-grid">
               <div><b>基础预期</b><span>{chineseLabel(card.expectation.base_expectation)}</span></div>
               <div><b>实际表现</b><span>{chineseLabel(card.expectation.expectation_result)}</span></div>
-              <div><b>状态变化</b><span>{chineseEvidence(card.expectation.state_transition)}</span></div>
+              <div><b>状态变化</b><span>{chineseLabel(card.expectation.state_transition)}</span></div>
               <div><b>预期差</b><span>{card.expectation.expectation_gap_score}</span></div>
               <div><b>合理开盘</b><span>{card.expectation.expected_open_low.toFixed(1)}% - {card.expectation.expected_open_high.toFixed(1)}%</span></div>
               <div><b>可信度</b><span>{(card.expectation.confidence * 100).toFixed(0)}%</span></div>
@@ -316,7 +316,7 @@ function ExpectationJourney({ card }: { card: StockDecisionCard }) {
     : `${actualOpen >= 0 ? '+' : ''}${actualOpen.toFixed(2)}%`
   const gapText = expectation.state_transition === 'WAITING_VALIDATION'
     ? '尚未验证'
-    : `${chineseEvidence(expectation.state_transition)}（预期差 ${expectation.expectation_gap_score >= 0 ? '+' : ''}${expectation.expectation_gap_score}）`
+    : `${chineseLabel(expectation.state_transition)}（预期差 ${expectation.expectation_gap_score >= 0 ? '+' : ''}${expectation.expectation_gap_score}）`
 
   return (
     <section className="expectation-journey">
