@@ -117,6 +117,7 @@ export function TodayDecisionSummary() {
   const [theme, setTheme] = useState<ThemeRadar | null>(null)
   const [loading, setLoading] = useState(false)
   const [holdingNews, setHoldingNews] = useState<InformationItem[]>([])
+  const [showMarketEvidence, setShowMarketEvidence] = useState(false)
 
   const load = () => {
     setLoading(true)
@@ -265,21 +266,23 @@ export function TodayDecisionSummary() {
         {expectationRisks.length || riskStates.length || highRiskAlerts.length ? (
           <>
             {expectationRisks.slice(0, 5).map(({ holding, card, execution }) => (
-              <article key={`expectation-${holding.code}`} className="expectation-risk-task">
+              <article key={`expectation-${holding.code}`} className={`expectation-risk-task ${riskTone(execution?.recommendation?.level || (card.expectation.expectation_result === 'INVALID' ? 'EXIT' : 'PROTECT'))}`}>
                 <b>{holding.name}</b>
                 <span>{card.expectation.expectation_result === 'INVALID' ? '预期证伪' : '弱于预期'} · {chineseEvidence(execution?.recommended_action || card.expectation.suggestion)}</span>
-                <small>合理开盘 {card.expectation.expected_open_low.toFixed(2)}%～{card.expectation.expected_open_high.toFixed(2)}%，实际 {card.expectation.actual_open_pct >= 0 ? '+' : ''}{card.expectation.actual_open_pct.toFixed(2)}%，预期差 {card.expectation.expectation_gap_score}；{chineseEvidence(execution?.evidence[0] || card.expectation.evidence[0] || '等待执行状态同步')}</small>
+                <small>合理开盘 {card.expectation.expected_open_low.toFixed(2)}%～{card.expectation.expected_open_high.toFixed(2)}%，实际 {card.expectation.actual_open_pct >= 0 ? '+' : ''}{card.expectation.actual_open_pct.toFixed(2)}%，预期差 {card.expectation.expectation_gap_score}。</small>
+                <details><summary>查看决策依据与动态复核条件</summary><DecisionBasis execution={execution} fallback={card.expectation.evidence} /></details>
               </article>
             ))}
             {riskStates.filter(item => !expectationRisks.some(risk => risk.holding.code === item.code)).slice(0, 4).map(item => (
-              <article key={`exec-${item.holding_id}`}>
+              <article key={`exec-${item.holding_id}`} className={riskTone(item.recommendation?.level || item.state)}>
                 <b>{item.name}</b>
                 <span>{chineseEvidence(item.recommended_action)}</span>
                 <small>{chineseEvidence(item.evidence[0] ?? chineseLabel(item.volume_price_state))}</small>
+                <details><summary>为什么是这个建议？</summary><DecisionBasis execution={item} /></details>
               </article>
             ))}
             {highRiskAlerts.slice(0, 4).map(item => (
-              <article key={`risk-${item.code}`}>
+              <article key={`risk-${item.code}`} className={riskTone(item.risk_level)}>
                 <b>{item.name}</b>
                 <span>{item.risk_level}风险</span>
                 <small>{item.advice || item.signal}</small>
@@ -313,7 +316,7 @@ export function TodayDecisionSummary() {
         {streamNotice && <p className="stream-health-notice">{streamNotice}{streamReconnects ? ` · 已恢复 ${streamReconnects} 次` : ''}</p>}
         {realtimeEvents.length ? (
           realtimeEvents.map(event => (
-            <article key={`${event.id}-${event.event_type}`}>
+            <article key={`${event.id}-${event.event_type}`} className={riskTone(event.severity)}>
               <b>{event.target_name || event.target_code}</b>
               <span>{chineseLabel(event.event_type)} · {riskActionForEvent(event, executionStates)}</span>
               <small>{riskDetailForEvent(event, decisionCards, executionStates)}</small>
@@ -330,11 +333,19 @@ export function TodayDecisionSummary() {
           <span className="stream-state">规则推断 · 数据刷新后更新</span>
         </header>
         <div className="cockpit-market-grid">
-          <div><span>赚钱效应</span><strong>{earningEffect}</strong><small>{theme?.strongest_theme?.stage_reason || '等待题材扩散和涨停质量证据'}</small></div>
+          <div><span>赚钱效应</span><strong>{earningEffect}</strong><small>{theme?.strongest_theme?.stage_reason || '等待题材扩散和涨停质量证据'}</small><button type="button" className="market-evidence-link" onClick={() => setShowMarketEvidence(value => !value)}>查看计算依据</button></div>
           <div><span>情绪周期</span><strong>{marketCycle}</strong><small>根据市场温度、主线强度和资金迁移综合判断</small></div>
           <div><span>主线方向</span><strong>{theme?.strongest_theme?.name || '--'}</strong><small>{theme?.strongest_theme ? `强度 ${theme.strongest_theme.score} · 排名 ${theme.strongest_theme.rank}` : '等待真实题材数据'}</small></div>
-          <div><span>资金轮动</span><strong>{seesaw?.market_mode || '--'}</strong><small>{seesaw?.summary || '等待资金流证据'}</small></div>
+          <div><span>资金轮动</span><strong>{seesaw?.market_mode || '--'}</strong><small>{seesaw?.summary || '等待资金流证据'}</small><button type="button" className="market-evidence-link" onClick={() => setShowMarketEvidence(value => !value)}>查看资金明细</button></div>
         </div>
+        {showMarketEvidence && <div className="market-evidence-panel">
+          <h4>全市场结论计算依据</h4>
+          <p><b>赚钱效应：</b>强度≥70的题材 {theme?.themes.filter(item => item.score >= 70).length ?? 0} 个；净流入方向 {seesaw?.inflow_targets.filter(item => item.net_inflow > 0).length ?? 0} 个。</p>
+          <p><b>最强题材：</b>{theme?.strongest_theme ? `${theme.strongest_theme.name}，强度 ${theme.strongest_theme.score}，排名 ${theme.strongest_theme.rank}，净流入 ${theme.strongest_theme.net_inflow.toFixed(2)} 亿，涨停 ${theme.strongest_theme.limit_up_count} 只。` : '暂无可靠题材数据。'}</p>
+          <p><b>资金集中依据：</b>{seesaw?.inflow_targets.length ? seesaw.inflow_targets.slice(0, 5).map(item => `${item.name} ${item.net_inflow >= 0 ? '+' : ''}${item.net_inflow.toFixed(2)}亿`).join('；') : '暂无净流入目标。'}</p>
+          <p><b>数据来源：</b>{theme?.source || '题材雷达待同步'}；{seesaw?.source || '资金跷跷板待同步'}。更新时间：{theme?.updated_at ? new Date(theme.updated_at).toLocaleString('zh-CN') : '--'} / {seesaw?.updated_at ? new Date(seesaw.updated_at).toLocaleString('zh-CN') : '--'}。</p>
+          {(theme?.notes ?? []).slice(0, 3).map(note => <small key={note}>· {note}</small>)}
+        </div>}
       </section>
 
       <section className="panel holding-cockpit">
@@ -527,6 +538,24 @@ function riskDetailForEvent(
   const base = chineseEvidence(event.evidence?.[0] || `${chineseLabel(event.severity)} / 优先级 ${event.priority}`)
   if (!card || !['INVALID', 'WEAKER'].includes(card.expectation.expectation_result)) return base
   return `合理开盘 ${card.expectation.expected_open_low.toFixed(2)}%～${card.expectation.expected_open_high.toFixed(2)}%，实际 ${card.expectation.actual_open_pct >= 0 ? '+' : ''}${card.expectation.actual_open_pct.toFixed(2)}%，预期差 ${card.expectation.expectation_gap_score}；${base}；建议：${chineseEvidence(state?.recommended_action || card.expectation.suggestion)}`
+}
+
+function riskTone(value?: string) {
+  if (!value) return ''
+  if (/EXIT|CRITICAL|HIGH|高|INVALID/.test(value)) return 'risk-high'
+  if (/REDUCE|WARNING|中高|中|PROTECT/.test(value)) return 'risk-medium'
+  if (/WATCH|观察|LOW|低/.test(value)) return 'risk-low'
+  return ''
+}
+
+function DecisionBasis({ execution, fallback = [] }: { execution?: PositionExecutionState; fallback?: string[] }) {
+  const evidence = execution?.evidence?.length ? execution.evidence : fallback
+  return <div className="decision-basis">
+    {evidence.slice(0, 6).map(item => <p key={item}>依据：{chineseEvidence(item)}</p>)}
+    {(execution?.invalid_conditions ?? []).slice(0, 3).map(item => <p key={item}>升级/退出条件：{chineseEvidence(item)}</p>)}
+    {(execution?.recovery_conditions ?? []).slice(0, 3).map(item => <p key={item}>保留/恢复条件：{chineseEvidence(item)}</p>)}
+    {!evidence.length && <p>等待下一次量价和执行状态采样补充依据。</p>}
+  </div>
 }
 
 function inferMarketCycle(temperature?: string, marketMode?: string) {

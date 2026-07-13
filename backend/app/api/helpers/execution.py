@@ -1024,10 +1024,15 @@ def build_position_execution_state(
         expected_high = _safe_float(getattr(expectation, "expected_open_high", 0))
         actual_open = _safe_float(getattr(expectation, "actual_open_pct", 0))
         state = "EXPECTATION_INVALIDATED"
-        if current_profit_pct >= 0:
-            action, reduce_ratio, level = "减仓50%", max(reduce_ratio, 0.50), "REDUCE"
+        repair_confirmed = vwap_reliable and current >= vwap and volume_state in {"REPAIR_CONFIRMED", "VWAP_STRONG"}
+        if now.time() < time(9, 35):
+            action, reduce_ratio, level = "减仓25%", max(reduce_ratio, 0.25), "PROTECT"
+            recovery_conditions.insert(0, "观察至09:35：若重新站回真实VWAP且量价修复，可保留观察仓；否则继续降仓。")
+        elif repair_confirmed:
+            action, reduce_ratio, level = "减仓25%", max(reduce_ratio, 0.25), "PROTECT"
+            recovery_conditions.insert(0, "当前已出现VWAP修复，只保留验证仓；再次跌破则升级为减仓50%或退出。")
         else:
-            action, reduce_ratio, level = "只留观察仓", max(reduce_ratio, 0.75), "EXIT"
+            action, reduce_ratio, level = "减仓50%", max(reduce_ratio, 0.50), "REDUCE"
         evidence.insert(0, f"预期证伪：合理开盘 {expected_low:+.2f}%～{expected_high:+.2f}%，实际竞价/开盘 {actual_open:+.2f}%，预期差 {expectation_gap_score}。")
         invalid_conditions.insert(0, "真实竞价/开盘显著低于合理区间，未出现明确修复前必须先降低持仓风险。")
     if expectation_result in WEAK_EXPECTATION_RESULTS and volume_state in {"VWAP_BREAKDOWN", "VOLUME_PRICE_WEAKENING"} and not hard_exit:
@@ -1045,6 +1050,17 @@ def build_position_execution_state(
     if reduce_ratio >= 0.75 and action == "减仓50%":
         action = "只留观察仓"
         level = "EXIT"
+    evidence.append(
+        f"动态决策依据：风险积分 {negative_score}；预期差 {expectation_gap_score}；"
+        f"量价状态 {volume_state}；当前价 {'已' if current <= structure_stop_price and structure_stop_price else '未'}破结构止损，"
+        f"{'已' if hard_exit else '未'}触发硬止损。"
+    )
+    if hard_exit:
+        evidence.append("全部退出并非由浮亏百分比单独触发，而是当前价已经触发硬止损。")
+    elif reduce_ratio >= 0.75:
+        evidence.append("只留观察仓：多项风险共振但尚未触发硬止损；仅在重新站回VWAP且预期修复时保留。")
+    elif reduce_ratio > 0:
+        evidence.append(f"分阶段降低风险：当前建议先降低 {reduce_ratio * 100:.0f}% 仓位，再按恢复/失效条件动态复核。")
     if current_profit_pct < 0 and state == "NORMAL_HOLD":
         state = "LOSS_OBSERVATION"
         action = "观察但禁止加仓"

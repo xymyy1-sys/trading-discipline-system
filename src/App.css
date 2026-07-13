@@ -5096,6 +5096,20 @@ h3 {
   background: radial-gradient(circle at top, #1b2a25 0, #0b1210 55%, #070b0a 100%);
   color: #e8f0ec;
 }
+.command-list article.risk-high { border-left: 4px solid #dc2626; padding-left: 10px; background: color-mix(in srgb, #dc2626 6%, transparent); }
+.command-list article.risk-high > span { color: #dc2626; font-weight: 800; }
+.command-list article.risk-medium { border-left: 4px solid #d97706; padding-left: 10px; background: color-mix(in srgb, #d97706 5%, transparent); }
+.command-list article.risk-medium > span { color: #b45309; font-weight: 700; }
+.command-list article.risk-low { border-left: 4px solid #eab308; padding-left: 10px; }
+.command-list article details { grid-column: 2 / -1; font-size: 12px; }
+.command-list article summary { cursor: pointer; color: var(--accent); }
+.decision-basis { display: grid; gap: 6px; margin-top: 8px; padding: 10px; border-radius: 7px; background: var(--surface); }
+.decision-basis p { margin: 0; color: var(--ink-muted); line-height: 1.5; }
+.market-evidence-link { width: fit-content; padding: 0; border: 0; background: transparent; color: var(--accent); cursor: pointer; text-align: left; }
+.market-evidence-panel { margin-top: 12px; padding: 14px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); }
+.market-evidence-panel h4 { margin: 0 0 8px; }
+.market-evidence-panel p { margin: 6px 0; line-height: 1.55; }
+.market-evidence-panel small { display: block; color: var(--ink-muted); }
 
 .rank-evidence {
   grid-column: 2 / 4;
