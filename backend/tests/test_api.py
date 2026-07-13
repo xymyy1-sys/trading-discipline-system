@@ -47,6 +47,30 @@ def test_expectation_chain_is_append_only_and_has_scenarios(client, monkeypatch)
     assert [item["version"] for item in data["revisions"]] == [1, 2]
     assert len(data["revisions"][-1]["scenarios"]) == 5
 
+
+def test_close_baseline_enters_expectation_revision_chain(db_session, monkeypatch):
+    from app.api.routes import stocks
+    from app.models.trading import ExpectationRevision, ExpectationScenario, Holding, VolumePriceSnapshot
+    from app.services.next_day_expectations import generate_next_day_expectations
+
+    monkeypatch.setattr(stocks, "watchlist_recommendations", lambda db: [])
+    db_session.add(Holding(
+        code="600006", name="收盘基线", quantity=100, cost_price=10,
+        current_price=10.5, total_asset=100000, position_type="趋势持仓",
+    ))
+    db_session.add(VolumePriceSnapshot(
+        trade_date="2026-07-13", code="600006", name="收盘基线", stage="收盘",
+        price=10.5, change_pct=5, vwap=10.2, vwap_reliable=True,
+        price_vs_vwap=2.94, high_drawdown=2, pattern="量价健康", data_quality="realtime",
+    ))
+    db_session.commit()
+
+    assert generate_next_day_expectations(db_session) == 1
+    revision = db_session.query(ExpectationRevision).filter(ExpectationRevision.code == "600006").one()
+    assert revision.trigger == "close_baseline"
+    assert revision.volume_price_state == "量价健康"
+    assert db_session.query(ExpectationScenario).filter(ExpectationScenario.revision_id == revision.id).count() == 5
+
 def test_market_sector_flow(client):
     response = client.get("/api/market/sector-flow")
     assert response.status_code == 200

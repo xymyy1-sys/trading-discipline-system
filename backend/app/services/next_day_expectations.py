@@ -5,7 +5,7 @@ from datetime import date, datetime, timedelta
 
 from sqlalchemy.orm import Session
 
-from app.api.helpers.decision import EXPECTATION_DEFAULTS
+from app.api.helpers.decision import EXPECTATION_DEFAULTS, _persist_expectation_revision
 from app.models.trading import ExpectationSnapshot, Holding, NextDayPlan, VolumePriceSnapshot
 
 
@@ -93,6 +93,8 @@ def generate_next_day_expectations(db: Session) -> int:
         row.suggestion = "次日先用集合竞价验证开盘区间：高于区间上沿为超预期/弱转强候选，落在区间内为符合预期，低于下沿则转弱；再用开盘5分钟、VWAP和量价承接持续修正。"
         row.created_at = datetime.now()
         db.add(row)
+        db.flush()
+        _persist_expectation_revision(db, row, trigger="close_baseline")
         count += 1
     db.commit()
     return count
