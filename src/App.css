@@ -5200,6 +5200,7 @@ h3 {
 .cockpit-overview h3, .holding-cockpit h3 { display: flex; align-items: center; gap: 7px; margin: 0; }
 .cockpit-market-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; }
 .cockpit-market-grid > div { display: grid; gap: 5px; padding: 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); }
+.cockpit-market-grid > div.market-state-danger { border-color: color-mix(in srgb, #dc2626 55%, var(--line)); background: color-mix(in srgb, #dc2626 6%, var(--panel)); }
 .cockpit-market-grid span, .cockpit-market-grid small { color: var(--ink-muted); }
 .cockpit-market-grid strong { font-size: 18px; }
 .holding-cockpit-tabs { display: flex; gap: 8px; overflow-x: auto; padding-bottom: 10px; }
@@ -5217,8 +5218,70 @@ h3 {
 .cockpit-timeline { display: grid; gap: 7px; }
 .cockpit-timeline > div { display: grid; grid-template-columns: 70px 190px minmax(0, 1fr); gap: 10px; padding: 8px; border-left: 2px solid var(--accent); background: var(--surface); }
 .cockpit-timeline time, .cockpit-timeline span { color: var(--ink-muted); }
+.global-evidence-panel, .opportunity-radar-panel { grid-column: 1 / -1; }
+.global-evidence-panel > header, .opportunity-radar-panel > header { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 10px; }
+.global-evidence-panel h3, .opportunity-radar-panel h3 { display: flex; align-items: center; gap: 7px; margin: 0; }
+.global-evidence-summary, .opportunity-discipline { margin: 0 0 12px; padding: 10px 12px; border-left: 3px solid var(--accent); background: var(--surface); line-height: 1.6; }
+.global-cue-groups { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
+.global-cue-groups > div { display: grid; align-content: start; gap: 7px; padding: 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); }
+.global-cue-groups h4 { margin: 0 0 3px; }
+.global-cue-groups article { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 3px 10px; padding: 8px 9px; border-left: 3px solid var(--line); background: var(--surface); }
+.global-cue-groups article small { grid-column: 1 / -1; color: var(--ink-muted); }
+.global-cue-groups article.cue-critical { border-left-color: #dc2626; background: color-mix(in srgb, #dc2626 6%, var(--surface)); }
+.global-cue-groups article.cue-critical strong { color: #dc2626; }
+.global-cue-groups article.cue-negative strong { color: var(--down); }
+.global-cue-groups article.cue-negative { border-left-color: color-mix(in srgb, var(--down) 60%, var(--line)); }
+.global-cue-groups article.cue-positive { border-left-color: var(--up); }
+.global-cue-groups article.cue-positive strong { color: var(--up); }
+.global-cue-groups article.cue-unavailable { opacity: .72; border-left-style: dashed; }
+.global-data-note { display: block; margin-top: 6px; color: var(--ink-muted); }
+.opportunity-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 10px; }
+.opportunity-grid > article { display: grid; align-content: start; gap: 7px; padding: 12px; border: 1px solid var(--line); border-left: 4px solid var(--warn); border-radius: 8px; background: var(--panel); }
+.opportunity-grid > article > header { display: flex; justify-content: space-between; gap: 8px; }
+.opportunity-grid > article > a, .opportunity-grid > article > strong { color: var(--ink); font-weight: 750; line-height: 1.45; }
+.opportunity-grid > article > small { color: var(--ink-muted); }
+.opportunity-grid > article > p { margin: 0; line-height: 1.55; }
+.opportunity-grid > article.opportunity-confirmed { border-left-color: var(--up); }
+.opportunity-grid > article.opportunity-invalidated { border-left-color: var(--down); background: color-mix(in srgb, var(--down) 5%, var(--panel)); }
+.opportunity-grid > article.opportunity-decayed { border-left-color: var(--ink-muted); opacity: .78; }
+.opportunity-action { color: var(--accent-strong); font-size: 12px; }
+.reflexivity-panel { grid-column: 1 / -1; }
+.reflexivity-panel > header { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 12px; }
+.reflexivity-panel h3 { display: flex; align-items: center; gap: 7px; margin: 0; }
+.reflexivity-current { display: grid; grid-template-columns: 1.3fr 1fr 1fr; gap: 10px; margin-bottom: 12px; padding: 12px; border: 1px solid var(--line); border-left: 4px solid var(--warn); border-radius: 8px; background: var(--surface); }
+.reflexivity-current > div { display: grid; gap: 4px; }
+.reflexivity-current span { color: var(--ink-muted); font-size: 12px; }
+.reflexivity-current.reflexivity-risk { border-left-color: #dc2626; background: color-mix(in srgb, #dc2626 5%, var(--surface)); }
+.reflexivity-current.reflexivity-missing { border-left-color: #d97706; background: color-mix(in srgb, #d97706 5%, var(--surface)); }
+.reflexivity-current.reflexivity-positive { border-left-color: var(--up); background: color-mix(in srgb, var(--up) 5%, var(--surface)); }
+.reflexivity-current.reflexivity-watch { border-left-color: var(--info); }
+.reflexivity-scenarios { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; }
+.reflexivity-scenarios > article { display: grid; align-content: start; gap: 8px; padding: 12px; border: 1px solid var(--line); border-top: 3px solid var(--line); border-radius: 8px; background: var(--panel); }
+.reflexivity-scenarios > article.active { border-color: var(--accent); box-shadow: 0 3px 14px rgb(15 23 42 / 7%); }
+.reflexivity-scenarios > article.active.reflexivity-risk { border-top-color: #dc2626; }
+.reflexivity-scenarios > article.active.reflexivity-missing { border-top-color: #d97706; border-color: color-mix(in srgb, #d97706 50%, var(--line)); }
+.reflexivity-scenarios > article.active.reflexivity-positive { border-top-color: var(--up); }
+.reflexivity-scenarios > article.active.reflexivity-watch { border-top-color: var(--info); }
+.reflexivity-scenarios article > header { display: flex; justify-content: space-between; gap: 8px; }
+.reflexivity-scenarios article > header span, .reflexivity-scenarios small { color: var(--ink-muted); font-size: 11px; }
+.reflexivity-scenarios p { margin: 0; line-height: 1.55; }
+.reflexivity-scenarios details { padding-top: 6px; border-top: 1px dashed var(--line); }
+.reflexivity-scenarios summary { cursor: pointer; color: var(--accent-strong); font-size: 12px; }
+.reflexivity-method { margin: 12px 0 0; color: var(--ink-muted); font-size: 12px; line-height: 1.55; }
+.cockpit-reflexivity-card { grid-column: 1 / -1 !important; border-left: 4px solid var(--warn) !important; }
+.cockpit-reflexivity-card.reflexivity-risk { border-left-color: #dc2626 !important; background: color-mix(in srgb, #dc2626 4%, var(--panel)); }
+.cockpit-reflexivity-card.reflexivity-missing { border-left-color: #d97706 !important; background: color-mix(in srgb, #d97706 4%, var(--panel)); }
+.cockpit-reflexivity-card.reflexivity-positive { border-left-color: var(--up) !important; }
+.cockpit-reflexivity-card.reflexivity-watch { border-left-color: var(--info) !important; }
+.stock-reflexivity-summary { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; }
+.stock-reflexivity-summary p { padding: 9px; border-radius: 7px; background: var(--surface); }
+.stock-reflexivity-evidence { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; margin-top: 10px; }
+.stock-reflexivity-evidence > div { padding: 10px; border: 1px solid var(--line); border-radius: 7px; }
+.stock-reflexivity-discipline { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 8px; }
+.risk-text { color: #dc2626 !important; }
 @media (max-width: 980px) { .cockpit-market-grid, .cockpit-detail-grid { grid-template-columns: 1fr 1fr; }.cockpit-evidence-card, .cockpit-timeline-card { grid-column: span 2; } }
-@media (max-width: 680px) { .cockpit-market-grid, .cockpit-detail-grid, .cockpit-evidence-card { grid-template-columns: 1fr; }.cockpit-evidence-card, .cockpit-timeline-card, .cockpit-evidence-card h4 { grid-column: 1; }.cockpit-timeline > div { grid-template-columns: 60px 1fr; }.cockpit-timeline span { grid-column: 1 / -1; } }
+@media (max-width: 980px) { .global-cue-groups, .reflexivity-scenarios { grid-template-columns: 1fr 1fr; }.global-cue-groups > div:last-child { grid-column: 1 / -1; }.reflexivity-current, .stock-reflexivity-summary { grid-template-columns: 1fr 1fr; } }
+@media (max-width: 680px) { .cockpit-market-grid, .cockpit-detail-grid, .cockpit-evidence-card, .global-cue-groups, .reflexivity-current, .reflexivity-scenarios, .stock-reflexivity-summary, .stock-reflexivity-evidence, .stock-reflexivity-discipline { grid-template-columns: 1fr; }.cockpit-evidence-card, .cockpit-timeline-card, .cockpit-evidence-card h4, .global-cue-groups > div:last-child { grid-column: 1; }.cockpit-timeline > div { grid-template-columns: 60px 1fr; }.cockpit-timeline span { grid-column: 1 / -1; } }
 
 /* Intraday cockpit: dense information hierarchy without spreadsheet-like whitespace. */
 .holding-cockpit {
@@ -5328,12 +5391,10 @@ h3 {
 .privacy-mode .holding-decision-page .execution-line-grid span,
 .privacy-mode .holding-decision-page .decision-t-box p,
 .privacy-mode .holding-decision-page .decision-timeline p,
-.privacy-mode .holding-cockpit .cockpit-detail-grid p,
-.privacy-mode .holding-cockpit .cockpit-detail-grid small,
+.privacy-mode .private-value,
+.privacy-mode .sensitive-evidence,
 .privacy-mode .active-recommendations small,
-.privacy-mode .portfolio-exposure-panel strong,
-.privacy-mode .evidence-trajectory .trajectory-summary-latest span,
-.privacy-mode .evidence-trajectory .trajectory-summary-latest small {
+.privacy-mode .portfolio-exposure-panel strong {
   font-size: 0 !important;
   color: transparent !important;
   text-shadow: none !important;
@@ -5352,12 +5413,10 @@ h3 {
 .privacy-mode .holding-decision-page .execution-line-grid span::after,
 .privacy-mode .holding-decision-page .decision-t-box p::after,
 .privacy-mode .holding-decision-page .decision-timeline p::after,
-.privacy-mode .holding-cockpit .cockpit-detail-grid p::after,
-.privacy-mode .holding-cockpit .cockpit-detail-grid small::after,
+.privacy-mode .private-value::after,
+.privacy-mode .sensitive-evidence::after,
 .privacy-mode .active-recommendations small::after,
-.privacy-mode .portfolio-exposure-panel strong::after,
-.privacy-mode .evidence-trajectory .trajectory-summary-latest span::after,
-.privacy-mode .evidence-trajectory .trajectory-summary-latest small::after {
+.privacy-mode .portfolio-exposure-panel strong::after {
   content: '******';
   display: inline-block;
   color: var(--ink) !important;
@@ -5441,3 +5500,62 @@ h3 {
 .portfolio-exposure-grid article > div { position: relative; display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; margin-top: 10px; padding-bottom: 7px; overflow: hidden; }
 .portfolio-exposure-grid article > div i { position: absolute; bottom: 0; left: 0; height: 3px; border-radius: 2px; background: #3b82f6; }
 @media (max-width: 900px) { .portfolio-exposure-grid { grid-template-columns: 1fr; } }
+
+.workspace-module-error {
+  display: grid;
+  justify-items: start;
+  gap: 8px;
+  margin: 12px 0;
+  padding: 18px;
+  border: 1px solid color-mix(in srgb, #dc2626 35%, var(--line));
+  border-left: 4px solid #dc2626;
+  border-radius: 10px;
+  background: color-mix(in srgb, #dc2626 5%, var(--panel));
+}
+.workspace-module-error span { color: var(--ink-muted); }
+.workspace-module-error button { padding: 8px 12px; border: 1px solid var(--line); border-radius: 7px; background: var(--ink); color: var(--panel); cursor: pointer; }
+
+/* Keep responsive cockpit rules last so later feature styles cannot restore desktop grids. */
+@media (max-width: 1100px) {
+  .cockpit-market-grid,
+  .global-cue-groups,
+  .reflexivity-scenarios { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .cockpit-detail-grid { grid-template-columns: repeat(12, minmax(0, 1fr)); }
+  .cockpit-detail-grid > article { grid-column: span 6; }
+  .cockpit-detail-grid > article:nth-child(3),
+  .cockpit-detail-grid > .cockpit-reflexivity-card,
+  .cockpit-evidence-card,
+  .cockpit-timeline-card { grid-column: 1 / -1 !important; }
+  .reflexivity-current,
+  .stock-reflexivity-summary { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .global-cue-groups > div:last-child { grid-column: 1 / -1; }
+}
+
+@media (max-width: 680px) {
+  .cockpit-overview > header,
+  .holding-cockpit > header,
+  .reflexivity-panel > header,
+  .global-evidence-panel > header,
+  .opportunity-radar-panel > header { align-items: flex-start; flex-direction: column; }
+  .cockpit-market-grid,
+  .cockpit-detail-grid,
+  .cockpit-evidence-card,
+  .global-cue-groups,
+  .reflexivity-current,
+  .reflexivity-scenarios,
+  .stock-reflexivity-summary,
+  .stock-reflexivity-evidence,
+  .stock-reflexivity-discipline { grid-template-columns: minmax(0, 1fr); }
+  .cockpit-detail-grid { padding: 12px; }
+  .cockpit-detail-grid > article,
+  .cockpit-detail-grid > article:nth-child(3),
+  .cockpit-detail-grid > .cockpit-reflexivity-card,
+  .cockpit-evidence-card,
+  .cockpit-timeline-card,
+  .cockpit-evidence-card h4,
+  .global-cue-groups > div:last-child { grid-column: 1 !important; }
+  .holding-cockpit-tabs { padding-inline: 12px; }
+  .holding-cockpit-tabs button { min-width: 132px; }
+  .cockpit-timeline > div { grid-template-columns: 58px minmax(0, 1fr); }
+  .cockpit-timeline span { grid-column: 2; }
+}

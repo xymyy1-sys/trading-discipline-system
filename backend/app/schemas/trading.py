@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Any
 
 from pydantic import BaseModel, Field
 
@@ -984,6 +985,238 @@ class MarketGradeOut(BaseModel):
     single_position_limit: str
     reasons: list[str]
     risk_warnings: list[str]
+
+
+class MarketIndexStateOut(BaseModel):
+    code: str
+    name: str
+    current: float | None = None
+    change_pct: float | None = None
+    amount_yi: float | None = None
+    open_price: float | None = None
+    high_price: float | None = None
+    low_price: float | None = None
+    prev_close: float | None = None
+    intraday_vwap: float | None = None
+    above_vwap: bool | None = None
+    high_drawdown_pct: float | None = None
+    low_rebound_pct: float | None = None
+    data_quality: str = "missing"
+    source: str = ""
+
+
+class MarketSectorEvidenceOut(BaseModel):
+    name: str
+    change_pct: float
+    net_inflow: float
+    main_inflow: float
+    rank: int
+    above_vwap: bool | None = None
+
+
+class MarketRegimeMetrics(BaseModel):
+    active_stock_count: int | None = None
+    up_count: int | None = None
+    down_count: int | None = None
+    flat_count: int | None = None
+    up_5pct_count: int | None = None
+    down_5pct_count: int | None = None
+    limit_up_count: int | None = None
+    limit_down_count: int | None = None
+    median_change_pct: float | None = None
+    advance_ratio: float | None = None
+    turnover_yi: float | None = None
+    projected_turnover_yi: float | None = None
+    previous_turnover_yi: float | None = None
+    avg5_turnover_yi: float | None = None
+    volume_ratio_previous: float | None = None
+    volume_ratio_5d: float | None = None
+    market_main_net_inflow_yi: float | None = None
+    index_composite_change_pct: float | None = None
+    index_above_vwap_count: int | None = None
+    index_valid_count: int = 0
+    positive_sector_count: int | None = None
+    negative_sector_count: int | None = None
+    positive_sector_ratio: float | None = None
+    sector_above_vwap_ratio: float | None = None
+    top3_inflow_share: float | None = None
+
+
+class MarketRegimeClassificationOut(BaseModel):
+    regime_code: str
+    regime_name: str
+    risk_level: str
+    opportunity_score: int
+    loss_score: int
+    liquidity_score: int
+    confidence: float
+    allowed_actions: list[str] = Field(default_factory=list)
+    forbidden_actions: list[str] = Field(default_factory=list)
+    evidence: list[str] = Field(default_factory=list)
+    missing_fields: list[str] = Field(default_factory=list)
+
+
+class MarketRegimeOut(MarketRegimeMetrics):
+    id: int | None = None
+    trade_date: str
+    captured_at: datetime
+    source: str
+    freshness_seconds: int = 0
+    data_quality: str
+    coverage_ratio: float
+    confidence: float
+    indices: list[MarketIndexStateOut] = Field(default_factory=list)
+    strongest_sectors: list[MarketSectorEvidenceOut] = Field(default_factory=list)
+    weakest_sectors: list[MarketSectorEvidenceOut] = Field(default_factory=list)
+    regime_code: str
+    regime_name: str
+    risk_level: str
+    opportunity_score: int
+    loss_score: int
+    liquidity_score: int
+    allowed_actions: list[str] = Field(default_factory=list)
+    forbidden_actions: list[str] = Field(default_factory=list)
+    evidence: list[str] = Field(default_factory=list)
+    missing_fields: list[str] = Field(default_factory=list)
+    notes: list[str] = Field(default_factory=list)
+
+
+class ReflexivityCrowdingOut(BaseModel):
+    side: str
+    label: str
+    score: float
+
+
+class ReflexivityMarketGateOut(BaseModel):
+    scenario: str = "UNKNOWN"
+    risk_off: bool = False
+    new_position_allowed: bool = False
+
+
+class ReflexivityScenarioOut(BaseModel):
+    code: str
+    label: str
+    match_score: float
+    evidence: list[str] = Field(default_factory=list)
+    counter_evidence: list[str] = Field(default_factory=list)
+    allowed_actions: list[str] = Field(default_factory=list)
+    forbidden_actions: list[str] = Field(default_factory=list)
+    next_validation_points: list[str] = Field(default_factory=list)
+
+
+class ReflexivityAssessmentOut(BaseModel):
+    level: str
+    code: str = ""
+    name: str = ""
+    as_of: datetime | None = None
+    data_quality: str = "missing"
+    market_regime_code: str = "UNKNOWN"
+    market_regime_name: str = "数据不足"
+    current_scenario: str
+    current_scenario_label: str
+    scenario_match_score: float | None = None
+    crowding: ReflexivityCrowdingOut
+    confidence: float
+    current_evidence: list[str] = Field(default_factory=list)
+    current_counter_evidence: list[str] = Field(default_factory=list)
+    allowed_actions: list[str] = Field(default_factory=list)
+    forbidden_actions: list[str] = Field(default_factory=list)
+    next_validation_points: list[str] = Field(default_factory=list)
+    missing_fields: list[str] = Field(default_factory=list)
+    market_gate: ReflexivityMarketGateOut | None = None
+    hard_stop_triggered: bool = False
+    scenarios: list[ReflexivityScenarioOut] = Field(default_factory=list)
+    methodology_note: str
+
+
+class GlobalQuoteOut(BaseModel):
+    symbol: str
+    name: str
+    market: str
+    status: str
+    price: float | None = None
+    change: float | None = None
+    change_pct: float | None = None
+    previous_close: float | None = None
+    open_price: float | None = None
+    high: float | None = None
+    low: float | None = None
+    volume: float | None = None
+    amount: float | None = None
+    as_of: str | None = None
+    source: str = ""
+    freshness: str = "unknown"
+    theme: str | None = None
+    proxy_description: str | None = None
+    note: str = ""
+
+
+class GlobalQuoteEnvelopeOut(GlobalQuoteOut):
+    group: str
+
+
+class GlobalMarketOut(BaseModel):
+    generated_at: str
+    as_of: str
+    quality: str
+    data_quality: str
+    sources: list[str] = Field(default_factory=list)
+    source: list[str] = Field(default_factory=list)
+    notes: list[str] = Field(default_factory=list)
+    kis: dict[str, Any] = Field(default_factory=dict)
+    korea_indices: list[GlobalQuoteOut] = Field(default_factory=list)
+    korea_equities: list[GlobalQuoteOut] = Field(default_factory=list)
+    us_indices: list[GlobalQuoteOut] = Field(default_factory=list)
+    us_sector_rank: list[GlobalQuoteOut] = Field(default_factory=list)
+    items: list[GlobalQuoteEnvelopeOut] = Field(default_factory=list)
+
+
+class OpportunitySectorAssessmentOut(BaseModel):
+    sector: str
+    status: str
+    confirmation_score: int
+    funds_confirmed: bool
+    price_confirmed: bool
+    vwap_confirmed: bool
+    evidence: list[str] = Field(default_factory=list)
+    counter_evidence: list[str] = Field(default_factory=list)
+    missing: list[str] = Field(default_factory=list)
+    source: str = ""
+    captured_at: str | None = None
+
+
+class OpportunityRadarItemOut(BaseModel):
+    id: str
+    title: str
+    source: str
+    published_at: str
+    age_minutes: int | None = None
+    sectors: list[str] = Field(default_factory=list)
+    related_stocks: list[str] = Field(default_factory=list)
+    status: str
+    confirmation_score: int
+    primary_sector: str | None = None
+    evidence: list[str] = Field(default_factory=list)
+    counter_evidence: list[str] = Field(default_factory=list)
+    missing: list[str] = Field(default_factory=list)
+    sector_assessments: list[OpportunitySectorAssessmentOut] = Field(default_factory=list)
+    action: str
+    trade_constraint: str
+    buy_signal: bool = False
+    url: str | None = None
+    expires_at: str | None = None
+
+
+class OpportunityRadarOut(BaseModel):
+    updated_at: str
+    as_of: str
+    source: list[str] = Field(default_factory=list)
+    data_quality: str
+    items: list[OpportunityRadarItemOut] = Field(default_factory=list)
+    counts: dict[str, int] = Field(default_factory=dict)
+    discipline: str
+    notes: list[str] = Field(default_factory=list)
+    available_sector_evidence: int = 0
 
 
 class PreTradeCheckIn(BaseModel):

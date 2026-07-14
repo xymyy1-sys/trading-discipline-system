@@ -50,6 +50,211 @@ export interface ThemeRadar {
   notes: string[];
 }
 
+export interface MarketIndexState {
+  code: string;
+  name: string;
+  current: number | null;
+  change_pct: number | null;
+  amount_yi: number | null;
+  open_price: number | null;
+  high_price: number | null;
+  low_price: number | null;
+  prev_close: number | null;
+  intraday_vwap: number | null;
+  above_vwap: boolean | null;
+  high_drawdown_pct: number | null;
+  low_rebound_pct: number | null;
+  data_quality: string;
+  source: string;
+}
+
+export interface MarketSectorEvidence {
+  name: string;
+  change_pct: number;
+  net_inflow: number;
+  main_inflow: number;
+  rank: number;
+  above_vwap: boolean | null;
+}
+
+export interface MarketRegime {
+  id: number | null;
+  trade_date: string;
+  captured_at: string;
+  source: string;
+  freshness_seconds: number;
+  data_quality: string;
+  coverage_ratio: number;
+  confidence: number;
+  active_stock_count: number | null;
+  up_count: number | null;
+  down_count: number | null;
+  flat_count: number | null;
+  up_5pct_count: number | null;
+  down_5pct_count: number | null;
+  limit_up_count: number | null;
+  limit_down_count: number | null;
+  median_change_pct: number | null;
+  advance_ratio: number | null;
+  turnover_yi: number | null;
+  projected_turnover_yi: number | null;
+  previous_turnover_yi: number | null;
+  avg5_turnover_yi: number | null;
+  volume_ratio_previous: number | null;
+  volume_ratio_5d: number | null;
+  market_main_net_inflow_yi: number | null;
+  index_composite_change_pct: number | null;
+  index_above_vwap_count: number | null;
+  index_valid_count: number;
+  positive_sector_count: number | null;
+  negative_sector_count: number | null;
+  positive_sector_ratio: number | null;
+  sector_above_vwap_ratio: number | null;
+  top3_inflow_share: number | null;
+  indices: MarketIndexState[];
+  strongest_sectors: MarketSectorEvidence[];
+  weakest_sectors: MarketSectorEvidence[];
+  regime_code: string;
+  regime_name: string;
+  risk_level: string;
+  opportunity_score: number;
+  loss_score: number;
+  liquidity_score: number;
+  allowed_actions: string[];
+  forbidden_actions: string[];
+  evidence: string[];
+  missing_fields: string[];
+  notes: string[];
+}
+
+export interface GlobalQuote {
+  symbol: string;
+  name: string;
+  market: string;
+  status: string;
+  price: number | null;
+  change: number | null;
+  change_pct: number | null;
+  previous_close: number | null;
+  open_price: number | null;
+  high: number | null;
+  low: number | null;
+  volume: number | null;
+  amount: number | null;
+  as_of: string | null;
+  source: string;
+  freshness: string;
+  theme: string | null;
+  proxy_description: string | null;
+  note: string;
+}
+
+export interface GlobalMarketCues {
+  generated_at: string;
+  as_of: string;
+  quality: string;
+  data_quality: string;
+  sources: string[];
+  source: string[];
+  notes: string[];
+  korea_indices: GlobalQuote[];
+  korea_equities: GlobalQuote[];
+  us_indices: GlobalQuote[];
+  us_sector_rank: GlobalQuote[];
+}
+
+export interface OpportunitySectorAssessment {
+  sector: string;
+  status: string;
+  confirmation_score: number;
+  funds_confirmed: boolean;
+  price_confirmed: boolean;
+  vwap_confirmed: boolean;
+  evidence: string[];
+  counter_evidence: string[];
+  missing: string[];
+  source: string;
+  captured_at: string | null;
+}
+
+export interface OpportunityRadarItem {
+  id: string;
+  title: string;
+  source: string;
+  published_at: string;
+  age_minutes: number | null;
+  sectors: string[];
+  related_stocks: string[];
+  status: string;
+  confirmation_score: number;
+  primary_sector: string | null;
+  evidence: string[];
+  counter_evidence: string[];
+  missing: string[];
+  sector_assessments: OpportunitySectorAssessment[];
+  action: string;
+  trade_constraint: string;
+  buy_signal: boolean;
+  url: string | null;
+  expires_at: string | null;
+}
+
+export interface OpportunityRadar {
+  updated_at: string;
+  as_of: string;
+  source: string[];
+  data_quality: string;
+  items: OpportunityRadarItem[];
+  counts: Record<string, number>;
+  discipline: string;
+  notes: string[];
+  available_sector_evidence: number;
+}
+
+export interface ReflexivityCrowding {
+  side: 'SELL_PRESSURE' | 'LONG_CHASING';
+  label: string;
+  score: number;
+}
+
+export interface ReflexivityScenario {
+  code: string;
+  label: string;
+  match_score: number;
+  evidence: string[];
+  counter_evidence: string[];
+  allowed_actions: string[];
+  forbidden_actions: string[];
+  next_validation_points: string[];
+}
+
+export interface ReflexivityMarketGate {
+  scenario: string;
+  risk_off: boolean;
+  new_position_allowed: boolean;
+}
+
+export interface ReflexivityAssessment {
+  level: 'MARKET' | 'STOCK';
+  code?: string;
+  name?: string;
+  current_scenario: string;
+  current_scenario_label: string;
+  scenario_match_score: number | null;
+  crowding: ReflexivityCrowding;
+  confidence: number;
+  market_gate?: ReflexivityMarketGate;
+  hard_stop_triggered?: boolean;
+  missing_fields: string[];
+  current_evidence: string[];
+  current_counter_evidence: string[];
+  allowed_actions: string[];
+  forbidden_actions: string[];
+  next_validation_points: string[];
+  scenarios: ReflexivityScenario[];
+  methodology_note: string;
+}
+
 export interface SectorConstituent {
   code: string;
   name: string;

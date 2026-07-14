@@ -11,17 +11,24 @@ from app.schemas.trading import (
     LimitUpLadderOut,
     ThemeRadarOut,
     MarketGradeOut,
+    MarketRegimeOut,
+    ReflexivityAssessmentOut,
+    GlobalMarketOut,
     MarketSeesawOut,
     CapitalRotationOut,
     CapitalRotationAssessment,
 )
 from app.services.market_data import MarketDataProvider
+from app.services.market_regime import get_market_regime
+from app.api.helpers.reflexivity import build_market_reflexivity
+from app.services.global_market import GlobalMarketService
 from app.services.rules import grade_market
 from app.api.helpers.seesaw import _market_seesaw_monitor
 from app.core.limiter import limiter
 
 router = APIRouter()
 market_provider = MarketDataProvider()
+global_market_service = GlobalMarketService(cache_ttl_seconds=300)
 
 @router.get("/market/sector-flow", response_model=SectorFlowOut)
 @limiter.limit("30/minute")
@@ -112,6 +119,43 @@ def theme_radar(
     force_refresh: bool = False
 ) -> ThemeRadarOut:
     return market_provider.theme_radar(force_refresh=force_refresh)
+
+
+@router.get("/market/regime", response_model=MarketRegimeOut)
+@limiter.limit("12/minute")
+def market_regime(
+    request: Request,
+    force_refresh: bool = False,
+    db: Session = Depends(get_db),
+) -> MarketRegimeOut:
+    """Return the persisted, evidence-backed full A-share market regime."""
+    return get_market_regime(db, force_refresh=force_refresh)
+
+
+@router.get("/market/reflexivity", response_model=ReflexivityAssessmentOut)
+@limiter.limit("12/minute")
+def market_reflexivity(
+    request: Request,
+    force_refresh: bool = False,
+    db: Session = Depends(get_db),
+) -> ReflexivityAssessmentOut:
+    """Return falsifiable market crowding scenarios from persisted evidence."""
+    regime = get_market_regime(db, force_refresh=force_refresh)
+    return ReflexivityAssessmentOut.model_validate(
+        build_market_reflexivity(db, regime)
+    )
+
+
+@router.get("/market/global-cues", response_model=GlobalMarketOut)
+@limiter.limit("12/minute")
+def global_market_cues(
+    request: Request,
+    force_refresh: bool = False,
+) -> GlobalMarketOut:
+    """Return traceable overseas evidence; unavailable quotes remain null."""
+    return GlobalMarketOut.model_validate(
+        global_market_service.snapshot(force_refresh=force_refresh)
+    )
 
 @router.get("/market/grade", response_model=MarketGradeOut)
 def market_grade(

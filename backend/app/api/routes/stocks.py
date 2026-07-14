@@ -19,6 +19,7 @@ from app.api.helpers.decision import (
     minute_evidence_timeline,
 )
 from app.api.helpers.volume_price import build_volume_price_snapshot
+from app.api.helpers.reflexivity import build_market_reflexivity, build_stock_reflexivity
 from app.core.database import get_db
 from app.models.trading import DataCaptureSnapshot, ExpectationRevision, ExpectationRule, ExpectationScenario, ExpectationSnapshot, Holding, IntradayEvidenceEvent, NextDayPlan, PositionExecutionState, VolumePriceSnapshot, WatchlistEntry
 from app.schemas.trading import (
@@ -39,7 +40,9 @@ from app.schemas.trading import (
     WatchlistEntryIn,
     WatchlistEntryOut,
     ReplayReportOut,
+    ReflexivityAssessmentOut,
 )
+from app.services.market_regime import get_market_regime
 
 router = APIRouter()
 
@@ -576,6 +579,20 @@ def upsert_expectation_rule(payload: ExpectationRuleIn, db: Session = Depends(ge
 @router.get("/stocks/{code}/decision-card", response_model=StockDecisionCardOut)
 def get_stock_decision_card(code: str, db: Session = Depends(get_db)) -> StockDecisionCardOut:
     return decision_card(db, code)
+
+
+@router.get("/stocks/{code}/reflexivity", response_model=ReflexivityAssessmentOut)
+def get_stock_reflexivity(
+    code: str,
+    force_refresh: bool = False,
+    db: Session = Depends(get_db),
+) -> ReflexivityAssessmentOut:
+    card = decision_card(db, code)
+    regime = get_market_regime(db, force_refresh=force_refresh)
+    market_assessment = build_market_reflexivity(db, regime)
+    return ReflexivityAssessmentOut.model_validate(
+        build_stock_reflexivity(card, market_assessment, regime)
+    )
 
 
 @router.get("/stocks/{code}/expectation", response_model=ExpectationSnapshotOut)

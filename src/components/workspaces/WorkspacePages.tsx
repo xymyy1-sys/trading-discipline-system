@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type ComponentType, type ReactNode } from 'react'
+import { Component, useEffect, useMemo, useRef, useState, type ComponentType, type ErrorInfo, type ReactNode } from 'react'
 import {
   Activity,
   AlertTriangle,
@@ -12,7 +12,21 @@ import {
 import { API_BASE } from '../../api'
 import { chineseEvidence, chineseLabel } from '../../labels'
 
-import type { ActionRecommendation, HoldingOut, InformationItem, IntradayEvidenceEvent, IntradayReview, MarketSeesaw, PositionExecutionState, StockDecisionCard, ThemeRadar } from '../../types'
+import type {
+  ActionRecommendation,
+  GlobalMarketCues,
+  HoldingOut,
+  InformationItem,
+  IntradayEvidenceEvent,
+  IntradayReview,
+  MarketRegime,
+  MarketSeesaw,
+  OpportunityRadar,
+  PositionExecutionState,
+  ReflexivityAssessment,
+  StockDecisionCard,
+  ThemeRadar,
+} from '../../types'
 import AiInsightButton from '../AiInsightButton'
 
 type WorkspaceModule = {
@@ -31,6 +45,32 @@ type WorkspacePageProps = {
   modules: WorkspaceModule[]
   defaultModule?: string
   children?: ReactNode
+}
+
+class WorkspaceModuleErrorBoundary extends Component<
+  { children: ReactNode; moduleName: string },
+  { failed: boolean }
+> {
+  state = { failed: false }
+
+  componentDidCatch(error: Error, info: ErrorInfo) {
+    console.error(`工作区模块“${this.props.moduleName}”渲染失败`, error, info)
+  }
+
+  render() {
+    if (!this.state.failed) return this.props.children
+    return (
+      <div className="workspace-module-error" role="alert">
+        <strong>{this.props.moduleName}暂时无法显示</strong>
+        <span>已隔离本模块错误，其他菜单仍可继续使用。</span>
+        <button type="button" onClick={() => this.setState({ failed: false })}>重试本模块</button>
+      </div>
+    )
+  }
+
+  static getDerivedStateFromError() {
+    return { failed: true }
+  }
 }
 
 export function WorkspacePage({
@@ -91,7 +131,9 @@ export function WorkspacePage({
       <section className="workspace-module">
         {modules.map(module => visitedModules.has(module.key) ? (
           <div key={module.key} hidden={module.key !== selected?.key}>
-            <module.Component />
+            <WorkspaceModuleErrorBoundary moduleName={module.label}>
+              <module.Component />
+            </WorkspaceModuleErrorBoundary>
           </div>
         ) : null)}
       </section>
@@ -113,27 +155,54 @@ export function TodayDecisionSummary() {
   const [streamReconnects, setStreamReconnects] = useState(0)
   const streamInterrupted = useRef(false)
   const holdingCodesRef = useRef<Set<string>>(new Set())
+  const holdingDecisionRefreshedAt = useRef<Record<string, number>>({})
+  const marketReflexivityLoadedAt = useRef(0)
+  const stockReflexivityLoadedAt = useRef<Record<string, number>>({})
   const [seesaw, setSeesaw] = useState<MarketSeesaw | null>(null)
   const [theme, setTheme] = useState<ThemeRadar | null>(null)
+  const [marketRegime, setMarketRegime] = useState<MarketRegime | null>(null)
+  const [globalCues, setGlobalCues] = useState<GlobalMarketCues | null>(null)
+  const [opportunityRadar, setOpportunityRadar] = useState<OpportunityRadar | null>(null)
+  const [marketReflexivity, setMarketReflexivity] = useState<ReflexivityAssessment | null>(null)
+  const [stockReflexivity, setStockReflexivity] = useState<Record<string, ReflexivityAssessment>>({})
   const [loading, setLoading] = useState(false)
   const [holdingNews, setHoldingNews] = useState<InformationItem[]>([])
   const [showMarketEvidence, setShowMarketEvidence] = useState(false)
 
-  const load = () => {
+  const load = (forceRefresh = false) => {
     setLoading(true)
-    Promise.allSettled([
+    const refreshQuery = forceRefresh ? '?force_refresh=true' : ''
+    const marketPromise = fetchJsonWithTimeout(`${API_BASE}/api/market/regime${refreshQuery}`, 45000)
+      .then(value => {
+        setMarketRegime(value as MarketRegime)
+        // 反身性接口复用刚完成的市场快照。串行调用可避免两个全市场
+        // 强制刷新请求并发采集、重复写入同一时点快照。
+        return fetchJsonWithTimeout(`${API_BASE}/api/market/reflexivity`, 12000)
+      })
+      .then(value => {
+        setMarketReflexivity(value as ReflexivityAssessment)
+        marketReflexivityLoadedAt.current = Date.now()
+        if (forceRefresh && selectedCode) loadStockReflexivity(selectedCode, true)
+      })
+    const globalPromise = fetchJsonWithTimeout(`${API_BASE}/api/market/global-cues${refreshQuery}`, 45000)
+      .then(value => setGlobalCues(value as GlobalMarketCues))
+    const opportunityPromise = fetchJsonWithTimeout(`${API_BASE}/api/intel/opportunity-radar${refreshQuery}`, 45000)
+      .then(value => setOpportunityRadar(value as OpportunityRadar))
+    const workspacePromise = Promise.allSettled([
       fetchJsonWithTimeout(`${API_BASE}/api/holdings`),
       fetchJsonWithTimeout(`${API_BASE}/api/holdings/execution-states`),
-      fetchJsonWithTimeout(`${API_BASE}/api/market/seesaw-monitor`, 8000),
-      fetchJsonWithTimeout(`${API_BASE}/api/market/theme-radar`, 8000),
+      fetchJsonWithTimeout(`${API_BASE}/api/market/seesaw-monitor${refreshQuery}`, 12000),
+      fetchJsonWithTimeout(`${API_BASE}/api/market/theme-radar${refreshQuery}`, 12000),
       fetchJsonWithTimeout(`${API_BASE}/api/alerts/active`),
-      fetchJsonWithTimeout(`${API_BASE}/api/intel/daily`, 12000),
+      fetchJsonWithTimeout(`${API_BASE}/api/intel/daily${refreshQuery}`, 15000),
     ]).then(results => {
       const [holdingRes, executionRes, seesawRes, themeRes, alertRes, intelRes] = results
       if (holdingRes.status === 'fulfilled' && Array.isArray(holdingRes.value)) {
         setHoldings(holdingRes.value)
         holdingCodesRef.current = new Set(holdingRes.value.map((item: HoldingOut) => item.code))
-        setSelectedCode(current => current || holdingRes.value[0]?.code || '')
+        setSelectedCode(current => holdingRes.value.some((item: HoldingOut) => item.code === current)
+          ? current
+          : holdingRes.value[0]?.code || '')
         loadIntradayReviews(holdingRes.value)
         loadDecisionCards(holdingRes.value)
       }
@@ -150,12 +219,44 @@ export function TodayDecisionSummary() {
       if (themeRes.status === 'fulfilled') setTheme(themeRes.value)
       if (alertRes.status === 'fulfilled' && Array.isArray(alertRes.value)) setActiveAlerts(alertRes.value)
       if (intelRes.status === 'fulfilled' && Array.isArray(intelRes.value?.items)) setHoldingNews(intelRes.value.items.filter((item: InformationItem) => item.related_holdings?.length).slice(0, 6))
-    }).finally(() => setLoading(false))
+    })
+    void Promise.allSettled([marketPromise, globalPromise, opportunityPromise, workspacePromise])
+      .finally(() => setLoading(false))
   }
 
+  const loadRef = useRef(load)
+  loadRef.current = load
+
+  // 初次装载一次；后续刷新由按钮、SSE 与独立定时器触发。
   useEffect(() => {
-    load()
+    loadRef.current(false)
   }, [])
+
+  useEffect(() => {
+    if (!selectedCode) return
+    const loadedAt = stockReflexivityLoadedAt.current[selectedCode] ?? 0
+    if (stockReflexivity[selectedCode] && Date.now() - loadedAt < 5 * 60_000) return
+    loadStockReflexivity(selectedCode, false)
+  }, [selectedCode, stockReflexivity])
+
+  useEffect(() => {
+    const refreshReflexivity = () => {
+      if (!isMarketSession()) return
+      if (Date.now() - marketReflexivityLoadedAt.current >= 5 * 60_000) {
+        fetchJsonWithTimeout(`${API_BASE}/api/market/reflexivity`, 15000)
+          .then(value => {
+            setMarketReflexivity(value as ReflexivityAssessment)
+            marketReflexivityLoadedAt.current = Date.now()
+          })
+          .catch(() => undefined)
+      }
+      if (selectedCode && Date.now() - (stockReflexivityLoadedAt.current[selectedCode] ?? 0) >= 5 * 60_000) {
+        loadStockReflexivity(selectedCode, true)
+      }
+    }
+    const timer = window.setInterval(refreshReflexivity, 60_000)
+    return () => window.clearInterval(timer)
+  }, [selectedCode])
 
   const acknowledgeAlert = (alert: ActionRecommendation) => {
     if (!alert.id) return
@@ -168,43 +269,59 @@ export function TodayDecisionSummary() {
   }
 
   useEffect(() => {
-    const now = new Date()
-    const minutes = now.getHours() * 60 + now.getMinutes()
-    if (now.getDay() === 0 || now.getDay() === 6 || minutes < 9 * 60 + 15 || minutes > 15 * 60 + 5) {
-      setStreamState('非交易时段，实时推送待机')
-      setStreamNotice('盘中交易时段将自动连接；盘外无需保持风险推送长连接。')
-      return
+    let source: EventSource | null = null
+
+    const closeStream = () => {
+      source?.close()
+      source = null
     }
-    const source = new EventSource(`${API_BASE}/api/intraday-events/stream`, { withCredentials: true })
-    source.onopen = () => {
-      setStreamState('实时推送已连接')
-      if (streamInterrupted.current) {
-        setStreamReconnects(value => value + 1)
-        setStreamNotice(`连接已恢复 · ${new Date().toLocaleTimeString('zh-CN', { hour12: false })}`)
-        streamInterrupted.current = false
+    const connectWhenTrading = () => {
+      if (!isMarketSession(true)) {
+        closeStream()
+        setStreamState('非交易时段，实时推送待机')
+        setStreamNotice('盘中交易时段将自动连接；盘外无需保持风险推送长连接。')
+        return
       }
-    }
-    source.onerror = () => {
-      streamInterrupted.current = true
-      setStreamState('实时推送中断，自动重连中')
-      setStreamNotice(`最近中断 · ${new Date().toLocaleTimeString('zh-CN', { hour12: false })}`)
-    }
-    source.addEventListener('stream-ready', () => {
-      setStreamState('实时推送已就绪')
-      setStreamLastAt(new Date().toLocaleTimeString('zh-CN', { hour12: false }))
-    })
-    source.addEventListener('intraday-risk', event => {
-      try {
-        const payload = JSON.parse((event as MessageEvent).data) as IntradayEvidenceEvent
-        if (!holdingCodesRef.current.has(payload.target_code) || !isRiskEvent(payload)) return
-        setRealtimeEvents(prev => [payload, ...prev.filter(item => item.id !== payload.id)].slice(0, 8))
+      if (source && source.readyState !== EventSource.CLOSED) return
+
+      source = new EventSource(`${API_BASE}/api/intraday-events/stream`, { withCredentials: true })
+      source.onopen = () => {
+        setStreamState('实时推送已连接')
+        if (streamInterrupted.current) {
+          setStreamReconnects(value => value + 1)
+          setStreamNotice(`连接已恢复 · ${new Date().toLocaleTimeString('zh-CN', { hour12: false })}`)
+          streamInterrupted.current = false
+        }
+      }
+      source.onerror = () => {
+        streamInterrupted.current = true
+        setStreamState('实时推送中断，自动重连中')
+        setStreamNotice(`最近中断 · ${new Date().toLocaleTimeString('zh-CN', { hour12: false })}`)
+      }
+      source.addEventListener('stream-ready', () => {
+        setStreamState('实时推送已就绪')
         setStreamLastAt(new Date().toLocaleTimeString('zh-CN', { hour12: false }))
-        if (payload.target_code) loadSingleIntradayReview(payload.target_code)
-      } catch {
-        setStreamState('实时事件解析失败')
-      }
-    })
-    return () => source.close()
+      })
+      source.addEventListener('intraday-risk', event => {
+        try {
+          const payload = JSON.parse((event as MessageEvent).data) as IntradayEvidenceEvent
+          if (!holdingCodesRef.current.has(payload.target_code) || !isRiskEvent(payload)) return
+          setRealtimeEvents(prev => [payload, ...prev.filter(item => item.id !== payload.id)].slice(0, 8))
+          setStreamLastAt(new Date().toLocaleTimeString('zh-CN', { hour12: false }))
+          if (payload.target_code) refreshHoldingDecision(payload.target_code)
+        } catch {
+          setStreamState('实时事件解析失败')
+        }
+      })
+    }
+
+    connectWhenTrading()
+    // 页面可能在 9:15 前打开；定时重评可在进入交易时段后自动建立长连接。
+    const sessionTimer = window.setInterval(connectWhenTrading, 30_000)
+    return () => {
+      window.clearInterval(sessionTimer)
+      closeStream()
+    }
   }, [])
 
   const riskStates = useMemo(
@@ -226,8 +343,9 @@ export function TodayDecisionSummary() {
   const selectedExecution = executionStates.find(item => item.code === selectedHolding?.code) ?? null
   const selectedCard = selectedHolding ? decisionCards[selectedHolding.code] ?? null : null
   const selectedReview = selectedHolding ? intradayReviews[selectedHolding.code] ?? null : null
-  const marketCycle = inferMarketCycle(theme?.market_temperature, seesaw?.market_mode)
-  const earningEffect = inferEarningEffect(theme, seesaw)
+  const marketCycle = marketRegime?.regime_name ?? inferMarketCycle(theme?.market_temperature, seesaw?.market_mode)
+  const earningEffect = marketRegime ? marketEffectLabel(marketRegime.opportunity_score) : inferEarningEffect(theme, seesaw)
+  const marketRiskActive = Boolean(marketRegime && ['极高', '高', '中高'].includes(marketRegime.risk_level))
   const marketLive = isMarketSession()
 
   return (
@@ -246,30 +364,38 @@ export function TodayDecisionSummary() {
         </small>
       </div>
       <div className="command-card">
-        <span>市场温度</span>
-        <strong>{theme?.market_temperature ?? (marketLive ? '行情源待恢复' : '盘外静态')}</strong>
-        <small>最强题材：{theme?.strongest_theme?.name ?? (marketLive ? '等待盘中同步' : '沿用上一交易日基线')}</small>
+        <span>全市场状态</span>
+        <strong className={marketRiskActive ? 'risk-text' : ''}>{marketCycle}</strong>
+        <small>{marketRegime ? `赚钱 ${marketRegime.opportunity_score} · 亏钱 ${marketRegime.loss_score} · 风险${marketRegime.risk_level}` : '等待全A真实广度与量能'}</small>
       </div>
       <div className="command-card">
-        <span>资金迁移</span>
-        <strong>{seesaw?.market_mode ?? (marketLive ? '等待盘中同步' : '盘外不更新')}</strong>
-        <small>{seesaw?.summary ?? (marketLive ? '等待资金跷跷板数据' : '下个交易日开盘后重新计算')}</small>
+        <span>全市场主力净流</span>
+        <strong className={(marketRegime?.market_main_net_inflow_yi ?? 0) < 0 ? 'num-down' : 'num-up'}>{formatSignedNumber(marketRegime?.market_main_net_inflow_yi, ' 亿')}</strong>
+        <small>{marketRegime ? `上涨 ${marketRegime.up_count ?? '--'} · 下跌 ${marketRegime.down_count ?? '--'} · 涨停/跌停 ${marketRegime.limit_up_count ?? '--'}/${marketRegime.limit_down_count ?? '--'}` : '等待全市场资金与涨跌家数'}</small>
       </div>
 
       <div className="panel command-list">
         <header>
           <h3><ListTodo size={16} />当前操作任务</h3>
-          <button className="refresh-btn inline" type="button" onClick={load} disabled={loading}>
+          <button className="refresh-btn inline" type="button" onClick={() => load(true)} disabled={loading}>
             <RefreshCcw size={14} />刷新
           </button>
         </header>
-        {expectationRisks.length || riskStates.length || highRiskAlerts.length ? (
+        {marketRiskActive || expectationRisks.length || riskStates.length || highRiskAlerts.length ? (
           <>
+            {marketRiskActive && marketRegime && (
+              <article className={riskTone(marketRegime.risk_level)}>
+                <b>全市场执行闸门</b>
+                <span>{marketRegime.regime_name} · {marketRegime.risk_level}风险</span>
+                <small>{(marketRegime.forbidden_actions ?? []).join('；') || '市场证据不足，禁止主动扩大风险。'}</small>
+                <details><summary>查看真实数据依据</summary><div className="decision-basis">{(marketRegime.evidence ?? []).map(item => <p key={item}>依据：{item}</p>)}{(marketRegime.allowed_actions ?? []).map(item => <p key={item}>允许：{item}</p>)}</div></details>
+              </article>
+            )}
             {expectationRisks.slice(0, 5).map(({ holding, card, execution }) => (
               <article key={`expectation-${holding.code}`} className={`expectation-risk-task ${riskTone(execution?.recommendation?.level || (card.expectation.expectation_result === 'INVALID' ? 'EXIT' : 'PROTECT'))}`}>
                 <b>{holding.name}</b>
                 <span>{card.expectation.expectation_result === 'INVALID' ? '预期证伪' : '弱于预期'} · {chineseEvidence(execution?.recommended_action || card.expectation.suggestion)}</span>
-                <small>合理开盘 {card.expectation.expected_open_low.toFixed(2)}%～{card.expectation.expected_open_high.toFixed(2)}%，实际 {card.expectation.actual_open_pct >= 0 ? '+' : ''}{card.expectation.actual_open_pct.toFixed(2)}%，预期差 {card.expectation.expectation_gap_score}。</small>
+                <small className="sensitive-evidence">合理开盘 {card.expectation.expected_open_low.toFixed(2)}%～{card.expectation.expected_open_high.toFixed(2)}%，实际 {card.expectation.actual_open_pct >= 0 ? '+' : ''}{card.expectation.actual_open_pct.toFixed(2)}%，预期差 {card.expectation.expectation_gap_score}。</small>
                 <details><summary>查看决策依据与动态复核条件</summary><DecisionBasis execution={execution} fallback={card.expectation.evidence} /></details>
               </article>
             ))}
@@ -277,7 +403,7 @@ export function TodayDecisionSummary() {
               <article key={`exec-${item.holding_id}`} className={riskTone(item.recommendation?.level || item.state)}>
                 <b>{item.name}</b>
                 <span>{chineseEvidence(item.recommended_action)}</span>
-                <small>{chineseEvidence(item.evidence[0] ?? chineseLabel(item.volume_price_state))}</small>
+                <small className="sensitive-evidence">{chineseEvidence(item.evidence[0] ?? chineseLabel(item.volume_price_state))}</small>
                 <details><summary>为什么是这个建议？</summary><DecisionBasis execution={item} /></details>
               </article>
             ))}
@@ -285,7 +411,7 @@ export function TodayDecisionSummary() {
               <article key={`risk-${item.code}`} className={riskTone(item.risk_level)}>
                 <b>{item.name}</b>
                 <span>{item.risk_level}风险</span>
-                <small>{item.advice || item.signal}</small>
+                <small className="sensitive-evidence">{item.advice || item.signal}</small>
               </article>
             ))}
           </>
@@ -319,7 +445,7 @@ export function TodayDecisionSummary() {
             <article key={`${event.id}-${event.event_type}`} className={riskTone(event.severity)}>
               <b>{event.target_name || event.target_code}</b>
               <span>{chineseLabel(event.event_type)} · {riskActionForEvent(event, executionStates)}</span>
-              <small>{riskDetailForEvent(event, decisionCards, executionStates)}</small>
+              <small className="sensitive-evidence">{riskDetailForEvent(event, decisionCards, executionStates)}</small>
             </article>
           ))
         ) : (
@@ -330,22 +456,121 @@ export function TodayDecisionSummary() {
       <section className="panel cockpit-overview">
         <header>
           <h3><Activity size={16} />全市场决策状态</h3>
-          <span className="stream-state">规则推断 · 数据刷新后更新</span>
+          <span className="stream-state">全A真实广度 · {marketRegime?.data_quality === 'complete' ? '数据完整' : marketRegime ? '缺口降级' : '等待同步'}</span>
         </header>
         <div className="cockpit-market-grid">
-          <div><span>赚钱效应</span><strong>{earningEffect}</strong><small>{theme?.strongest_theme?.stage_reason || '等待题材扩散和涨停质量证据'}</small><button type="button" className="market-evidence-link" onClick={() => setShowMarketEvidence(value => !value)}>查看计算依据</button></div>
-          <div><span>情绪周期</span><strong>{marketCycle}</strong><small>根据市场温度、主线强度和资金迁移综合判断</small></div>
-          <div><span>主线方向</span><strong>{theme?.strongest_theme?.name || '--'}</strong><small>{theme?.strongest_theme ? `强度 ${theme.strongest_theme.score} · 排名 ${theme.strongest_theme.rank}` : '等待真实题材数据'}</small></div>
+          <div className={marketRiskActive ? 'market-state-danger' : ''}><span>赚钱 / 亏钱效应</span><strong>{earningEffect} / {marketRegime ? marketLossLabel(marketRegime.loss_score) : '--'}</strong><small>{marketRegime ? `机会 ${marketRegime.opportunity_score} · 亏钱 ${marketRegime.loss_score}` : '等待全A真实广度'}</small><button type="button" className="market-evidence-link" onClick={() => setShowMarketEvidence(value => !value)}>查看计算依据</button></div>
+          <div><span>市场状态</span><strong>{marketCycle}</strong><small>{marketRegime ? `风险${marketRegime.risk_level} · 可信度 ${(marketRegime.confidence * 100).toFixed(0)}%` : '等待量能、广度和指数共振'}</small></div>
+          <div><span>上涨 / 下跌家数</span><strong>{marketRegime?.up_count ?? '--'} / {marketRegime?.down_count ?? '--'}</strong><small>涨停 / 跌停 {marketRegime?.limit_up_count ?? '--'} / {marketRegime?.limit_down_count ?? '--'} · 中位涨幅 {formatSignedNumber(marketRegime?.median_change_pct, '%')}</small></div>
+          <div><span>成交额与量能</span><strong>{formatNumber(marketRegime?.turnover_yi, ' 亿')}</strong><small>较前日 {formatRatio(marketRegime?.volume_ratio_previous)} · 较5日均量 {formatRatio(marketRegime?.volume_ratio_5d)}</small></div>
+          <div><span>全市场主力净流</span><strong className={(marketRegime?.market_main_net_inflow_yi ?? 0) < 0 ? 'num-down' : 'num-up'}>{formatSignedNumber(marketRegime?.market_main_net_inflow_yi, ' 亿')}</strong><small>指数合成涨跌 {formatSignedNumber(marketRegime?.index_composite_change_pct, '%')}</small></div>
+          <div><span>行业扩散 / 集中</span><strong>{formatRatio(marketRegime?.positive_sector_ratio)} / {formatRatio(marketRegime?.top3_inflow_share)}</strong><small>正向行业占比 / 前三流入集中度</small></div>
+          <div><span>主线方向</span><strong>{theme?.strongest_theme?.name || marketRegime?.strongest_sectors?.[0]?.name || '--'}</strong><small>{theme?.strongest_theme ? `题材强度 ${theme.strongest_theme.score}` : '按行业资金与价格确认'}</small></div>
           <div><span>资金轮动</span><strong>{seesaw?.market_mode || '--'}</strong><small>{seesaw?.summary || '等待资金流证据'}</small><button type="button" className="market-evidence-link" onClick={() => setShowMarketEvidence(value => !value)}>查看资金明细</button></div>
         </div>
         {showMarketEvidence && <div className="market-evidence-panel">
           <h4>全市场结论计算依据</h4>
-          <p><b>赚钱效应：</b>强度≥70的题材 {theme?.themes.filter(item => item.score >= 70).length ?? 0} 个；净流入方向 {seesaw?.inflow_targets.filter(item => item.net_inflow > 0).length ?? 0} 个。</p>
-          <p><b>最强题材：</b>{theme?.strongest_theme ? `${theme.strongest_theme.name}，强度 ${theme.strongest_theme.score}，排名 ${theme.strongest_theme.rank}，净流入 ${theme.strongest_theme.net_inflow.toFixed(2)} 亿，涨停 ${theme.strongest_theme.limit_up_count} 只。` : '暂无可靠题材数据。'}</p>
-          <p><b>资金集中依据：</b>{seesaw?.inflow_targets.length ? seesaw.inflow_targets.slice(0, 5).map(item => `${item.name} ${item.net_inflow >= 0 ? '+' : ''}${item.net_inflow.toFixed(2)}亿`).join('；') : '暂无净流入目标。'}</p>
-          <p><b>数据来源：</b>{theme?.source || '题材雷达待同步'}；{seesaw?.source || '资金跷跷板待同步'}。更新时间：{theme?.updated_at ? new Date(theme.updated_at).toLocaleString('zh-CN') : '--'} / {seesaw?.updated_at ? new Date(seesaw.updated_at).toLocaleString('zh-CN') : '--'}。</p>
-          {(theme?.notes ?? []).slice(0, 3).map(note => <small key={note}>· {note}</small>)}
+          {(marketRegime?.evidence ?? []).map(item => <p key={item}>· {item}</p>)}
+          {(marketRegime?.allowed_actions ?? []).length ? <p><b>当前允许：</b>{marketRegime?.allowed_actions.join('；')}</p> : null}
+          {(marketRegime?.forbidden_actions ?? []).length ? <p className="risk-text"><b>当前禁止：</b>{marketRegime?.forbidden_actions.join('；')}</p> : null}
+          <p><b>指数证据：</b>{(marketRegime?.indices ?? []).length ? marketRegime?.indices.map(item => `${item.name} ${formatSignedNumber(item.change_pct, '%')}${item.above_vwap === null ? '' : item.above_vwap ? '（均价线上）' : '（均价线下）'}`).join('；') : '指数数据缺失。'}</p>
+          <p><b>行业流入：</b>{(marketRegime?.strongest_sectors ?? []).length ? marketRegime?.strongest_sectors.map(item => `${item.name} ${formatSignedNumber(item.net_inflow, '亿')}`).join('；') : '暂无已确认流入行业。'}</p>
+          <p><b>行业流出：</b>{(marketRegime?.weakest_sectors ?? []).length ? marketRegime?.weakest_sectors.map(item => `${item.name} ${formatSignedNumber(item.net_inflow, '亿')}`).join('；') : '暂无已确认流出行业。'}</p>
+          <p><b>数据来源：</b>{marketRegime?.source || '等待全市场同步'}。更新时间：{marketRegime?.captured_at ? new Date(marketRegime.captured_at).toLocaleString('zh-CN') : '--'}。</p>
+          {(marketRegime?.missing_fields ?? []).length ? <small className="num-down">缺失字段：{marketRegime?.missing_fields.join('、')}</small> : null}
+          {(marketRegime?.notes ?? []).slice(0, 4).map(note => <small key={note}>· {note}</small>)}
         </div>}
+      </section>
+
+      <section className="panel reflexivity-panel">
+        <header>
+          <h3><Activity size={16} />预期拥挤与行为路径</h3>
+          <span className="stream-state">匹配度不是概率 · 后续量价负责验证或证伪</span>
+        </header>
+        {marketReflexivity ? <>
+          <div className={`reflexivity-current ${reflexivityTone(marketReflexivity.current_scenario)}`}>
+            <div><span>当前最匹配路径</span><strong>{marketReflexivity.current_scenario_label}</strong></div>
+            <div><span>拥挤代理</span><strong>{marketReflexivity.crowding.label} · {marketReflexivity.crowding.score.toFixed(0)}分</strong></div>
+            <div><span>规则匹配 / 置信度</span><strong>{marketReflexivity.scenario_match_score?.toFixed(0) ?? '--'} / {(marketReflexivity.confidence * 100).toFixed(0)}%</strong></div>
+          </div>
+          <div className="reflexivity-scenarios">
+            {(marketReflexivity.scenarios ?? []).map(scenario => (
+              <article key={scenario.code} className={scenario.code === marketReflexivity.current_scenario ? `active ${reflexivityTone(scenario.code)}` : ''}>
+                <header><b>{scenario.label}</b><span>匹配 {scenario.match_score.toFixed(0)}</span></header>
+                <p>{scenario.evidence?.[0] || `待补证据：${(marketReflexivity.missing_fields ?? []).join('、') || '下一快照'}`}</p>
+                <small><b>下一验证：</b>{scenario.next_validation_points?.[0] || '等待下一份量价快照'}</small>
+                <details><summary>查看证据、反证与纪律</summary>
+                  {(scenario.evidence ?? []).slice(0, 3).map(item => <p key={`e-${item}`}>+ {item}</p>)}
+                  {(scenario.counter_evidence ?? []).slice(0, 2).map(item => <p key={`c-${item}`}>- {item}</p>)}
+                  {(scenario.allowed_actions ?? []).slice(0, 2).map(item => <p key={`a-${item}`}>允许：{item}</p>)}
+                  {(scenario.forbidden_actions ?? []).slice(0, 2).map(item => <p className="risk-text" key={`f-${item}`}>禁止：{item}</p>)}
+                </details>
+              </article>
+            ))}
+          </div>
+          <p className="reflexivity-method">{marketReflexivity.methodology_note}</p>
+        </> : <p className="plain-text">正在用全A广度、指数分时均价、资金流和板块扩散计算可证伪路径。</p>}
+      </section>
+
+      <section className="panel global-evidence-panel">
+        <header>
+          <h3><Activity size={16} />外围市场证据</h3>
+          <span className="stream-state">{globalCues?.data_quality === 'ok' ? '数据可用' : globalCues ? '部分数据降级' : '等待同步'} · {globalCues?.as_of ? new Date(globalCues.as_of).toLocaleString('zh-CN') : '--'}</span>
+        </header>
+        <p className="global-evidence-summary">{globalEvidenceSummary(globalCues)}</p>
+        <div className="global-cue-groups">
+          <div>
+            <h4>韩国与半导体风向</h4>
+            {[...(globalCues?.korea_indices ?? []), ...(globalCues?.korea_equities ?? [])].map(item => (
+              <article key={`${item.market}-${item.symbol}`} className={globalQuoteTone(item.change_pct, item.status)}>
+                <b>{item.name}</b><strong>{formatSignedNumber(item.change_pct, '%')}</strong>
+                <small>{item.status === 'unavailable' ? item.note || '授权行情不可用' : `${formatNumber(item.price)} · ${item.freshness}`}</small>
+              </article>
+            ))}
+            {!(globalCues?.korea_indices ?? []).length && !(globalCues?.korea_equities ?? []).length && <p>韩国行情未返回，不用其他指数替代。</p>}
+          </div>
+          <div>
+            <h4>隔夜美股指数</h4>
+            {(globalCues?.us_indices ?? []).map(item => (
+              <article key={`${item.market}-${item.symbol}`} className={globalQuoteTone(item.change_pct, item.status)}>
+                <b>{item.name}</b><strong>{formatSignedNumber(item.change_pct, '%')}</strong>
+                <small>{item.freshness} · {item.source}</small>
+              </article>
+            ))}
+            {!(globalCues?.us_indices ?? []).length && <p>隔夜美股指数暂不可用。</p>}
+          </div>
+          <div>
+            <h4>隔夜美股行业表现</h4>
+            {(globalCues?.us_sector_rank ?? []).slice(0, 8).map((item, index) => (
+              <article key={item.symbol} className={globalQuoteTone(item.change_pct, item.status)}>
+                <b>{index + 1}. {item.theme || item.name}</b><strong>{formatSignedNumber(item.change_pct, '%')}</strong>
+                <small>{item.symbol} · {item.proxy_description || '行业ETF代理'}</small>
+              </article>
+            ))}
+            {!(globalCues?.us_sector_rank ?? []).length && <p>美股行业ETF排行暂不可用，不生成模拟排名。</p>}
+          </div>
+        </div>
+        {(globalCues?.notes ?? []).slice(0, 4).map(note => <small className="global-data-note" key={note}>· {note}</small>)}
+      </section>
+
+      <section className="panel opportunity-radar-panel">
+        <header>
+          <h3><Activity size={16} />盘中机会雷达</h3>
+          <span className="stream-state">新闻假设 → 板块资金 → 相对强度 → 分时均价确认</span>
+        </header>
+        <p className="opportunity-discipline">{opportunityRadar?.discipline || '资讯不得单独触发买入，等待真实板块与个股量价确认。'}</p>
+        <div className="opportunity-grid">
+          {(opportunityRadar?.items ?? []).slice(0, 8).map(item => (
+            <article key={item.id} className={`opportunity-${opportunityTone(item.status)}`}>
+              <header><span>{item.status}</span><b>{item.confirmation_score}分</b></header>
+              {item.url ? <a href={item.url} target="_blank" rel="noreferrer">{item.title}</a> : <strong>{item.title}</strong>}
+              <small>{item.primary_sector || (item.sectors ?? []).join('、') || '待映射板块'} · {item.source} · {formatAge(item.age_minutes)}</small>
+              <p>{item.evidence?.[0] || item.counter_evidence?.[0] || `待补：${(item.missing ?? []).join('、') || '板块确认数据'}`}</p>
+              <p className="opportunity-action">{item.action}</p>
+            </article>
+          ))}
+        </div>
+        {!opportunityRadar?.items.length && <p className="plain-text">暂无可验证的盘中消息机会；系统不会用空数据生成题材建议。</p>}
       </section>
 
       <section className="panel holding-cockpit">
@@ -388,22 +613,45 @@ export function TodayDecisionSummary() {
               {selectedExecution ? <>
                 <p><b>状态：</b>{chineseLabel(selectedExecution.state)}</p>
                 <p><b>建议：</b>{chineseEvidence(selectedExecution.recommended_action)}</p>
-                <p><b>建议仓位：</b>{(selectedExecution.recommended_position_ratio * 100).toFixed(0)}% · 可卖 {selectedExecution.sellable_quantity} 股</p>
-                <p><b>结构 / 硬止损：</b>{selectedExecution.structure_stop_price.toFixed(2)} / {selectedExecution.hard_stop_price.toFixed(2)}</p>
-                <small>{selectedExecution.invalid_conditions[0] || '等待失效条件确认'}</small>
+                <p><b>建议仓位：</b><span className="private-value">{(selectedExecution.recommended_position_ratio * 100).toFixed(0)}% · 可卖 {selectedExecution.sellable_quantity} 股</span></p>
+                <p><b>结构 / 硬止损：</b><span className="private-value">{selectedExecution.structure_stop_price.toFixed(2)} / {selectedExecution.hard_stop_price.toFixed(2)}</span></p>
+                <small className="sensitive-evidence">{selectedExecution.invalid_conditions[0] || '等待失效条件确认'}</small>
               </> : <p>暂无持仓执行状态。</p>}
+            </article>
+            <article className={`cockpit-reflexivity-card ${selectedHolding && stockReflexivity[selectedHolding.code] ? reflexivityTone(stockReflexivity[selectedHolding.code].current_scenario) : ''}`}>
+              <h4>个股预期拥挤与行为路径</h4>
+              {selectedHolding && stockReflexivity[selectedHolding.code] ? (() => {
+                const assessment = stockReflexivity[selectedHolding.code]
+                return <>
+                  <div className="stock-reflexivity-summary">
+                    <p><b>当前路径：</b>{assessment.current_scenario_label}</p>
+                    <p><b>拥挤代理：</b>{assessment.crowding.label} · {assessment.crowding.score.toFixed(0)}分</p>
+                    <p><b>规则匹配：</b>{assessment.scenario_match_score?.toFixed(0) ?? '--'} · 置信度 {(assessment.confidence * 100).toFixed(0)}%</p>
+                    <p><b>扩仓闸门：</b>{assessment.market_gate?.new_position_allowed ? '开放，仍需个股确认' : '关闭，禁止新增风险'}</p>
+                  </div>
+                  <div className="stock-reflexivity-evidence">
+                    <div><b>当前证据</b>{(assessment.current_evidence ?? []).slice(0, 3).map(item => <p className="sensitive-evidence" key={item}>+ {item}</p>)}</div>
+                    <div><b>反向证据</b>{(assessment.current_counter_evidence ?? []).slice(0, 3).map(item => <p className="sensitive-evidence" key={item}>- {item}</p>)}</div>
+                    <div><b>下一验证</b>{(assessment.next_validation_points ?? []).slice(0, 3).map(item => <p key={item}>· {item}</p>)}</div>
+                  </div>
+                  <div className="stock-reflexivity-discipline">
+                    <p><b>允许：</b>{(assessment.allowed_actions ?? []).slice(0, 2).join('；') || '等待证据补齐'}</p>
+                    <p className="risk-text"><b>禁止：</b>{(assessment.forbidden_actions ?? []).slice(0, 2).join('；')}</p>
+                  </div>
+                </>
+              })() : <p>正在读取该持仓的预期差、分时均价、日内承接和市场闸门。</p>}
             </article>
             <article className="cockpit-evidence-card">
               <h4>证据、反向证据与恢复条件</h4>
-              <div><b>支持证据</b>{(selectedExecution?.evidence ?? selectedCard?.evidence ?? []).slice(0, 3).map(item => <p key={item}>+ {chineseEvidence(item)}</p>)}</div>
-              <div><b>反向证据</b>{(selectedExecution?.counter_evidence ?? selectedCard?.counter_evidence ?? []).slice(0, 3).map(item => <p key={item}>- {chineseEvidence(item)}</p>)}</div>
-              <div><b>恢复条件</b>{(selectedExecution?.recovery_conditions ?? []).slice(0, 3).map(item => <p key={item}>· {chineseEvidence(item)}</p>)}</div>
+              <div><b>支持证据</b>{(selectedExecution?.evidence ?? selectedCard?.evidence ?? []).slice(0, 3).map(item => <p className="sensitive-evidence" key={item}>+ {chineseEvidence(item)}</p>)}</div>
+              <div><b>反向证据</b>{(selectedExecution?.counter_evidence ?? selectedCard?.counter_evidence ?? []).slice(0, 3).map(item => <p className="sensitive-evidence" key={item}>- {chineseEvidence(item)}</p>)}</div>
+              <div><b>恢复条件</b>{(selectedExecution?.recovery_conditions ?? []).slice(0, 3).map(item => <p className="sensitive-evidence" key={item}>· {chineseEvidence(item)}</p>)}</div>
             </article>
             <article className="cockpit-timeline-card">
               <h4>盘中事件时间线</h4>
               <div className="cockpit-timeline">
                 {(selectedReview?.timeline ?? selectedCard?.timeline ?? []).slice(0, 8).map(event => (
-                  <div key={`${event.id}-${event.captured_at}`}><time>{formatEventTime(event.captured_at)}</time><b>{chineseLabel(event.event_type)}</b><span>{chineseEvidence(event.evidence?.[0] || chineseLabel(event.severity))}</span></div>
+                  <div key={`${event.id}-${event.captured_at}`}><time>{formatEventTime(event.captured_at)}</time><b>{chineseLabel(event.event_type)}</b><span className="sensitive-evidence">{chineseEvidence(event.evidence?.[0] || chineseLabel(event.severity))}</span></div>
                 ))}
               </div>
               {!(selectedReview?.timeline ?? selectedCard?.timeline ?? []).length && <p>暂无盘中采样事件。</p>}
@@ -471,14 +719,17 @@ export function TodayDecisionSummary() {
           .then(review => [item.code, review] as const),
       ),
     ).then(results => {
-      const next: Record<string, IntradayReview> = {}
-      results.forEach(result => {
-        if (result.status === 'fulfilled') {
-          const [code, review] = result.value
-          next[code] = review as IntradayReview
-        }
+      const activeCodes = new Set(nextHoldings.map(item => item.code))
+      setIntradayReviews(previous => {
+        const next = Object.fromEntries(Object.entries(previous).filter(([code]) => activeCodes.has(code)))
+        results.forEach(result => {
+          if (result.status === 'fulfilled') {
+            const [code, review] = result.value
+            next[code] = review as IntradayReview
+          }
+        })
+        return next
       })
-      setIntradayReviews(next)
     })
   }
 
@@ -486,9 +737,12 @@ export function TodayDecisionSummary() {
     Promise.allSettled(nextHoldings.map(item =>
       fetchJsonWithTimeout(`${API_BASE}/api/stocks/${item.code}/decision-card`, 8000).then(card => [item.code, card] as const),
     )).then(results => {
-      const next: Record<string, StockDecisionCard> = {}
-      results.forEach(result => { if (result.status === 'fulfilled') next[result.value[0]] = result.value[1] })
-      setDecisionCards(next)
+      const activeCodes = new Set(nextHoldings.map(item => item.code))
+      setDecisionCards(previous => {
+        const next = Object.fromEntries(Object.entries(previous).filter(([code]) => activeCodes.has(code)))
+        results.forEach(result => { if (result.status === 'fulfilled') next[result.value[0]] = result.value[1] })
+        return next
+      })
     })
   }
 
@@ -499,13 +753,44 @@ export function TodayDecisionSummary() {
       })
       .catch(() => undefined)
   }
+
+  function loadStockReflexivity(code: string, forceRefresh: boolean) {
+    const refreshQuery = forceRefresh ? '?force_refresh=true' : ''
+    fetchJsonWithTimeout(`${API_BASE}/api/stocks/${code}/reflexivity${refreshQuery}`, 45000)
+      .then(value => {
+        stockReflexivityLoadedAt.current[code] = Date.now()
+        setStockReflexivity(previous => ({ ...previous, [code]: value as ReflexivityAssessment }))
+      })
+      .catch(() => undefined)
+  }
+
+  function refreshHoldingDecision(code: string) {
+    const now = Date.now()
+    if (now - (holdingDecisionRefreshedAt.current[code] ?? 0) < 10_000) return
+    holdingDecisionRefreshedAt.current[code] = now
+    loadSingleIntradayReview(code)
+    loadStockReflexivity(code, true)
+    fetchJsonWithTimeout(`${API_BASE}/api/stocks/${code}/decision-card`, 12000)
+      .then(value => setDecisionCards(previous => ({ ...previous, [code]: value as StockDecisionCard })))
+      .catch(() => undefined)
+    fetchJsonWithTimeout(`${API_BASE}/api/holdings/execution-states`, 12000)
+      .then(value => {
+        if (Array.isArray(value)) setExecutionStates(value as PositionExecutionState[])
+      })
+      .catch(() => undefined)
+  }
 }
 
 function fetchJsonWithTimeout(url: string, timeoutMs = 5000) {
   const controller = new AbortController()
   const timeout = window.setTimeout(() => controller.abort(), timeoutMs)
   return fetch(url, { signal: controller.signal })
-    .then(r => r.json())
+    .then(async response => {
+      if (!response.ok) {
+        throw new Error(`请求失败：HTTP ${response.status}`)
+      }
+      return response.json()
+    })
     .finally(() => window.clearTimeout(timeout))
 }
 
@@ -513,6 +798,82 @@ function formatEventTime(value: string) {
   const time = new Date(value)
   if (Number.isNaN(time.getTime())) return value
   return time.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', hour12: false })
+}
+
+function formatNumber(value?: number | null, suffix = '') {
+  if (value === null || value === undefined || !Number.isFinite(value)) return '--'
+  return `${value.toLocaleString('zh-CN', { maximumFractionDigits: 2 })}${suffix}`
+}
+
+function formatSignedNumber(value?: number | null, suffix = '') {
+  if (value === null || value === undefined || !Number.isFinite(value)) return '--'
+  const prefix = value > 0 ? '+' : ''
+  return `${prefix}${value.toLocaleString('zh-CN', { maximumFractionDigits: 2 })}${suffix}`
+}
+
+function formatRatio(value?: number | null) {
+  if (value === null || value === undefined || !Number.isFinite(value)) return '--'
+  return `${(value * 100).toFixed(1)}%`
+}
+
+function formatAge(value?: number | null) {
+  if (value === null || value === undefined) return '时间待确认'
+  if (value < 60) return `${value}分钟前`
+  return `${Math.floor(value / 60)}小时${value % 60 ? `${value % 60}分` : ''}前`
+}
+
+function marketEffectLabel(score: number) {
+  if (score >= 75) return '很强'
+  if (score >= 60) return '较强'
+  if (score >= 45) return '局部分化'
+  if (score >= 30) return '偏弱'
+  return '极弱'
+}
+
+function marketLossLabel(score: number) {
+  if (score >= 75) return '极高'
+  if (score >= 60) return '很高'
+  if (score >= 45) return '偏高'
+  if (score >= 30) return '一般'
+  return '较低'
+}
+
+function globalQuoteTone(change?: number | null, status?: string) {
+  if (status === 'unavailable' || status === 'configuration_pending') return 'cue-unavailable'
+  if ((change ?? 0) <= -3) return 'cue-critical'
+  if ((change ?? 0) < 0) return 'cue-negative'
+  if ((change ?? 0) > 0) return 'cue-positive'
+  return ''
+}
+
+function globalEvidenceSummary(cues: GlobalMarketCues | null) {
+  if (!cues) return '正在读取韩国、隔夜美股及行业ETF代理数据；缺失数据不会以零值代替。'
+  const negativeKorea = [...(cues.korea_indices ?? []), ...(cues.korea_equities ?? [])]
+    .filter(item => item.change_pct !== null && item.change_pct <= -3)
+  const negativeSemis = (cues.us_sector_rank ?? [])
+    .filter(item => /半导体|SMH|SOXX/i.test(`${item.theme || ''}${item.symbol}`) && (item.change_pct ?? 0) < 0)
+  if (negativeKorea.length) {
+    return `韩国市场出现显著负反馈：${negativeKorea.map(item => `${item.name} ${formatSignedNumber(item.change_pct, '%')}`).join('、')}。涉及半导体、存储或科技持仓时提高开仓门槛，外围证据只作加减分，不单独触发交易。`
+  }
+  if (negativeSemis.length) {
+    return `隔夜半导体代理走弱：${negativeSemis.map(item => `${item.symbol} ${formatSignedNumber(item.change_pct, '%')}`).join('、')}。需等待A股板块资金和个股VWAP独立确认。`
+  }
+  return '外围证据未出现明确系统性冲击；仍以A股全市场、板块资金和个股量价为主，外围只作当日预期修正。'
+}
+
+function opportunityTone(status: string) {
+  if (status === '已确认') return 'confirmed'
+  if (status === '证伪') return 'invalidated'
+  if (status === '衰减') return 'decayed'
+  return 'pending'
+}
+
+function reflexivityTone(scenario: string) {
+  if (scenario === 'DATA_GAP') return 'reflexivity-missing'
+  if (['NO_REBOUND_LIQUIDATION', 'REBOUND_FAILURE_SUPPLY'].includes(scenario)) return 'reflexivity-risk'
+  if (scenario === 'UPSIDE_SURPRISE_REPAIR') return 'reflexivity-positive'
+  if (scenario === 'REBOUND_ABSORPTION') return 'reflexivity-watch'
+  return ''
 }
 
 function isRiskEvent(event: IntradayEvidenceEvent) {
@@ -551,9 +912,9 @@ function riskTone(value?: string) {
 function DecisionBasis({ execution, fallback = [] }: { execution?: PositionExecutionState; fallback?: string[] }) {
   const evidence = execution?.evidence?.length ? execution.evidence : fallback
   return <div className="decision-basis">
-    {evidence.slice(0, 6).map(item => <p key={item}>依据：{chineseEvidence(item)}</p>)}
-    {(execution?.invalid_conditions ?? []).slice(0, 3).map(item => <p key={item}>升级/退出条件：{chineseEvidence(item)}</p>)}
-    {(execution?.recovery_conditions ?? []).slice(0, 3).map(item => <p key={item}>保留/恢复条件：{chineseEvidence(item)}</p>)}
+    {evidence.slice(0, 6).map(item => <p className="sensitive-evidence" key={item}>依据：{chineseEvidence(item)}</p>)}
+    {(execution?.invalid_conditions ?? []).slice(0, 3).map(item => <p className="sensitive-evidence" key={item}>升级/退出条件：{chineseEvidence(item)}</p>)}
+    {(execution?.recovery_conditions ?? []).slice(0, 3).map(item => <p className="sensitive-evidence" key={item}>保留/恢复条件：{chineseEvidence(item)}</p>)}
     {!evidence.length && <p>等待下一次量价和执行状态采样补充依据。</p>}
   </div>
 }
@@ -566,10 +927,11 @@ function inferMarketCycle(temperature?: string, marketMode?: string) {
   return '轮动分歧'
 }
 
-function isMarketSession() {
+function isMarketSession(includeClosingGrace = false) {
   const now = new Date()
   const minutes = now.getHours() * 60 + now.getMinutes()
-  return now.getDay() >= 1 && now.getDay() <= 5 && minutes >= 9 * 60 + 15 && minutes <= 15 * 60
+  const closeMinute = 15 * 60 + (includeClosingGrace ? 5 : 0)
+  return now.getDay() >= 1 && now.getDay() <= 5 && minutes >= 9 * 60 + 15 && minutes <= closeMinute
 }
 
 function inferEarningEffect(theme: ThemeRadar | null, seesaw: MarketSeesaw | null) {

@@ -7,6 +7,9 @@ const config = {
   server: {
     host: '0.0.0.0',
     port: 5173,
+    watch: {
+      ignored: ['**/.pytest_cache/**'],
+    },
     proxy: {
       '/api': {
         target: 'http://127.0.0.1:8000',
@@ -18,6 +21,8 @@ const config = {
     globals: true,
     environment: 'jsdom',
     setupFiles: './src/test/setup.ts',
+    exclude: ['**/node_modules/**', '**/dist/**', '**/.pytest_cache/**'],
+    watchExclude: ['**/.pytest_cache/**'],
   },
 }
 

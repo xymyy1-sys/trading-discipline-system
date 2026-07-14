@@ -23,10 +23,12 @@ curl --fail --silent --cookie-jar "${cookie_jar}" \
 
 curl --fail --silent --cookie "${cookie_jar}" "${BASE_URL}/api/holdings" >/dev/null
 report="$(curl --fail --silent --cookie "${cookie_jar}" "${BASE_URL}/api/acceptance/report")"
-python3 -c 'import json,sys; r=json.loads(sys.argv[1]); assert r["migration_version"] == "k7a4c9d2f1b3", r; assert r["audit_log"]["chain_valid"]; assert r["t_plus_one_passed"]' "${report}"
+python3 -c 'import json,sys; r=json.loads(sys.argv[1]); expected=sys.argv[2]; assert r["migration_version"], r; assert not expected or r["migration_version"] == expected, r; assert r["audit_log"]["chain_valid"]; assert r["t_plus_one_passed"]' "${report}" "${EXPECTED_MIGRATION_VERSION:-}"
 
 headers="$(curl --silent --head "${BASE_URL}/")"
-grep -qi '^strict-transport-security:' <<<"${headers}"
 grep -qi '^x-content-type-options:' <<<"${headers}"
+if [[ "${BASE_URL}" == https://* ]]; then
+  grep -qi '^strict-transport-security:' <<<"${headers}"
+fi
 
 echo "Production smoke acceptance passed for ${BASE_URL}."

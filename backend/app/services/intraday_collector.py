@@ -3,18 +3,35 @@ from __future__ import annotations
 import asyncio
 import json
 import sys
+import threading
 import time as clock
 from datetime import datetime, time
 
 from app.api.helpers.decision import current_expectation_stage
 from app.core.database import SessionLocal
-from app.models.trading import Holding, IntradayCollectionRun, IntradayEvidenceEvent, NextDayPlan, WatchlistEntry
+from app.models.trading import (
+    Holding,
+    IntradayCollectionRun,
+    IntradayEvidenceEvent,
+    MarketRegimeSnapshot,
+    NextDayPlan,
+    WatchlistEntry,
+)
+from app.schemas.trading import MarketRegimeOut
 from app.services.intraday_evidence_engine import collect_holding_evidence, collect_tracked_stock_evidence
+from app.services.market_regime import get_market_regime
 
 COLLECTOR_INTERVAL_SECONDS = 60
+MARKET_REGIME_INTERVAL_SECONDS = 300
+MARKET_REGIME_MIN_PERSIST_SECONDS = 240
 COLLECTOR_ENABLED = True
 _collector_task: asyncio.Task | None = None
+_market_regime_task: asyncio.Task | None = None
 _collector_running = False
+_market_regime_running = False
+_market_regime_guard = threading.Lock()
+_market_regime_last_success_at: datetime | None = None
+_market_regime_last_error = ""
 _close_expectation_date: str | None = None
 _notified_recommendations: set[int] = set()
 _failure_counts: dict[str, int] = {}
@@ -22,7 +39,7 @@ _circuit_until: dict[str, float] = {}
 _queue_depth = 0
 
 
-def _run_with_resilience(key: str, callback, notes: list[str]):
+def _run_with_resilience(key: str, callback, notes: list[str], *, on_error=None):
     """Run one collection job with bounded exponential backoff and a circuit breaker."""
     now = clock.time()
     if _circuit_until.get(key, 0) > now:
@@ -38,6 +55,13 @@ def _run_with_resilience(key: str, callback, notes: list[str]):
             return result
         except Exception as exc:
             last_error = exc
+            # A failed SQLAlchemy flush/commit invalidates the transaction.
+            # Roll back before every retry, not only after all retries fail.
+            if on_error is not None:
+                try:
+                    on_error()
+                except Exception as rollback_exc:
+                    notes.append(f"{key} 事务回滚失败：{rollback_exc.__class__.__name__}。")
             if attempt < 2:
                 clock.sleep(0.25 * (2 ** attempt))
     failures = _failure_counts.get(key, 0) + 1
@@ -66,6 +90,75 @@ def _is_market_watch_time(now: datetime | None = None) -> bool:
     now = now or datetime.now()
     current = now.time()
     return now.weekday() < 5 and time(9, 15) <= current <= time(15, 0)
+
+
+def _is_market_regime_watch_time(now: datetime | None = None) -> bool:
+    """Collect from the end of auction through a final post-close snapshot."""
+    now = now or datetime.now()
+    current = now.time()
+    return now.weekday() < 5 and time(9, 25) <= current <= time(15, 5)
+
+
+def _recent_market_regime_exists(db, now: datetime) -> bool:
+    latest = (
+        db.query(MarketRegimeSnapshot)
+        .filter(MarketRegimeSnapshot.trade_date == now.date().isoformat())
+        .order_by(MarketRegimeSnapshot.captured_at.desc(), MarketRegimeSnapshot.id.desc())
+        .first()
+    )
+    if latest is None or latest.captured_at is None:
+        return False
+    age_seconds = (now - latest.captured_at).total_seconds()
+    return -60 <= age_seconds < MARKET_REGIME_MIN_PERSIST_SECONDS
+
+
+def run_market_regime_collection_once(
+    trigger: str = "scheduler",
+    *,
+    now: datetime | None = None,
+    force: bool = False,
+) -> MarketRegimeOut | None:
+    """Persist one full-market snapshot without blocking or failing holding collection.
+
+    A process-local guard prevents overlapping requests, while the database freshness
+    check prevents duplicate snapshots after restarts or when another worker/API call
+    has just completed a collection.
+    """
+    del trigger  # Reserved for future collection-run audit metadata.
+    global _market_regime_running, _market_regime_last_error, _market_regime_last_success_at
+
+    if not _market_regime_guard.acquire(blocking=False):
+        return None
+    _market_regime_running = True
+    db = None
+    collected_at = now or datetime.now()
+    key = "市场环境"
+    try:
+        db = SessionLocal()
+        if _circuit_until.get(key, 0) > clock.time():
+            return None
+        if not force and _recent_market_regime_exists(db, collected_at):
+            return None
+        result = get_market_regime(db, force_refresh=force)
+        _failure_counts.pop(key, None)
+        _circuit_until.pop(key, None)
+        _market_regime_last_error = ""
+        _market_regime_last_success_at = datetime.now()
+        return result
+    except Exception as exc:
+        if db is not None:
+            db.rollback()
+        failures = _failure_counts.get(key, 0) + 1
+        _failure_counts[key] = failures
+        _market_regime_last_error = f"{exc.__class__.__name__}: {exc}"
+        if failures >= 3:
+            _circuit_until[key] = clock.time() + MARKET_REGIME_INTERVAL_SECONDS
+        return None
+    finally:
+        if db is not None:
+            db.close()
+        _market_regime_running = False
+        _market_regime_guard.release()
 
 
 def run_intraday_collection_once(trigger: str = "manual") -> IntradayCollectionRun:
@@ -109,6 +202,7 @@ def run_intraday_collection_once(trigger: str = "manual") -> IntradayCollectionR
                 f"持仓:{holding.code}",
                 lambda holding=holding: collect_holding_evidence(db, holding, stage=stage, now=started),
                 notes,
+                on_error=db.rollback,
             )
             _queue_depth = max(0, _queue_depth - 1)
             if result is None:
@@ -135,6 +229,7 @@ def run_intraday_collection_once(trigger: str = "manual") -> IntradayCollectionR
                 f"跟踪:{code}",
                 lambda code=code, name=name, base_hint=base_hint: collect_tracked_stock_evidence(db, code, name, base_hint, stage=stage, now=started),
                 notes,
+                on_error=db.rollback,
             )
             _queue_depth = max(0, _queue_depth - 1)
             if result is None:
@@ -177,30 +272,45 @@ async def _collector_loop() -> None:
             try:
                 await asyncio.to_thread(generate_next_day_expectations, db)
                 _close_expectation_date = now.date().isoformat()
+            except Exception:
+                db.rollback()
             finally:
                 db.close()
         await asyncio.sleep(COLLECTOR_INTERVAL_SECONDS)
 
 
+async def _market_regime_loop() -> None:
+    """Independent low-frequency loop so full-market I/O cannot stall stock samples."""
+    while True:
+        if COLLECTOR_ENABLED and _is_market_regime_watch_time():
+            await asyncio.to_thread(run_market_regime_collection_once, "scheduler")
+        await asyncio.sleep(MARKET_REGIME_INTERVAL_SECONDS)
+
+
 def start_intraday_collector() -> None:
-    global _collector_task
+    global _collector_task, _market_regime_task
     if "pytest" in sys.modules:
         return
     if _collector_task is None or _collector_task.done():
         _collector_task = asyncio.create_task(_collector_loop())
+    if _market_regime_task is None or _market_regime_task.done():
+        _market_regime_task = asyncio.create_task(_market_regime_loop())
 
 
 async def stop_intraday_collector() -> None:
-    global _collector_task, _collector_running
-    task = _collector_task
-    if task is not None:
+    global _collector_task, _collector_running, _market_regime_task, _market_regime_running
+    tasks = [task for task in (_collector_task, _market_regime_task) if task is not None]
+    for task in tasks:
         task.cancel()
+    for task in tasks:
         try:
             await task
         except asyncio.CancelledError:
             pass
     _collector_task = None
+    _market_regime_task = None
     _collector_running = False
+    _market_regime_running = False
 
 
 def latest_collection_run() -> IntradayCollectionRun | None:
@@ -216,6 +326,10 @@ def collector_status() -> dict[str, object]:
         "enabled": COLLECTOR_ENABLED,
         "interval_seconds": COLLECTOR_INTERVAL_SECONDS,
         "running": _collector_running,
+        "market_regime_running": _market_regime_running,
+        "market_regime_interval_seconds": MARKET_REGIME_INTERVAL_SECONDS,
+        "market_regime_last_success_at": _market_regime_last_success_at,
+        "market_regime_last_error": _market_regime_last_error,
         "queue_depth": _queue_depth,
         "open_circuits": [key for key, until in _circuit_until.items() if until > clock.time()],
         "failure_counts": dict(_failure_counts),

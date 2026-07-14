@@ -138,6 +138,66 @@ class MarketSnapshot(Base):
     summary: Mapped[str] = mapped_column(Text, default="")
 
 
+class MarketRegimeSnapshot(Base):
+    """Persisted, evidence-backed full-market state at one collection time."""
+
+    __tablename__ = "market_regime_snapshots"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    trade_date: Mapped[str] = mapped_column(String(16), index=True)
+    captured_at: Mapped[datetime] = mapped_column(
+        DateTime, default=lambda: datetime.now(timezone.utc), index=True
+    )
+    source: Mapped[str] = mapped_column(String(255), default="")
+    data_quality: Mapped[str] = mapped_column(String(24), default="missing", index=True)
+    coverage_ratio: Mapped[float] = mapped_column(Float, default=0)
+    confidence: Mapped[float] = mapped_column(Float, default=0)
+
+    active_stock_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    up_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    down_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    flat_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    up_5pct_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    down_5pct_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    limit_up_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    limit_down_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    median_change_pct: Mapped[float | None] = mapped_column(Float, nullable=True)
+    advance_ratio: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+    turnover_yi: Mapped[float | None] = mapped_column(Float, nullable=True)
+    projected_turnover_yi: Mapped[float | None] = mapped_column(Float, nullable=True)
+    previous_turnover_yi: Mapped[float | None] = mapped_column(Float, nullable=True)
+    avg5_turnover_yi: Mapped[float | None] = mapped_column(Float, nullable=True)
+    volume_ratio_previous: Mapped[float | None] = mapped_column(Float, nullable=True)
+    volume_ratio_5d: Mapped[float | None] = mapped_column(Float, nullable=True)
+    market_main_net_inflow_yi: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+    index_composite_change_pct: Mapped[float | None] = mapped_column(Float, nullable=True)
+    index_above_vwap_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    index_valid_count: Mapped[int] = mapped_column(Integer, default=0)
+    indices_json: Mapped[str] = mapped_column(Text, default="[]")
+
+    positive_sector_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    negative_sector_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    positive_sector_ratio: Mapped[float | None] = mapped_column(Float, nullable=True)
+    sector_above_vwap_ratio: Mapped[float | None] = mapped_column(Float, nullable=True)
+    top3_inflow_share: Mapped[float | None] = mapped_column(Float, nullable=True)
+    strongest_sectors_json: Mapped[str] = mapped_column(Text, default="[]")
+    weakest_sectors_json: Mapped[str] = mapped_column(Text, default="[]")
+
+    regime_code: Mapped[str] = mapped_column(String(48), default="UNKNOWN", index=True)
+    regime_name: Mapped[str] = mapped_column(String(48), default="数据不足")
+    risk_level: Mapped[str] = mapped_column(String(16), default="未知")
+    opportunity_score: Mapped[int] = mapped_column(Integer, default=0)
+    loss_score: Mapped[int] = mapped_column(Integer, default=0)
+    liquidity_score: Mapped[int] = mapped_column(Integer, default=0)
+    allowed_actions_json: Mapped[str] = mapped_column(Text, default="[]")
+    forbidden_actions_json: Mapped[str] = mapped_column(Text, default="[]")
+    evidence_json: Mapped[str] = mapped_column(Text, default="[]")
+    missing_fields_json: Mapped[str] = mapped_column(Text, default="[]")
+    notes_json: Mapped[str] = mapped_column(Text, default="[]")
+
+
 class NextDayPlan(Base):
     __tablename__ = "next_day_plans"
 

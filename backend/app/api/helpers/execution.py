@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import re
-from datetime import datetime, time, timedelta
+from datetime import datetime, time, timedelta, timezone
 from typing import Any
 
 from sqlalchemy.orm import Session
@@ -25,6 +25,7 @@ from app.models.trading import (
     ExitCard,
     Holding,
     IntradayEvidenceEvent,
+    MarketRegimeSnapshot,
     NextDayPlan,
     PositionExecutionState,
     PositionStateHistory,
@@ -93,6 +94,69 @@ def _trade_date() -> str:
     return datetime.now().date().isoformat()
 
 
+def _utc_now_naive() -> datetime:
+    """Return the UTC clock value used by timezone-naive database columns."""
+    return datetime.now(timezone.utc).replace(tzinfo=None)
+
+
+def _utc_storage_bounds_for_local_trade_day() -> tuple[datetime, datetime]:
+    """Return naive UTC bounds for timestamps persisted with UTC model defaults."""
+    local_start = datetime.combine(datetime.now().date(), time.min)
+    local_end = datetime.combine(datetime.now().date(), time.max)
+    china_offset = timedelta(hours=8)
+    return local_start - china_offset, local_end - china_offset
+
+
+def _latest_market_regime(db: Session) -> MarketRegimeSnapshot | None:
+    """Return today's latest persisted full-market state without triggering I/O.
+
+    Execution decisions must stay deterministic and fast.  Market collection is
+    handled elsewhere; this helper only consumes the latest evidence snapshot.
+    """
+    return (
+        db.query(MarketRegimeSnapshot)
+        .filter(MarketRegimeSnapshot.trade_date == _trade_date())
+        .order_by(MarketRegimeSnapshot.captured_at.desc(), MarketRegimeSnapshot.id.desc())
+        .first()
+    )
+
+
+def _market_regime_gate(
+    db: Session,
+    now: datetime,
+) -> tuple[MarketRegimeSnapshot | None, bool, bool, int]:
+    """Describe the global expansion gate.
+
+    The boolean values are ``freeze_expansion`` and ``data_limited``.  A weak
+    market can forbid adding/bottom-fishing, but it is deliberately *not* fed
+    into the holding sell score: direction risk and execution price are two
+    different decisions.
+    """
+    row = _latest_market_regime(db)
+    if row is None:
+        return None, False, True, 0
+    captured_at = row.captured_at
+    if captured_at.tzinfo is not None:
+        captured_at = captured_at.replace(tzinfo=None)
+    age_minutes = max(0, int((now - captured_at).total_seconds() // 60))
+    during_market = now.weekday() < 5 and time(9, 15) <= now.time() <= time(15, 0)
+    stale = during_market and age_minutes > 10
+    data_limited = bool(
+        stale
+        or str(row.data_quality or "").lower() in {"missing", "unavailable", "degraded", "partial"}
+        or float(row.coverage_ratio or 0) < 0.90
+        or str(row.regime_code or "").upper() == "UNKNOWN"
+        or _json_list(row.missing_fields_json)
+    )
+    freeze_expansion = bool(
+        str(row.risk_level or "") in {"极高", "高"}
+        or str(row.regime_code or "") in {"EXTREME_SHRINK_DECLINE", "VOLUME_SELL_OFF"}
+        or str(row.regime_code or "").upper() == "UNKNOWN"
+        or stale
+    )
+    return row, freeze_expansion, data_limited, age_minutes
+
+
 def _quote_for_holding(holding: Holding, quotes: dict[str, dict[str, Any]] | None = None) -> dict[str, Any]:
     quotes = quotes or {}
     lookup_code = _quote_lookup_code(holding.code, quotes)
@@ -110,9 +174,14 @@ def _latest_quotes(holdings: list[Holding]) -> dict[str, dict[str, Any]]:
 
 
 def _latest_profit_snapshot(db: Session, holding_id: int) -> ProfitProtectionSnapshot | None:
+    day_start, day_end = _utc_storage_bounds_for_local_trade_day()
     return (
         db.query(ProfitProtectionSnapshot)
-        .filter(ProfitProtectionSnapshot.holding_id == holding_id)
+        .filter(
+            ProfitProtectionSnapshot.holding_id == holding_id,
+            ProfitProtectionSnapshot.captured_at >= day_start,
+            ProfitProtectionSnapshot.captured_at <= day_end,
+        )
         .order_by(ProfitProtectionSnapshot.captured_at.desc(), ProfitProtectionSnapshot.id.desc())
         .first()
     )
@@ -123,7 +192,10 @@ def _latest_expectation_snapshot(db: Session, code: str) -> ExpectationSnapshot 
     candidates = {code, normalized, normalized.lstrip("0")}
     return (
         db.query(ExpectationSnapshot)
-        .filter(ExpectationSnapshot.code.in_(list(candidates)))
+        .filter(
+            ExpectationSnapshot.code.in_(list(candidates)),
+            ExpectationSnapshot.trade_date == _trade_date(),
+        )
         .order_by(ExpectationSnapshot.created_at.desc(), ExpectationSnapshot.id.desc())
         .first()
     )
@@ -134,7 +206,10 @@ def _latest_volume_price_snapshot(db: Session, code: str) -> VolumePriceSnapshot
     candidates = {code, normalized, normalized.lstrip("0")}
     return (
         db.query(VolumePriceSnapshot)
-        .filter(VolumePriceSnapshot.code.in_(list(candidates)))
+        .filter(
+            VolumePriceSnapshot.code.in_(list(candidates)),
+            VolumePriceSnapshot.trade_date == _trade_date(),
+        )
         .order_by(VolumePriceSnapshot.captured_at.desc(), VolumePriceSnapshot.id.desc())
         .first()
     )
@@ -225,6 +300,8 @@ def _stop_source_label(source: str) -> str:
         "next_day_plan": "次日计划",
         "sell_card": "卖出卡",
         "text_script": "交易剧本文本",
+        "frozen_state": "当日冻结执行状态",
+        "cost_reference": "持仓成本防守参考",
         "fallback_candidate": "候选价兜底",
     }
     parts = [labels.get(part, part) for part in str(source or "").split("+") if part]
@@ -235,7 +312,9 @@ def _script_stop_levels(holding: Holding, current_stop: float, current_hard_stop
     text = f"{holding.position_type or ''} {holding.next_discipline or ''}"
     evidence: list[str] = []
     sources: list[str] = []
-    hard_stop = current_hard_stop or (round(holding.cost_price * _script_hard_stop_ratio(holding.position_type), 2) if holding.cost_price else 0.0)
+    # A cost-derived percentage is only a risk reference.  It must not silently
+    # become an intraday hard stop; hard stops require an explicit frozen source.
+    hard_stop = current_hard_stop
     structure_stop = current_stop
     price_patterns = [
         (r"(?:结构止损|结构位|失败位|防守位|跌破|破位|止损)\D{0,8}(\d+(?:\.\d+)?)", "structure"),
@@ -275,9 +354,29 @@ def _structured_stop_levels(db: Session, holding: Holding, current_stop: float, 
     sources: list[str] = []
     structure_stop = current_stop
     hard_stop_price = hard_stop
+    frozen_state = (
+        db.query(PositionExecutionState)
+        .filter(
+            PositionExecutionState.holding_id == int(holding.id or 0),
+            PositionExecutionState.trade_date == _trade_date(),
+        )
+        .order_by(PositionExecutionState.updated_at.desc(), PositionExecutionState.id.desc())
+        .first()
+    )
+    if frozen_state and str(frozen_state.stop_source or "") not in {"", "fallback_candidate", "cost_reference"}:
+        structure_stop = float(frozen_state.structure_stop_price or 0) or structure_stop
+        hard_stop_price = float(frozen_state.hard_stop_price or 0) or hard_stop_price
+        evidence.append("沿用当日首次生成的执行止损，不随盘中最低价、VWAP或开盘价漂移。")
+        sources.extend([part for part in str(frozen_state.stop_source or "").split("+") if part])
+        sources.append("frozen_state")
+        return structure_stop, hard_stop_price, evidence, list(dict.fromkeys(sources))
+
     plan = (
         db.query(NextDayPlan)
-        .filter(NextDayPlan.code.in_(list(candidates)))
+        .filter(
+            NextDayPlan.code.in_(list(candidates)),
+            NextDayPlan.plan_date == _trade_date(),
+        )
         .order_by(NextDayPlan.plan_date.desc(), NextDayPlan.updated_at.desc(), NextDayPlan.id.desc())
         .first()
     )
@@ -297,9 +396,14 @@ def _structured_stop_levels(db: Session, holding: Holding, current_stop: float, 
             structure_stop = round(plan_stop, 2)
             evidence.append(f"按次日计划结构位设定结构止损 {structure_stop:.2f}。")
             sources.append("next_day_plan")
+    day_start, day_end = _utc_storage_bounds_for_local_trade_day()
     exit_card = (
         db.query(ExitCard)
-        .filter(ExitCard.code.in_(list(candidates)))
+        .filter(
+            ExitCard.code.in_(list(candidates)),
+            ExitCard.created_at >= day_start,
+            ExitCard.created_at <= day_end,
+        )
         .order_by(ExitCard.created_at.desc(), ExitCard.id.desc())
         .first()
     )
@@ -386,6 +490,31 @@ def _action_from_score(score: int, hard_exit: bool, has_profit: bool) -> tuple[s
     if score >= 1:
         return "DIVERGENCE_HOLD", "观察但禁止加仓", 0.0, "WATCH"
     return "PROFIT_EXPANSION" if has_profit else "NORMAL_HOLD", "继续持有", 0.0, "INFO"
+
+
+def _near_intraday_extreme_low(
+    current: float,
+    low: float,
+    high: float,
+    prev_close: float,
+    limit_down_price: float,
+) -> bool:
+    """Return whether selling now would likely be chasing an intraday extreme.
+
+    The guard deliberately requires both proximity to the low and a meaningful
+    adverse move.  A quiet stock trading at the bottom of a tiny range should
+    not be classified as an extreme merely because current == low.
+    """
+    if current <= 0 or low <= 0:
+        return False
+    intraday_range = max(0.0, high - low)
+    range_position = (current - low) / intraday_range if intraday_range > 0 else 1.0
+    near_low = current <= low * 1.005 or range_position <= 0.12
+    drawdown_from_high = ((high - current) / high * 100) if high > 0 else 0.0
+    change_pct = ((current - prev_close) / prev_close * 100) if prev_close > 0 else 0.0
+    near_limit_down = bool(limit_down_price > 0 and current <= limit_down_price * 1.01)
+    meaningful_decline = drawdown_from_high >= 3.0 or change_pct <= -3.0 or near_limit_down
+    return near_low and meaningful_decline
 
 
 def _high_open_failed_breakout_event(
@@ -764,6 +893,7 @@ def _recovery_events(db: Session, holding: Holding, volume_state: str, current: 
         db.query(IntradayEvidenceEvent)
         .filter(
             IntradayEvidenceEvent.target_code.in_(list(candidates)),
+            IntradayEvidenceEvent.trade_date == _trade_date(),
             IntradayEvidenceEvent.captured_at >= since,
             IntradayEvidenceEvent.event_type.in_([
                 "VWAP_BROKEN",
@@ -825,6 +955,7 @@ def _dedupe_events(db: Session, events: list[dict[str, Any]], cooldown_minutes: 
             .filter(
                 IntradayEvidenceEvent.target_code == key[0],
                 IntradayEvidenceEvent.event_type == key[1],
+                IntradayEvidenceEvent.trade_date == _trade_date(),
                 IntradayEvidenceEvent.captured_at >= now - timedelta(minutes=window_minutes),
             )
             .order_by(IntradayEvidenceEvent.captured_at.desc(), IntradayEvidenceEvent.id.desc())
@@ -883,7 +1014,6 @@ def build_position_execution_state(
     current = _safe_float(quote.get("price")) or float(holding.current_price or 0)
     high = _safe_float(quote.get("high")) or max(current, float(holding.current_price or 0))
     low = _safe_float(quote.get("low"))
-    open_price = _safe_float(quote.get("open"))
     vwap = _estimated_vwap(quote)
     total_asset = _account_total_asset(db) or float(holding.total_asset or 0)
     market_value = current * int(holding.quantity or 0)
@@ -908,20 +1038,27 @@ def build_position_execution_state(
     protection_level, allowed_drawdown = _protection_level(max_profit_pct)
     floor_profit_pct = max_profit_pct * (1 - allowed_drawdown) if protection_level != "NONE" else 0.0
     profit_protection_price = round(holding.cost_price * (1 + floor_profit_pct / 100), 2) if floor_profit_pct and holding.cost_price else 0.0
-    hard_stop_price = round(holding.cost_price * _script_hard_stop_ratio(holding.position_type), 2) if holding.cost_price else 0.0
-    support_candidates = [value for value in [vwap, open_price, low, holding.cost_price * 0.97 if holding.cost_price else 0] if value and value > 0]
-    structure_stop_price = round(max(min(support_candidates), hard_stop_price), 2) if support_candidates else hard_stop_price
+    # Stops must be stable across the session.  VWAP, the opening price and in
+    # particular today's low are observations, not stop sources: using the
+    # current low here makes every new low trigger a self-referential sell.
+    hard_stop_price = 0.0
+    structure_stop_price = round(holding.cost_price * 0.97, 2) if holding.cost_price else 0.0
     structure_stop_price, hard_stop_price, structured_stop_evidence, structured_stop_sources = _structured_stop_levels(
         db, holding, structure_stop_price, hard_stop_price
     )
-    structure_stop_price, hard_stop_price, script_stop_evidence, script_stop_sources = _script_stop_levels(
-        holding, structure_stop_price, hard_stop_price
-    )
+    if "frozen_state" in structured_stop_sources:
+        # The state is already frozen for this trade date.  Re-parsing mutable
+        # intraday text would allow the stop to drift after the first decision.
+        script_stop_evidence, script_stop_sources = [], []
+    else:
+        structure_stop_price, hard_stop_price, script_stop_evidence, script_stop_sources = _script_stop_levels(
+            holding, structure_stop_price, hard_stop_price
+        )
     stop_sources = list(dict.fromkeys(structured_stop_sources + script_stop_sources))
-    stop_source = "+".join(stop_sources) if stop_sources else "fallback_candidate"
+    stop_source = "+".join(stop_sources) if stop_sources else "cost_reference"
     stop_source_detail = "；".join((structured_stop_evidence + script_stop_evidence)[:4])
     if not stop_source_detail:
-        stop_source_detail = "按VWAP、开盘价、日内低点、成本防守位和仓位类型硬止损比例生成候选止损。"
+        stop_source_detail = "仅以持仓成本防守位作为稳定结构参考；尚未冻结明确硬止损，不使用盘中最低价、VWAP或开盘价即时生成止损。"
     trailing_stop_price = round(maximum_price * 0.95, 2) if maximum_price and protection_level in {"LEVEL_2", "LEVEL_3", "LEVEL_4"} else 0.0
 
     evidence: list[str] = [
@@ -940,6 +1077,44 @@ def build_position_execution_state(
         "重新站回 VWAP 并维持至少一个观察窗口。",
         "所属板块资金停止流出或重新回到前排。",
     ]
+    market_regime, market_expansion_frozen, market_data_limited, market_age_minutes = _market_regime_gate(db, now)
+    if market_regime is None:
+        evidence.append("全市场状态数据缺口：尚无当日市场环境快照；本次不会把未知市场环境当成卖出依据。")
+    else:
+        market_summary = (
+            f"全市场状态：{market_regime.regime_name or '未分类'}"
+            f"（风险{market_regime.risk_level or '未知'}、数据质量{market_regime.data_quality or '未知'}、"
+            f"快照{market_age_minutes}分钟前）。"
+        )
+        evidence.append(market_summary)
+        evidence.extend([f"全市场证据：{item}" for item in _json_list(market_regime.evidence_json)[:3]])
+        missing_market_fields = _json_list(market_regime.missing_fields_json)
+        if market_data_limited:
+            missing_detail = f"；缺失字段：{'、'.join(missing_market_fields[:5])}" if missing_market_fields else ""
+            evidence.append(
+                f"全市场数据质量不足：当前状态仅用于限制仓位扩张，不据此机械卖出{missing_detail}。"
+            )
+        if market_expansion_frozen:
+            invalid_conditions.append("全市场高风险或关键数据不足期间，禁止加仓、抄底和做T买回。")
+            recovery_conditions.append("全市场闸门解除后，仍需个股重新站稳VWAP且预期修复，才允许恢复加仓评估。")
+            forbidden = _json_list(market_regime.forbidden_actions_json)
+            if forbidden:
+                evidence.append(f"全市场禁止动作：{'；'.join(forbidden[:3])}。")
+        else:
+            counter_evidence.append(
+                f"全市场状态{market_regime.regime_name or '未分类'}未触发全局冻结闸门；个股仍须独立通过预期和量价验证。"
+            )
+    risk_family_scores: dict[str, int] = {}
+    positive_family_scores: dict[str, int] = {}
+
+    def add_risk(family: str, score: int) -> None:
+        # Correlated observations in the same family corroborate one another,
+        # but must not be counted repeatedly as independent risks.
+        risk_family_scores[family] = max(risk_family_scores.get(family, 0), max(0, int(score)))
+
+    def add_positive(family: str, score: int = 1) -> None:
+        positive_family_scores[family] = max(positive_family_scores.get(family, 0), max(0, int(score)))
+
     negative_score = 0
     hard_exit = False
     expectation_result = _expectation_result(expectation)
@@ -948,6 +1123,8 @@ def build_position_execution_state(
     volume_pattern = _volume_pattern(volume_price)
     high_drawdown_pct = ((high - current) / high * 100) if high and current else 0.0
     if volume_price is not None:
+        high = max(high, _safe_float(getattr(volume_price, "high_price", 0)))
+        low = low or _safe_float(getattr(volume_price, "low_price", 0))
         high_drawdown_pct = max(high_drawdown_pct, _safe_float(getattr(volume_price, "high_drawdown", 0)))
         vwap = _safe_float(getattr(volume_price, "vwap", 0)) or vwap
     volume_state = _volume_price_state(volume_pattern, current, vwap if vwap_reliable else 0, high_drawdown_pct)
@@ -957,58 +1134,85 @@ def build_position_execution_state(
         evidence.append(f"已进入{protection_level}利润保护，不能无条件放任盈利大幅回吐。")
     if expectation_result in WEAK_EXPECTATION_RESULTS:
         score_add = 2 if expectation_result in {"WEAKER", "INVALID"} or expectation_gap_score <= -18 else 1
-        negative_score += score_add
+        add_risk("expectation", score_add)
         evidence.append(f"阶段预期结果 {expectation_result}，预期差 {expectation_gap_score}，执行侧不允许补仓摊低。")
         invalid_conditions.append("预期低于阈值且未出现量价修复前，禁止加仓或做T接回。")
     elif expectation_result in STRONG_EXPECTATION_RESULTS:
         counter_evidence.append(f"阶段预期结果 {expectation_result}，暂未构成预期证伪。")
+        add_positive("expectation", 1)
     if volume_state == "VOLUME_PRICE_WEAKENING" and vwap_reliable:
-        negative_score += 2
+        add_risk("volume_price", 2)
         evidence.append("量价形态为冲高回落跌破VWAP，优先按风险信号处理。")
         invalid_conditions.append("冲高回落跌破VWAP后，不能用主观预期继续扛单。")
     elif volume_state == "VWAP_BREAKDOWN" and vwap_reliable:
-        negative_score += 1
+        add_risk("volume_price", 1)
         evidence.append("量价状态为跌破VWAP，等待重新站回后才允许恢复观察。")
     elif volume_state == "HIGH_DRAWDOWN":
-        negative_score += 1
+        add_risk("volume_price", 1)
         evidence.append(f"相对日内高点回撤 {high_drawdown_pct:.2f}%，进入高位回落观察。")
     elif volume_state == "REPAIR_CONFIRMED":
         counter_evidence.append("量价状态为VWAP上方强势，暂不按走弱处理。")
+        add_positive("volume_price", 1)
+    elif volume_state == "VWAP_STRONG":
+        counter_evidence.append("当前价格位于可靠VWAP上方，量价尚未证实走弱。")
+        add_positive("volume_price", 1)
+    structure_reference_breached = bool(current <= structure_stop_price and structure_stop_price)
+    structure_has_confirmation = bool(
+        stop_sources
+        or hard_expectation_invalidation
+        or expectation_result in WEAK_EXPECTATION_RESULTS
+        or (vwap_reliable and volume_state in {"VWAP_BREAKDOWN", "VOLUME_PRICE_WEAKENING"})
+    )
     if current <= hard_stop_price and hard_stop_price:
-        negative_score += 5
+        add_risk("hard_stop", 5)
         hard_exit = True
         evidence.append(f"当前价 {current:.2f} 已触发硬止损 {hard_stop_price:.2f}。")
-    elif current <= structure_stop_price and structure_stop_price:
-        negative_score += 2
-        evidence.append(f"当前价 {current:.2f} 已接近/跌破结构止损 {structure_stop_price:.2f}。")
+    elif structure_reference_breached and structure_has_confirmation:
+        add_risk("structure", 2)
+        if stop_sources:
+            evidence.append(f"当前价 {current:.2f} 已接近/跌破明确计划结构位 {structure_stop_price:.2f}。")
+        else:
+            evidence.append(
+                f"当前价 {current:.2f} 跌破成本防守参考 {structure_stop_price:.2f}，"
+                "并与预期证伪或可靠量价破位共振。"
+            )
+    elif structure_reference_breached:
+        counter_evidence.append(
+            f"当前价虽跌破成本防守参考 {structure_stop_price:.2f}，但没有预期证伪、"
+            "可靠量价破位或明确盘前计划共振；该参考不单独计入卖出分。"
+        )
     if time_stop_reasons and vwap_reliable:
-        negative_score += 2
+        add_risk("volume_price", 2)
         evidence.extend(time_stop_reasons)
         invalid_conditions.append("时间止损触发后，必须看到真实VWAP修复或重新回封才允许恢复计划。")
     if vwap and vwap_reliable:
         if current < vwap:
-            negative_score += 1
+            add_risk("volume_price", 1)
             evidence.append(f"当前价 {current:.2f} 跌破真实分钟VWAP {vwap:.2f}。")
         else:
             counter_evidence.append(f"当前仍在真实分钟VWAP {vwap:.2f} 上方。")
+            add_positive("volume_price", 1)
     else:
         counter_evidence.append("缺少真实1分钟成交数据，VWAP 为估算缺口，不把该项作为确定性卖点。")
     if max_profit_pct >= 8 and profit_drawdown_pct >= 3:
-        negative_score += 2
+        add_risk("profit_protection", 2)
         evidence.append("浮盈超过 8% 后出现明显回撤，优先保护利润。")
     elif max_profit_pct >= 5 and profit_drawdown_pct >= 3:
-        negative_score += 1
+        add_risk("profit_protection", 1)
         evidence.append("浮盈超过 5% 后回撤超过 3 个百分点，进入减仓观察。")
     if current_profit_pct < 0 and max_profit_pct >= 5:
-        negative_score += 3
+        add_risk("profit_protection", 3)
         evidence.append("曾有 5% 以上浮盈但当前转亏，触发 PROFIT_TO_LOSS_RISK。")
     if seesaw:
         risk_level = str(getattr(seesaw, "risk_level", "观察") or "观察")
         sector_state = str(getattr(seesaw, "signal", "") or risk_level)
         if risk_level == "高":
-            negative_score += 2
+            add_risk("sector", 2)
         elif risk_level == "中高":
-            negative_score += 1
+            add_risk("sector", 1)
+        elif risk_level in {"低", "安全"}:
+            counter_evidence.append("板块/资金环境风险较低，暂未形成外部共振杀跌。")
+            add_positive("sector", 1)
         sector_triggers = list(getattr(seesaw, "sector_ebb_trigger", []) or [])
         stock_triggers = list(getattr(seesaw, "stock_weakening_trigger", []) or [])
         profit_triggers = list(getattr(seesaw, "profit_drawdown_trigger", []) or [])
@@ -1018,6 +1222,16 @@ def build_position_execution_state(
     else:
         sector_state = "资金跷跷板数据缺口"
         counter_evidence.append("未取得板块跷跷板数据，本次建议主要依据个股价格和利润保护。")
+
+    raw_negative_score = sum(risk_family_scores.values())
+    protected_risk = risk_family_scores.get("hard_stop", 0) + risk_family_scores.get("structure", 0)
+    offsettable_risk = max(0, raw_negative_score - protected_risk)
+    positive_offset = min(2, sum(positive_family_scores.values()), offsettable_risk)
+    negative_score = protected_risk + max(0, offsettable_risk - positive_offset)
+    if positive_offset:
+        counter_evidence.append(
+            f"明确正向反证抵扣 {positive_offset} 分：原始风险 {raw_negative_score} 分，去重降级后 {negative_score} 分。"
+        )
 
     state, action, reduce_ratio, level = _action_from_score(negative_score, hard_exit, current_profit_pct > 0)
     if hard_expectation_invalidation and not hard_exit:
@@ -1038,9 +1252,11 @@ def build_position_execution_state(
         invalid_conditions.insert(0, "真实竞价/开盘显著低于合理区间，未出现明确修复前必须先降低持仓风险。")
     if expectation_result in WEAK_EXPECTATION_RESULTS and volume_state in {"VWAP_BREAKDOWN", "VOLUME_PRICE_WEAKENING"} and not hard_exit:
         state = "EXPECTATION_VOLUME_BREAKDOWN"
-        action = "减仓50%" if current_profit_pct >= 0 else "只留观察仓"
-        reduce_ratio = max(reduce_ratio, 0.50 if current_profit_pct >= 0 else 0.75)
-        level = "REDUCE" if current_profit_pct >= 0 else "EXIT"
+        # The same evidence must lead to the same action regardless of whether
+        # floating P&L happens to be slightly positive or negative.
+        action = "减仓50%"
+        reduce_ratio = max(reduce_ratio, 0.50)
+        level = "REDUCE"
     if not vwap_reliable and action in {"减仓25%", "减仓50%", "只留观察仓", "全部退出"} and not hard_exit and not hard_expectation_invalidation:
         state = "DEGRADED_DATA_OBSERVATION"
         action = "观察但禁止加仓"
@@ -1051,8 +1267,25 @@ def build_position_execution_state(
     if reduce_ratio >= 0.75 and action == "减仓50%":
         action = "只留观察仓"
         level = "EXIT"
+
+    prev_close = _safe_float(quote.get("prev_close")) or _safe_float(getattr(volume_price, "prev_close", 0))
+    limit_down_price = _safe_float(quote.get("limit_down_price")) or (round(prev_close * 0.9, 2) if prev_close else 0.0)
+    near_extreme_low = _near_intraday_extreme_low(current, low, high, prev_close, limit_down_price)
+    if near_extreme_low and not hard_exit and reduce_ratio > 0:
+        original_action = action
+        original_ratio = reduce_ratio
+        state = "EXTREME_LOW_WAIT_REBOUND"
+        action = "禁止追卖，等待反抽确认"
+        reduce_ratio = 0.0
+        level = "WATCH"
+        evidence.append(
+            f"执行时机门控：当前价接近日内极端低点，且明确硬止损尚未实际触发；"
+            f"保留风险结论（原建议{original_action}、{original_ratio * 100:.0f}%），但禁止在低位追卖。"
+        )
+        recovery_conditions.insert(0, "等待价格脱离日内低点并反抽VWAP/固定结构位后，再按承接强弱执行；若新低持续且固定硬止损被触发则立即退出。")
     evidence.append(
-        f"动态决策依据：风险积分 {negative_score}；预期差 {expectation_gap_score}；"
+        f"动态决策依据：风险族 {risk_family_scores}，正向反证 {positive_family_scores}，"
+        f"去重后风险积分 {negative_score}；预期差 {expectation_gap_score}；"
         f"量价状态 {volume_state}；当前价 {'已' if current <= structure_stop_price and structure_stop_price else '未'}破结构止损，"
         f"{'已' if hard_exit else '未'}触发硬止损。"
     )
@@ -1065,6 +1298,13 @@ def build_position_execution_state(
     if current_profit_pct < 0 and state == "NORMAL_HOLD":
         state = "LOSS_OBSERVATION"
         action = "观察但禁止加仓"
+    if market_expansion_frozen and reduce_ratio <= 0 and action == "继续持有":
+        # The global gate changes permission to expand risk, not the holding's
+        # sell conclusion.  Existing positions remain governed by their own
+        # expectation, volume/price and frozen-stop evidence.
+        state = "MARKET_GATE_HOLD" if state == "NORMAL_HOLD" else state
+        action = "持有但禁止加仓/抄底"
+        evidence.append("全市场闸门只冻结新增风险；未出现个股证伪或固定止损时，不在低位机械卖出。")
     t_forbidden = bool(
         hard_exit
         or state in {"EXIT_REQUIRED", "REDUCE_REQUIRED", "EXPECTATION_VOLUME_BREAKDOWN"}
@@ -1072,11 +1312,15 @@ def build_position_execution_state(
         or (vwap_reliable and volume_state in {"VWAP_BREAKDOWN", "VOLUME_PRICE_WEAKENING"})
         or expectation_result in WEAK_EXPECTATION_RESULTS
         or (seesaw and getattr(seesaw, "risk_level", "") in {"高", "中高"})
+        or market_expansion_frozen
     )
     t_eligible = not t_forbidden and int(holding.quantity or 0) > 0 and current_profit_pct >= 0 and protection_level != "NONE"
     t_type = "POSITIVE_T" if t_eligible else "NO_T"
     if t_forbidden:
-        evidence.append("当前禁止做T：做T不能用于挽救已经证伪或需要降风险的交易。")
+        if market_expansion_frozen:
+            evidence.append("当前禁止做T：全市场扩仓闸门生效，即使个股暂未走弱，也禁止借做T实施抄底或变相加仓。")
+        else:
+            evidence.append("当前禁止做T：做T不能用于挽救已经证伪或需要降风险的交易。")
         t_type = "NO_T"
     recommended_position_ratio = max(0.0, position_ratio * (1 - reduce_ratio))
     sellable_quantity, today_buy_quantity, yesterday_quantity = _position_quantities(db, holding, _trade_date())
@@ -1105,10 +1349,15 @@ def build_position_execution_state(
     )
     events.extend(_recovery_events(db, holding, volume_price_state, current, vwap))
 
+    storage_now = _utc_now_naive()
+    if previous_max_profit < max(high_profit_pct, current_profit_pct):
+        maximum_profit_at = storage_now
+    if previous_day_max < max(high_profit_pct, current_profit_pct):
+        day_max_profit_at = storage_now
     snapshot = ProfitProtectionSnapshot(
         holding_id=int(holding.id),
         code=holding.code,
-        captured_at=now,
+        captured_at=storage_now,
         current_profit_pct=round(current_profit_pct, 2),
         maximum_profit_pct=round(max_profit_pct, 2),
         profit_drawdown_pct=round(profit_drawdown_pct, 2),

@@ -1,5 +1,5 @@
 from types import SimpleNamespace
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from app.api.helpers.execution import _confirmation_deadline, _confirmation_policy, build_position_execution_state
 from app.models.trading import (
@@ -8,8 +8,10 @@ from app.models.trading import (
     ExitCard,
     Holding,
     IntradayEvidenceEvent,
+    MarketRegimeSnapshot,
     NextDayPlan,
     PositionStateHistory,
+    ProfitProtectionSnapshot,
     TimeStopRule,
     TradeLog,
     VolumePriceSnapshot,
@@ -80,7 +82,7 @@ def test_position_execution_hard_stop_forbids_t(db_session):
         current_price=9.3,
         total_asset=100000,
         position_type="打板仓",
-        next_discipline="跌破硬止损退出",
+        next_discipline="交易剧本：硬止损 9.60，跌破立即退出",
     )
     db_session.add(holding)
     db_session.commit()
@@ -106,6 +108,613 @@ def test_position_execution_hard_stop_forbids_t(db_session):
         seesaw=None,
     )
     assert db_session.query(ActionRecommendation).filter(ActionRecommendation.holding_id == holding.id).count() == 1
+
+
+def test_intraday_low_is_not_used_as_a_self_referential_stop(db_session):
+    holding = Holding(
+        code="600101",
+        name="低点不造止损",
+        quantity=1000,
+        cost_price=10,
+        current_price=9.85,
+        total_asset=100000,
+        position_type="普通持仓",
+        next_discipline="尚未制定盘前硬止损",
+    )
+    db_session.add(holding)
+    db_session.commit()
+    db_session.refresh(holding)
+
+    state = build_position_execution_state(
+        db_session,
+        holding,
+        quote={"price": 9.85, "high": 10.5, "low": 9.85, "open": 10.2, "note": "实时行情"},
+    )
+
+    assert state.structure_stop_price == 9.7
+    assert state.structure_stop_price != 9.85
+    assert state.hard_stop_price == 0
+    assert state.stop_source == "cost_reference"
+    assert any("不使用盘中最低价" in item for item in state.evidence)
+
+
+def test_extreme_low_without_frozen_hard_stop_blocks_chasing_the_sell(db_session):
+    holding = Holding(
+        code="600102",
+        name="极端低点门控",
+        quantity=1000,
+        cost_price=10,
+        current_price=9.05,
+        total_asset=100000,
+        position_type="普通持仓",
+        next_discipline="预期转弱时降低风险",
+    )
+    db_session.add(holding)
+    db_session.commit()
+    db_session.refresh(holding)
+    expectation = ExpectationSnapshot(
+        trade_date=datetime.now().date().isoformat(),
+        code=holding.code,
+        name=holding.name,
+        stage="盘中确认",
+        expectation_gap_score=-10,
+        expectation_result="SLIGHTLY_WEAKER",
+    )
+    volume = VolumePriceSnapshot(
+        trade_date=datetime.now().date().isoformat(),
+        code=holding.code,
+        name=holding.name,
+        price=9.05,
+        open_price=9.8,
+        high_price=10,
+        low_price=9,
+        prev_close=10,
+        vwap=9.5,
+        vwap_source="minute",
+        minute_bar_count=5,
+        vwap_reliable=True,
+        pattern="跌破VWAP",
+        data_quality="realtime",
+    )
+
+    state = build_position_execution_state(
+        db_session,
+        holding,
+        quote={
+            "price": 9.05,
+            "prev_close": 10,
+            "high": 10,
+            "low": 9,
+            "open": 9.8,
+            "vwap": 9.5,
+            "minute_bars": [
+                {"price": 9.4, "volume": 1000, "amount": 9400},
+                {"price": 9.3, "volume": 1000, "amount": 9300},
+                {"price": 9.2, "volume": 1000, "amount": 9200},
+            ],
+            "note": "实时行情",
+        },
+        expectation=expectation,
+        volume_price=volume,
+    )
+
+    assert state.state == "EXTREME_LOW_WAIT_REBOUND"
+    assert state.recommended_action == "禁止追卖，等待反抽确认"
+    assert state.recommended_reduce_ratio == 0
+    assert state.t_eligible is False
+    assert any("执行时机门控" in item for item in state.evidence)
+
+
+def test_extreme_low_with_untriggered_explicit_hard_stop_still_blocks_chasing_the_sell(db_session):
+    holding = Holding(
+        code="600107",
+        name="未触发硬止损不追卖",
+        quantity=1000,
+        cost_price=10,
+        current_price=9.05,
+        total_asset=100000,
+        position_type="普通持仓",
+        next_discipline="交易剧本：硬止损 8.80，预期与量价转弱时降低风险",
+    )
+    db_session.add(holding)
+    db_session.commit()
+    db_session.refresh(holding)
+    expectation = ExpectationSnapshot(
+        trade_date=datetime.now().date().isoformat(),
+        code=holding.code,
+        name=holding.name,
+        stage="盘中确认",
+        expectation_gap_score=-10,
+        expectation_result="SLIGHTLY_WEAKER",
+    )
+    volume = VolumePriceSnapshot(
+        trade_date=datetime.now().date().isoformat(),
+        code=holding.code,
+        name=holding.name,
+        price=9.05,
+        high_price=10,
+        low_price=9,
+        prev_close=10,
+        vwap=9.5,
+        vwap_source="minute",
+        minute_bar_count=5,
+        vwap_reliable=True,
+        pattern="跌破VWAP",
+        data_quality="realtime",
+    )
+
+    state = build_position_execution_state(
+        db_session,
+        holding,
+        quote={
+            "price": 9.05,
+            "prev_close": 10,
+            "high": 10,
+            "low": 9,
+            "open": 9.8,
+            "vwap": 9.5,
+            "minute_bars": [
+                {"price": 9.4, "volume": 1000, "amount": 9400},
+                {"price": 9.3, "volume": 1000, "amount": 9300},
+                {"price": 9.2, "volume": 1000, "amount": 9200},
+            ],
+            "note": "实时行情",
+        },
+        expectation=expectation,
+        volume_price=volume,
+    )
+
+    assert state.hard_stop_price == 8.8
+    assert state.state == "EXTREME_LOW_WAIT_REBOUND"
+    assert state.recommended_action == "禁止追卖，等待反抽确认"
+    assert state.recommended_reduce_ratio == 0
+    assert any("硬止损尚未实际触发" in item for item in state.evidence)
+
+
+def test_cost_reference_breach_needs_dynamic_confirmation_before_adding_sell_score(db_session):
+    holding = Holding(
+        code="600108",
+        name="成本参考需共振",
+        quantity=1000,
+        cost_price=10,
+        current_price=9.65,
+        total_asset=100000,
+        position_type="普通持仓",
+        next_discipline="尚未制定明确盘前止损计划",
+    )
+    db_session.add(holding)
+    db_session.commit()
+    db_session.refresh(holding)
+
+    neutral = build_position_execution_state(
+        db_session,
+        holding,
+        quote={"price": 9.65, "prev_close": 10, "high": 10.2, "low": 9.3, "note": "实时行情"},
+        persist=False,
+    )
+
+    assert neutral.stop_source == "cost_reference"
+    assert neutral.recommended_reduce_ratio == 0
+    assert any("该参考不单独计入卖出分" in item for item in neutral.counter_evidence)
+
+    expectation = ExpectationSnapshot(
+        trade_date=datetime.now().date().isoformat(),
+        code=holding.code,
+        name=holding.name,
+        stage="盘中确认",
+        expectation_gap_score=-10,
+        expectation_result="SLIGHTLY_WEAKER",
+    )
+    volume = VolumePriceSnapshot(
+        trade_date=datetime.now().date().isoformat(),
+        code=holding.code,
+        name=holding.name,
+        price=9.65,
+        high_price=10.2,
+        low_price=9.3,
+        prev_close=10,
+        vwap=9.85,
+        vwap_source="minute",
+        minute_bar_count=5,
+        vwap_reliable=True,
+        pattern="跌破VWAP",
+        data_quality="realtime",
+    )
+    confirmed = build_position_execution_state(
+        db_session,
+        holding,
+        quote={
+            "price": 9.65,
+            "prev_close": 10,
+            "high": 10.2,
+            "low": 9.3,
+            "vwap": 9.85,
+            "minute_bars": [
+                {"price": 9.9, "volume": 1000, "amount": 9900},
+                {"price": 9.8, "volume": 1000, "amount": 9800},
+                {"price": 9.65, "volume": 1000, "amount": 9650},
+            ],
+            "note": "实时行情",
+        },
+        expectation=expectation,
+        volume_price=volume,
+        persist=False,
+    )
+
+    assert confirmed.recommended_reduce_ratio == 0.75
+    assert any("并与预期证伪或可靠量价破位共振" in item for item in confirmed.evidence)
+
+
+def test_profit_snapshots_use_utc_storage_and_do_not_cross_local_trade_days(db_session):
+    holding = Holding(
+        code="600109",
+        name="利润快照UTC隔离",
+        quantity=1000,
+        cost_price=10,
+        current_price=10.2,
+        total_asset=100000,
+        position_type="普通持仓",
+        next_discipline="只沿用本地交易日内的利润高点",
+    )
+    db_session.add(holding)
+    db_session.flush()
+    local_now = datetime.now()
+    db_session.add_all([
+        ProfitProtectionSnapshot(
+            holding_id=holding.id,
+            code=holding.code,
+            captured_at=local_now - timedelta(days=1, minutes=10, hours=8),
+            current_profit_pct=40,
+            maximum_profit_pct=50,
+            maximum_price=15,
+        ),
+        ProfitProtectionSnapshot(
+            holding_id=holding.id,
+            code=holding.code,
+            captured_at=local_now - timedelta(minutes=10, hours=8),
+            current_profit_pct=3,
+            maximum_profit_pct=4,
+            maximum_price=10.4,
+        ),
+    ])
+    db_session.commit()
+    db_session.refresh(holding)
+
+    before_utc = datetime.now(timezone.utc).replace(tzinfo=None)
+    state = build_position_execution_state(
+        db_session,
+        holding,
+        quote={"price": 10.2, "prev_close": 10, "high": 10.3, "low": 10.1, "note": "实时行情"},
+    )
+    after_utc = datetime.now(timezone.utc).replace(tzinfo=None)
+
+    assert state.profit_snapshot.maximum_profit_pct == 4
+    stored = (
+        db_session.query(ProfitProtectionSnapshot)
+        .filter(
+            ProfitProtectionSnapshot.holding_id == holding.id,
+            ProfitProtectionSnapshot.captured_at >= before_utc - timedelta(seconds=1),
+            ProfitProtectionSnapshot.captured_at <= after_utc + timedelta(seconds=1),
+        )
+        .order_by(ProfitProtectionSnapshot.id.desc())
+        .first()
+    )
+    assert stored is not None
+    assert before_utc - timedelta(seconds=1) <= stored.captured_at <= after_utc + timedelta(seconds=1)
+
+
+def test_same_expectation_and_volume_evidence_has_same_ratio_across_profit_sign(db_session):
+    states = []
+    for index, cost in enumerate((9.9, 10.1), start=1):
+        code = f"60010{index + 2}"
+        holding = Holding(
+            code=code,
+            name=f"盈亏符号{index}",
+            quantity=1000,
+            cost_price=cost,
+            current_price=10,
+            total_asset=100000,
+            position_type="普通持仓",
+            next_discipline="相同证据相同动作",
+        )
+        db_session.add(holding)
+        db_session.flush()
+        expectation = ExpectationSnapshot(
+            trade_date=datetime.now().date().isoformat(),
+            code=code,
+            name=holding.name,
+            stage="盘中确认",
+            expectation_gap_score=-10,
+            expectation_result="SLIGHTLY_WEAKER",
+        )
+        volume = VolumePriceSnapshot(
+            trade_date=datetime.now().date().isoformat(),
+            code=code,
+            name=holding.name,
+            price=10,
+            open_price=10.05,
+            high_price=10.1,
+            low_price=9.7,
+            prev_close=10,
+            vwap=10.05,
+            vwap_source="minute",
+            minute_bar_count=5,
+            vwap_reliable=True,
+            pattern="跌破VWAP",
+            data_quality="realtime",
+        )
+        states.append(build_position_execution_state(
+            db_session,
+            holding,
+            quote={
+                "price": 10,
+                "prev_close": 10,
+                "high": 10.1,
+                "low": 9.7,
+                "open": 10.05,
+                "vwap": 10.05,
+                "minute_bars": [
+                    {"price": 10.04, "volume": 1000, "amount": 10040},
+                    {"price": 10.02, "volume": 1000, "amount": 10020},
+                    {"price": 10, "volume": 1000, "amount": 10000},
+                ],
+                "note": "实时行情",
+            },
+            expectation=expectation,
+            volume_price=volume,
+            persist=False,
+        ))
+
+    assert states[0].recommended_action == states[1].recommended_action == "减仓50%"
+    assert states[0].recommended_reduce_ratio == states[1].recommended_reduce_ratio == 0.5
+
+
+def test_previous_trade_date_snapshots_are_not_reused(db_session):
+    holding = Holding(
+        code="600105",
+        name="隔日快照隔离",
+        quantity=1000,
+        cost_price=10,
+        current_price=10.2,
+        total_asset=100000,
+        position_type="普通持仓",
+        next_discipline="只使用当日快照",
+    )
+    db_session.add(holding)
+    db_session.add(ExpectationSnapshot(
+        trade_date=(datetime.now() - timedelta(days=1)).date().isoformat(),
+        code=holding.code,
+        name=holding.name,
+        stage="昨日盘中",
+        expectation_gap_score=-25,
+        expectation_result="INVALID",
+    ))
+    db_session.add(VolumePriceSnapshot(
+        trade_date=(datetime.now() - timedelta(days=1)).date().isoformat(),
+        code=holding.code,
+        name=holding.name,
+        price=9,
+        vwap=10,
+        vwap_source="minute",
+        minute_bar_count=20,
+        vwap_reliable=True,
+        pattern="冲高回落跌破VWAP",
+        data_quality="realtime",
+    ))
+    db_session.commit()
+    db_session.refresh(holding)
+
+    state = build_position_execution_state(
+        db_session,
+        holding,
+        quote={
+            "price": 10.2,
+            "prev_close": 10,
+            "high": 10.3,
+            "low": 10.1,
+            "open": 10.1,
+            "vwap": 10.15,
+            "minute_bars": [
+                {"price": 10.1, "volume": 1000, "amount": 10100},
+                {"price": 10.15, "volume": 1000, "amount": 10150},
+                {"price": 10.2, "volume": 1000, "amount": 10200},
+            ],
+            "note": "实时行情",
+        },
+    )
+
+    assert state.expectation_state == "MATCHED"
+    assert state.volume_price_state != "VOLUME_PRICE_WEAKENING"
+    assert not any("阶段预期结果 INVALID" in item for item in state.evidence)
+
+
+def test_explicit_positive_evidence_downgrades_non_hard_risk(db_session):
+    holding = Holding(
+        code="600106",
+        name="正向反证降级",
+        quantity=1000,
+        cost_price=10,
+        current_price=10.1,
+        total_asset=100000,
+        position_type="普通持仓",
+        next_discipline="正向证据可降级非硬风险",
+    )
+    db_session.add(holding)
+    db_session.commit()
+    db_session.refresh(holding)
+    expectation = ExpectationSnapshot(
+        trade_date=datetime.now().date().isoformat(),
+        code=holding.code,
+        name=holding.name,
+        stage="盘中确认",
+        expectation_gap_score=10,
+        expectation_result="STRONGER",
+    )
+    volume = VolumePriceSnapshot(
+        trade_date=datetime.now().date().isoformat(),
+        code=holding.code,
+        name=holding.name,
+        price=10.1,
+        high_price=10.2,
+        low_price=9.9,
+        prev_close=10,
+        vwap=10.02,
+        vwap_source="minute",
+        minute_bar_count=5,
+        vwap_reliable=True,
+        pattern="VWAP上方强势",
+        data_quality="realtime",
+    )
+    seesaw = SimpleNamespace(
+        risk_level="中高",
+        signal="板块仍在观察",
+        sector_ebb_trigger=[],
+        stock_weakening_trigger=[],
+        profit_drawdown_trigger=[],
+    )
+
+    state = build_position_execution_state(
+        db_session,
+        holding,
+        quote={
+            "price": 10.1,
+            "prev_close": 10,
+            "high": 10.2,
+            "low": 9.9,
+            "open": 10,
+            "vwap": 10.02,
+            "minute_bars": [
+                {"price": 10, "volume": 1000, "amount": 10000},
+                {"price": 10.05, "volume": 1000, "amount": 10050},
+                {"price": 10.1, "volume": 1000, "amount": 10100},
+            ],
+            "note": "实时行情",
+        },
+        seesaw=seesaw,
+        expectation=expectation,
+        volume_price=volume,
+    )
+
+    assert state.recommended_action == "继续持有"
+    assert state.recommended_reduce_ratio == 0
+    assert any("明确正向反证抵扣" in item for item in state.counter_evidence)
+
+
+def test_high_risk_market_freezes_expansion_without_forcing_low_level_sell(db_session):
+    holding = Holding(
+        code="600206",
+        name="弱市不追卖",
+        quantity=1000,
+        cost_price=10,
+        current_price=10.2,
+        total_asset=100000,
+        position_type="普通持仓",
+        next_discipline="个股未证伪则等待自身证据",
+    )
+    regime = MarketRegimeSnapshot(
+        trade_date=datetime.now().date().isoformat(),
+        captured_at=datetime.now(),
+        source="测试全市场",
+        data_quality="complete",
+        coverage_ratio=1,
+        confidence=0.95,
+        regime_code="EXTREME_SHRINK_DECLINE",
+        regime_name="极致缩量普跌",
+        risk_level="极高",
+        evidence_json='["上涨占比不足20%。", "主力资金大幅净流出。"]',
+        forbidden_actions_json='["禁止新开仓", "禁止补仓摊低"]',
+        missing_fields_json="[]",
+    )
+    expectation = ExpectationSnapshot(
+        trade_date=datetime.now().date().isoformat(),
+        code=holding.code,
+        name=holding.name,
+        stage="盘中确认",
+        expectation_gap_score=8,
+        expectation_result="STRONGER",
+    )
+    volume = VolumePriceSnapshot(
+        trade_date=datetime.now().date().isoformat(),
+        code=holding.code,
+        name=holding.name,
+        price=10.2,
+        high_price=10.25,
+        low_price=10.05,
+        prev_close=10,
+        vwap=10.12,
+        vwap_source="minute",
+        minute_bar_count=6,
+        vwap_reliable=True,
+        pattern="VWAP上方强势",
+        data_quality="realtime",
+    )
+    db_session.add_all([holding, regime, expectation, volume])
+    db_session.commit()
+    db_session.refresh(holding)
+
+    state = build_position_execution_state(
+        db_session,
+        holding,
+        quote={
+            "price": 10.2,
+            "prev_close": 10,
+            "high": 10.25,
+            "low": 10.05,
+            "vwap": 10.12,
+            "minute_bars": [
+                {"price": 10.1, "volume": 1000, "amount": 10100},
+                {"price": 10.2, "volume": 1000, "amount": 10200},
+            ],
+            "note": "实时行情",
+        },
+        expectation=expectation,
+        volume_price=volume,
+    )
+
+    assert state.recommended_action == "持有但禁止加仓/抄底"
+    assert state.recommended_reduce_ratio == 0
+    assert state.t_eligible is False
+    assert any("全市场状态：极致缩量普跌" in item for item in state.evidence)
+    assert any("不在低位机械卖出" in item for item in state.evidence)
+    assert any("禁止加仓、抄底和做T买回" in item for item in state.invalid_conditions)
+
+
+def test_unknown_market_snapshot_is_labeled_but_not_used_as_sell_score(db_session):
+    holding = Holding(
+        code="600207",
+        name="市场数据缺口",
+        quantity=1000,
+        cost_price=10,
+        current_price=10.1,
+        total_asset=100000,
+        position_type="普通持仓",
+        next_discipline="等待真实市场数据",
+    )
+    regime = MarketRegimeSnapshot(
+        trade_date=datetime.now().date().isoformat(),
+        captured_at=datetime.now(),
+        source="unavailable",
+        data_quality="missing",
+        regime_code="UNKNOWN",
+        regime_name="数据不足",
+        risk_level="未知",
+        evidence_json='["关键数据缺口。"]',
+        missing_fields_json='["预计全天成交额/5日均额", "全市场主力净流入"]',
+    )
+    db_session.add_all([holding, regime])
+    db_session.commit()
+    db_session.refresh(holding)
+
+    state = build_position_execution_state(
+        db_session,
+        holding,
+        quote={"price": 10.1, "prev_close": 10, "high": 10.2, "low": 10.0, "note": "实时行情"},
+    )
+
+    assert state.recommended_reduce_ratio == 0
+    assert state.recommended_action in {"观察但禁止加仓", "持有但禁止加仓/抄底"}
+    assert any("全市场数据质量不足" in item for item in state.evidence)
+    assert any("预计全天成交额/5日均额" in item for item in state.evidence)
 
 
 def test_expectation_and_vwap_breakdown_requires_risk_reduction(db_session):
@@ -429,7 +1038,7 @@ def test_structured_plan_and_exit_card_stop_levels_take_priority(db_session):
     db_session.add(holding)
     db_session.flush()
     db_session.add(NextDayPlan(
-        plan_date="2026-07-13",
+        plan_date=datetime.now().date().isoformat(),
         plan_type="holding",
         holding_id=holding.id,
         code="600019",
@@ -620,7 +1229,7 @@ def test_recovery_event_after_previous_risk_event(db_session):
     db_session.add(holding)
     db_session.flush()
     db_session.add(IntradayEvidenceEvent(
-        trade_date="2026-07-12",
+        trade_date=datetime.now().date().isoformat(),
         captured_at=datetime.now() - timedelta(minutes=10),
         scope="stock",
         target_code="600014",
@@ -729,7 +1338,7 @@ def test_position_state_history_records_transitions(db_session):
         current_price=10.5,
         total_asset=100000,
         position_type="盈利趋势仓",
-        next_discipline="按状态迁移记录",
+        next_discipline="按状态迁移记录，硬止损 9.60",
     )
     db_session.add(holding)
     db_session.commit()
