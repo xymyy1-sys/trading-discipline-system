@@ -11,10 +11,14 @@ import {
 } from 'lucide-react'
 import { API_BASE } from '../../api'
 import { chineseEvidence, chineseLabel } from '../../labels'
+import { intradayEventSemantics, isActionableIntradayEvent } from '../../eventSemantics'
+import { buildConsensusHighOpenFadeView } from '../../consensusHighOpenFade'
 
 import type {
   ActionRecommendation,
+  ConsensusHighOpenFade,
   GlobalMarketCues,
+  HoldingExecutionSignal,
   HoldingOut,
   InformationItem,
   IntradayEvidenceEvent,
@@ -28,6 +32,9 @@ import type {
   ThemeRadar,
 } from '../../types'
 import AiInsightButton from '../AiInsightButton'
+import FlowKineticsEvidence from '../FlowKineticsEvidence'
+import PositionAiAssistant from '../PositionAiAssistant'
+import { holdingFlowKineticsFields } from '../../flowKinetics'
 
 type WorkspaceModule = {
   key: string
@@ -258,6 +265,23 @@ export function TodayDecisionSummary() {
     return () => window.clearInterval(timer)
   }, [selectedCode])
 
+  useEffect(() => {
+    const refreshIntradayOpportunity = () => {
+      if (!isMarketSession() || document.visibilityState !== 'visible') return
+      // The API keeps provider-specific caches, so a one-minute cockpit poll
+      // discovers new limit-up bursts and flow turns without forcing upstream
+      // market requests on every menu switch.
+      void Promise.allSettled([
+        fetchJsonWithTimeout(`${API_BASE}/api/intel/opportunity-radar`, 30000)
+          .then(value => setOpportunityRadar(value as OpportunityRadar)),
+        fetchJsonWithTimeout(`${API_BASE}/api/market/seesaw-monitor`, 15000)
+          .then(value => setSeesaw(value as MarketSeesaw)),
+      ])
+    }
+    const timer = window.setInterval(refreshIntradayOpportunity, 60_000)
+    return () => window.clearInterval(timer)
+  }, [])
+
   const acknowledgeAlert = (alert: ActionRecommendation) => {
     if (!alert.id) return
     fetch(`${API_BASE}/api/alerts/${alert.id}/acknowledge`, { method: 'POST' })
@@ -328,6 +352,12 @@ export function TodayDecisionSummary() {
     () => executionStates.filter(item => ['EXIT_REQUIRED', 'REDUCE_REQUIRED', 'EXPECTATION_INVALIDATED', 'EXPECTATION_VOLUME_BREAKDOWN', 'PROFIT_PROTECTION', 'DIVERGENCE_HOLD'].includes(item.state) || item.recommended_reduce_ratio > 0),
     [executionStates],
   )
+  const urgentHoldingSignals = useMemo(() => executionStates.flatMap(execution => {
+    const signals = [execution.high_sell_signal, execution.panic_sell_guard, execution.contrarian_add_signal]
+      .filter((signal): signal is HoldingExecutionSignal => Boolean(signal))
+      .filter(signal => signal.status === 'ACTIVE' || signal.status === 'ELIGIBLE')
+    return signals.map(signal => ({ execution, signal }))
+  }), [executionStates])
   const expectationRisks = useMemo(() => holdings.flatMap(holding => {
     const card = decisionCards[holding.code]
     if (!card || !['INVALID', 'WEAKER'].includes(card.expectation.expectation_result)) return []
@@ -335,7 +365,7 @@ export function TodayDecisionSummary() {
     return [{ holding, card, execution }]
   }), [holdings, decisionCards, executionStates])
   const highRiskAlerts = (seesaw?.holding_alerts ?? []).filter(item => ['高', '中高', '中'].includes(item.risk_level))
-  const riskTargetCount = new Set([...riskStates.map(item => item.code), ...expectationRisks.map(item => item.holding.code), ...highRiskAlerts.map(item => item.code)]).size
+  const riskTargetCount = new Set([...riskStates.map(item => item.code), ...expectationRisks.map(item => item.holding.code), ...highRiskAlerts.map(item => item.code), ...urgentHoldingSignals.map(item => item.execution.code)]).size
   const totalMarketValue = holdings.reduce((sum, item) => sum + item.market_value, 0)
   const totalProfit = holdings.reduce((sum, item) => sum + item.profit_amount, 0)
   const trackedReviews = holdings.map(holding => ({ holding, review: intradayReviews[holding.code] }))
@@ -347,6 +377,12 @@ export function TodayDecisionSummary() {
   const earningEffect = marketRegime ? marketEffectLabel(marketRegime.opportunity_score) : inferEarningEffect(theme, seesaw)
   const marketRiskActive = Boolean(marketRegime && ['极高', '高', '中高'].includes(marketRegime.risk_level))
   const marketLive = isMarketSession()
+  const consensusHighOpenFade = marketReflexivity?.consensus_high_open_fade
+    ?? opportunityRadar?.consensus_high_open_fade
+    ?? null
+  const intradayExpansion = opportunityRadar?.intraday_expansion ?? null
+  const expansionQuality = String(intradayExpansion?.data_quality || '').toLowerCase()
+  const expansionUnavailable = !intradayExpansion || ['missing', 'degraded', 'unavailable', 'error'].includes(expansionQuality)
 
   return (
     <section className="decision-command">
@@ -381,8 +417,20 @@ export function TodayDecisionSummary() {
             <RefreshCcw size={14} />刷新
           </button>
         </header>
-        {marketRiskActive || expectationRisks.length || riskStates.length || highRiskAlerts.length ? (
+        {marketRiskActive || expectationRisks.length || riskStates.length || highRiskAlerts.length || urgentHoldingSignals.length ? (
           <>
+            {urgentHoldingSignals.slice(0, 8).map(({ execution, signal }) => (
+              <article key={`holding-signal-${execution.code}-${signal.code}`} className={`holding-action-signal ${holdingSignalTone(signal)}`}>
+                <b>{execution.name} · {signal.title}</b>
+                <span>{signal.action}</span>
+                <small className="sensitive-evidence">{signal.evidence[0] || signal.missing_conditions[0] || '等待下一份真实量价快照确认。'}</small>
+                <details><summary>查看触发依据与撤销条件</summary><div className="decision-basis">
+                  {signal.evidence.slice(0, 5).map(item => <p className="sensitive-evidence" key={item}>依据：{chineseEvidence(item)}</p>)}
+                  {signal.cancel_conditions.slice(0, 3).map(item => <p key={item}>撤销/升级：{chineseEvidence(item)}</p>)}
+                  {signal.recovery_conditions.slice(0, 2).map(item => <p key={item}>后续复核：{chineseEvidence(item)}</p>)}
+                </div></details>
+              </article>
+            ))}
             {marketRiskActive && marketRegime && (
               <article className={riskTone(marketRegime.risk_level)}>
                 <b>全市场执行闸门</b>
@@ -399,7 +447,7 @@ export function TodayDecisionSummary() {
                 <details><summary>查看决策依据与动态复核条件</summary><DecisionBasis execution={execution} fallback={card.expectation.evidence} /></details>
               </article>
             ))}
-            {riskStates.filter(item => !expectationRisks.some(risk => risk.holding.code === item.code)).slice(0, 4).map(item => (
+            {riskStates.filter(item => !expectationRisks.some(risk => risk.holding.code === item.code) && !urgentHoldingSignals.some(entry => entry.execution.code === item.code)).slice(0, 4).map(item => (
               <article key={`exec-${item.holding_id}`} className={riskTone(item.recommendation?.level || item.state)}>
                 <b>{item.name}</b>
                 <span>{chineseEvidence(item.recommended_action)}</span>
@@ -429,20 +477,29 @@ export function TodayDecisionSummary() {
             <b>{item.name}</b>
             <span className="num-up">流入 {item.net_inflow.toFixed(2)} 亿</span>
             <small>{item.evidence}</small>
+            <FlowKineticsEvidence fields={item} compact label="板块资金" />
           </article>
         ))}
-        {!seesaw?.inflow_targets?.length && <p className="plain-text">{marketLive ? '暂无已确认的资金迁移证据。' : '非交易时段不产生新的资金迁移证据；开盘后根据板块资金曲线更新。'}</p>}
+        {(seesaw?.holding_alerts ?? []).slice(0, 3).map(item => (
+          <article className="holding-flow-evidence" key={`holding-flow-${item.code}`}>
+            <b>{item.name} · {item.primary_industry_sector || item.holding_theme || '所属板块'}</b>
+            <span>{item.sector_flow_signal || '等待板块资金形成可验证拐点'}</span>
+            <small>当前板块净流 {item.sector_net_inflow >= 0 ? '+' : ''}{item.sector_net_inflow.toFixed(2)} 亿</small>
+            <FlowKineticsEvidence fields={holdingFlowKineticsFields(item)} compact label="持仓资金" />
+          </article>
+        ))}
+        {!seesaw?.inflow_targets?.length && !seesaw?.holding_alerts?.length && <p className="plain-text">{marketLive ? '暂无已确认的资金迁移证据。' : '非交易时段不产生新的资金迁移证据；开盘后根据板块资金曲线更新。'}</p>}
       </div>
 
       <div className="panel command-list realtime-events">
         <header>
-          <h3><AlertTriangle size={16} />实时风险事件</h3>
+          <h3><AlertTriangle size={16} />实时风险与机会事件</h3>
           <span className="stream-state">{streamState}{streamLastAt ? ` · ${streamLastAt}` : ''}</span>
         </header>
         {streamNotice && <p className="stream-health-notice">{streamNotice}{streamReconnects ? ` · 已恢复 ${streamReconnects} 次` : ''}</p>}
         {realtimeEvents.length ? (
           realtimeEvents.map(event => (
-            <article key={`${event.id}-${event.event_type}`} className={riskTone(event.severity)}>
+            <article key={`${event.id}-${event.event_type}`} className={intradayEventSemantics(event.event_type, event.severity).toneClass}>
               <b>{event.target_name || event.target_code}</b>
               <span>{chineseLabel(event.event_type)} · {riskActionForEvent(event, executionStates)}</span>
               <small className="sensitive-evidence">{riskDetailForEvent(event, decisionCards, executionStates)}</small>
@@ -487,6 +544,11 @@ export function TodayDecisionSummary() {
           <h3><Activity size={16} />预期拥挤与行为路径</h3>
           <span className="stream-state">匹配度不是概率 · 后续量价负责验证或证伪</span>
         </header>
+        {consensusHighOpenFade
+          ? <ConsensusHighOpenFadeCard signal={consensusHighOpenFade} />
+          : <article className="consensus-fade-card consensus-fade-data-gap" aria-label="一致性高开兑现风险">
+            <header><div><span className="consensus-fade-eyebrow">一致性高开兑现</span><strong>{loading ? '正在读取真实竞价与承接证据' : '证据不足，无法判断风险'}</strong><p>未取得可追溯的前一交易日深水修复、当日行业高开广度和开盘承接数据，不生成高开兑现结论。</p></div></header>
+          </article>}
         {marketReflexivity ? <>
           <div className={`reflexivity-current ${reflexivityTone(marketReflexivity.current_scenario)}`}>
             <div><span>当前最匹配路径</span><strong>{marketReflexivity.current_scenario_label}</strong></div>
@@ -559,24 +621,74 @@ export function TodayDecisionSummary() {
           <span className="stream-state">新闻假设 → 板块资金 → 相对强度 → 分时均价确认</span>
         </header>
         <p className="opportunity-discipline">{opportunityRadar?.discipline || '资讯不得单独触发买入，等待真实板块与个股量价确认。'}</p>
+        <div className="intraday-expansion-block">
+          <header>
+            <h4>盘中增量方向</h4>
+            <small>最近 {opportunityRadar?.intraday_expansion?.window_minutes || 15} 个交易分钟 · 新增涨停 + 资金拐点 + 板块强度</small>
+          </header>
+          <div className="opportunity-grid">
+            {(intradayExpansion?.items ?? []).slice(0, 6).map(item => (
+              <article key={`${item.sector}-${item.as_of}`} className={`opportunity-${opportunityTone(item.status)}`}>
+                <header><span>{item.status}</span><b>{item.confirmation_score}分</b></header>
+                <strong>{item.sector}</strong>
+                <small>
+                  近{item.window_minutes}分钟新增涨停 {item.new_limit_up_count} 只 · 当前共 {item.total_limit_up_count} 只 · 最高 {item.highest_board} 板
+                </small>
+                <p>{item.evidence?.[0] || item.counter_evidence?.[0] || `待补：${(item.missing ?? []).join('、')}`}</p>
+                <p className="expansion-flow-line">
+                  板块 {formatSignedNumber(item.change_pct, '%')} · 资金 {formatSignedNumber(item.net_inflow, '亿')}
+                  {item.flow_speed !== null ? ` · 流速 ${formatSignedNumber(item.flow_speed, '亿/分钟')}` : ''}
+                </p>
+                <FlowKineticsEvidence fields={{
+                  flow_speed: item.flow_speed,
+                  flow_acceleration: item.flow_acceleration,
+                  flow_turning: item.flow_turning,
+                  flow_as_of: item.as_of,
+                  flow_window_minutes: item.window_minutes,
+                  flow_kinetics_reliable: item.flow_speed !== null,
+                }} compact label="增量资金" />
+                {item.leaders?.length ? <small>新增涨停/前排：{item.leaders.slice(0, 6).join('、')}</small> : null}
+                <p className="opportunity-action">{item.action}</p>
+                <details>
+                  <summary>查看证据、风险与失效条件</summary>
+                  {(item.evidence ?? []).slice(0, 3).map(text => <p key={`e-${text}`}>证据：{chineseEvidence(text)}</p>)}
+                  {(item.counter_evidence ?? []).slice(0, 2).map(text => <p key={`c-${text}`}>反证：{chineseEvidence(text)}</p>)}
+                  {(item.risk ?? []).slice(0, 2).map(text => <p key={text}>风险：{text}</p>)}
+                  {(item.invalidation ?? []).slice(0, 3).map(text => <p key={text}>失效：{text}</p>)}
+                </details>
+              </article>
+            ))}
+          </div>
+          {!(intradayExpansion?.items ?? []).length && (expansionUnavailable
+            ? <div className="data-gap-state"><b>盘中增量证据不足，无法判断</b><p>{intradayExpansion?.notes?.[0] || (opportunityRadar ? '真实涨停梯队或板块资金时点尚未齐备，不以旧数据推断当前机会。' : '盘中机会雷达尚未同步成功，请稍后重试或手动刷新。')}</p></div>
+            : <p className="plain-text">真实涨停梯队与资金数据可用，但当前未发现共同确认的增量方向；不生成模拟机会。</p>)}
+          {intradayExpansion && <small className="global-data-note">数据质量：{expansionDataQualityLabel(intradayExpansion.data_quality)} · 证据时点：{formatConsensusAsOf(intradayExpansion.as_of)}</small>}
+        </div>
         <div className="opportunity-grid">
           {(opportunityRadar?.items ?? []).slice(0, 8).map(item => (
             <article key={item.id} className={`opportunity-${opportunityTone(item.status)}`}>
               <header><span>{item.status}</span><b>{item.confirmation_score}分</b></header>
               {item.url ? <a href={item.url} target="_blank" rel="noreferrer">{item.title}</a> : <strong>{item.title}</strong>}
               <small>{item.primary_sector || (item.sectors ?? []).join('、') || '待映射板块'} · {item.source} · {formatAge(item.age_minutes)}</small>
+              <small className="news-verification-line">
+                {newsClaimLabel(item.claim_level)} · {newsValidationLabel(item.market_validation)} · {item.sentiment || '待验证'}
+              </small>
               <p>{item.evidence?.[0] || item.counter_evidence?.[0] || `待补：${(item.missing ?? []).join('、') || '板块确认数据'}`}</p>
               <p className="opportunity-action">{item.action}</p>
             </article>
           ))}
         </div>
-        {!opportunityRadar?.items.length && <p className="plain-text">暂无可验证的盘中消息机会；系统不会用空数据生成题材建议。</p>}
+        {opportunityRadar && !opportunityRadar.items.length && <p className="plain-text">{opportunityRadar.data_quality === 'missing' ? '消息与市场验证数据不足，无法判断盘中消息机会。' : '真实消息与市场验证数据可用，但暂无共同确认的盘中消息机会。'}系统不会用空数据生成题材建议。</p>}
+        {!opportunityRadar && <div className="data-gap-state"><b>机会雷达暂不可用</b><p>未取得可追溯的新闻、板块资金与相对强度数据，不生成题材建议。</p></div>}
       </section>
 
       <section className="panel holding-cockpit">
         <header>
           <h3><ListTodo size={16} />持仓预期与盘中证据驾驶舱</h3>
-          <span className="stream-state">选择持仓查看完整决策链</span>
+          <div className="holding-cockpit-actions">
+            <span className="stream-state">选择持仓查看完整决策链</span>
+            {selectedHolding && <PositionAiAssistant code={selectedHolding.code} name={selectedHolding.name} />}
+          </div>
         </header>
         <div className="holding-cockpit-tabs">
           {holdings.map(item => (
@@ -601,10 +713,10 @@ export function TodayDecisionSummary() {
             <article>
               <h4>个股量价确认</h4>
               {selectedCard?.volume_price ? <>
-                <p><b>当前价 / 分时均价：</b>{selectedCard.volume_price.price.toFixed(2)} / {selectedCard.volume_price.vwap.toFixed(2)}</p>
+                <p><b>当前价 / 分时均价：</b>{formatPositivePrice(selectedCard.volume_price.price)} / {selectedCard.volume_price.vwap_reliable ? formatPositivePrice(selectedCard.volume_price.vwap) : '--'}</p>
                 <p><b>量价状态：</b>{chineseLabel(selectedCard.volume_price.pattern)}</p>
-                <p><b>高点回撤：</b>{selectedCard.volume_price.high_drawdown.toFixed(2)}%</p>
-                <p><b>量比 / 上攻效率：</b>{selectedCard.volume_price.volume_ratio.toFixed(2)} / {selectedCard.volume_price.attack_efficiency.toFixed(2)}</p>
+                <p><b>高点回撤：</b>{Number.isFinite(selectedCard.volume_price.high_drawdown) ? `${selectedCard.volume_price.high_drawdown.toFixed(2)}%` : '--'}</p>
+                <p><b>量比 / 上攻效率：</b>{selectedCard.volume_price.vwap_reliable ? `${selectedCard.volume_price.volume_ratio.toFixed(2)} / ${selectedCard.volume_price.attack_efficiency.toFixed(2)}` : '-- / --'}</p>
                 <small>{selectedCard.volume_price.vwap_reliable ? '真实分钟数据已确认' : '分钟数据不足，结论已降级'}</small>
               </> : <p>暂无可靠量价快照，不生成确定性结论。</p>}
             </article>
@@ -618,6 +730,23 @@ export function TodayDecisionSummary() {
                 <small className="sensitive-evidence">{selectedExecution.invalid_conditions[0] || '等待失效条件确认'}</small>
               </> : <p>暂无持仓执行状态。</p>}
             </article>
+            {selectedExecution && [
+              selectedExecution.high_sell_signal,
+              selectedExecution.panic_sell_guard,
+              selectedExecution.contrarian_add_signal,
+            ].filter((signal): signal is HoldingExecutionSignal => Boolean(signal)).map(signal => (
+              <article key={signal.code} className={`cockpit-action-signal ${holdingSignalTone(signal)}`}>
+                <header><h4>{signal.title}</h4><strong>{holdingSignalStatus(signal.status)}</strong></header>
+                <p className="cockpit-signal-action">{signal.action}</p>
+                {signal.recommended_ratio > 0 && <p><b>建议分批比例：</b>{(signal.recommended_ratio * 100).toFixed(0)}%</p>}
+                {signal.evidence.slice(0, 3).map(item => <p className="sensitive-evidence" key={item}>+ {chineseEvidence(item)}</p>)}
+                {signal.missing_conditions.slice(0, 2).map(item => <p className="cockpit-signal-missing" key={item}>待满足：{chineseEvidence(item)}</p>)}
+                <details><summary>查看撤销与恢复条件</summary>
+                  {signal.cancel_conditions.slice(0, 3).map(item => <p key={item}>撤销/升级：{chineseEvidence(item)}</p>)}
+                  {signal.recovery_conditions.slice(0, 2).map(item => <p key={item}>后续复核：{chineseEvidence(item)}</p>)}
+                </details>
+              </article>
+            ))}
             <article className={`cockpit-reflexivity-card ${selectedHolding && stockReflexivity[selectedHolding.code] ? reflexivityTone(stockReflexivity[selectedHolding.code].current_scenario) : ''}`}>
               <h4>个股预期拥挤与行为路径</h4>
               {selectedHolding && stockReflexivity[selectedHolding.code] ? (() => {
@@ -651,7 +780,7 @@ export function TodayDecisionSummary() {
               <h4>盘中事件时间线</h4>
               <div className="cockpit-timeline">
                 {(selectedReview?.timeline ?? selectedCard?.timeline ?? []).slice(0, 8).map(event => (
-                  <div key={`${event.id}-${event.captured_at}`}><time>{formatEventTime(event.captured_at)}</time><b>{chineseLabel(event.event_type)}</b><span className="sensitive-evidence">{chineseEvidence(event.evidence?.[0] || chineseLabel(event.severity))}</span></div>
+                  <div className={intradayEventSemantics(event.event_type, event.severity).toneClass} key={`${event.id}-${event.captured_at}`}><time>{formatEventTime(event.captured_at)}</time><b>{chineseLabel(event.event_type)}</b><span className="sensitive-evidence">{chineseEvidence(event.evidence?.[0] || chineseLabel(event.severity))}</span></div>
                 ))}
               </div>
               {!(selectedReview?.timeline ?? selectedCard?.timeline ?? []).length && <p>暂无盘中采样事件。</p>}
@@ -694,7 +823,7 @@ export function TodayDecisionSummary() {
                 <span>{review ? chineseEvidence(review.latest_action || chineseLabel(review.latest_state)) : '等待盘中采样'}</span>
                 <small>{review ? chineseLabel(review.data_quality) : `${holding.code} · 当前无证据快照`}</small>
               </div>
-              <div className="trajectory-summary-latest">
+              <div className={`trajectory-summary-latest ${review?.timeline[0] ? intradayEventSemantics(review.timeline[0].event_type, review.timeline[0].severity).toneClass : ''}`}>
                 <strong>{review?.timeline[0] ? chineseLabel(review.timeline[0].event_type) : '暂无事件'}</strong>
                 <span>{review?.timeline[0] ? formatEventTime(review.timeline[0].captured_at) : '--:--'}</span>
                 <small>{review ? `共 ${review.timeline.length} 个关键证据点` : '等待行情源'}</small>
@@ -816,6 +945,20 @@ function formatRatio(value?: number | null) {
   return `${(value * 100).toFixed(1)}%`
 }
 
+function formatPositivePrice(value?: number | null) {
+  if (value === null || value === undefined || !Number.isFinite(value) || value <= 0) return '--'
+  return value.toFixed(2)
+}
+
+function expansionDataQualityLabel(value?: string | null) {
+  const labels: Record<string, string> = {
+    ok: '真实数据可用',
+    degraded: '部分证据降级',
+    missing: '关键证据缺失',
+  }
+  return labels[String(value || '').toLowerCase()] || '状态待确认'
+}
+
 function formatAge(value?: number | null) {
   if (value === null || value === undefined) return '时间待确认'
   if (value < 60) return `${value}分钟前`
@@ -862,10 +1005,30 @@ function globalEvidenceSummary(cues: GlobalMarketCues | null) {
 }
 
 function opportunityTone(status: string) {
-  if (status === '已确认') return 'confirmed'
+  if (status === '已确认' || status === '增量已确认') return 'confirmed'
   if (status === '证伪') return 'invalidated'
   if (status === '衰减') return 'decayed'
   return 'pending'
+}
+
+function newsClaimLabel(value: string) {
+  const labels: Record<string, string> = {
+    OFFICIAL: '正式公告',
+    MEDIA_ATTRIBUTION: '媒体归因',
+    RUMOR: '传闻待核验',
+  }
+  return labels[value] || '来源待核验'
+}
+
+function newsValidationLabel(value: string) {
+  const labels: Record<string, string> = {
+    CONFIRMED: '市场影响已验证',
+    INVALIDATED: '市场影响已证伪',
+    MIXED: '市场反馈分歧',
+    DATA_GAP: '量价证据不足',
+    PENDING: '等待市场验证',
+  }
+  return labels[value] || '等待市场验证'
 }
 
 function reflexivityTone(scenario: string) {
@@ -877,16 +1040,24 @@ function reflexivityTone(scenario: string) {
 }
 
 function isRiskEvent(event: IntradayEvidenceEvent) {
-  return ['warning', 'critical'].includes(event.severity) || [
+  return isActionableIntradayEvent(event.event_type, event.severity) || [
     'EXPECTATION_INVALIDATED', 'EXPECTATION_VOLUME_BREAKDOWN', 'VWAP_BROKEN',
     'VOLUME_PRICE_WEAKENING', 'HIGH_DRAWDOWN', 'PROFIT_DRAWDOWN_WARNING',
     'TIME_STOP_TRIGGERED', 'SECTOR_FLOW_PEAK_REVERSAL', 'PROFIT_TO_LOSS_RISK',
+    'HIGH_SELL_WINDOW', 'PANIC_SELL_GUARD', 'CONTRARIAN_ADD_EVALUATION',
   ].includes(event.event_type)
 }
 
 function riskActionForEvent(event: IntradayEvidenceEvent, states: PositionExecutionState[]) {
   const state = states.find(item => item.code === event.target_code)
-  return chineseEvidence(state?.recommended_action || (event.severity === 'critical' ? '立即降低风险' : '核对并按计划处理'))
+  const semantics = intradayEventSemantics(event.event_type, event.severity)
+  if (semantics.kind === 'opportunity' || semantics.kind === 'watch') {
+    const hardRisk = state && ['EXIT_REQUIRED', 'REDUCE_REQUIRED', 'EXPECTATION_INVALIDATED'].includes(state.state)
+    return chineseEvidence(hardRisk
+      ? `${semantics.guidance} 当前执行闸门仍要求：${state.recommended_action}，正向事件不自动解除硬风险。`
+      : semantics.guidance)
+  }
+  return chineseEvidence(state?.recommended_action || semantics.guidance || (event.severity === 'critical' ? '立即降低风险' : '核对并按计划处理'))
 }
 
 function riskDetailForEvent(
@@ -909,6 +1080,27 @@ function riskTone(value?: string) {
   return ''
 }
 
+function holdingSignalTone(signal: HoldingExecutionSignal) {
+  if (signal.code === 'HIGH_SELL_WINDOW' && signal.status === 'ACTIVE') return signal.level === 'HIGH' ? 'signal-sell-high' : 'signal-sell-medium'
+  if (signal.code === 'PANIC_SELL_GUARD' && signal.status === 'ACTIVE') return 'signal-panic-guard'
+  if (signal.code === 'CONTRARIAN_ADD_EVALUATION' && signal.status === 'ELIGIBLE') return 'signal-add-eligible'
+  if (signal.status === 'BLOCKED') return 'signal-blocked'
+  if (signal.status === 'EXPIRED') return 'signal-expired'
+  return 'signal-neutral'
+}
+
+function holdingSignalStatus(status: string) {
+  const labels: Record<string, string> = {
+    ACTIVE: '立即关注',
+    WATCH: '等待确认',
+    EXPIRED: '窗口已过',
+    ELIGIBLE: '仅允许评估',
+    BLOCKED: '禁止执行',
+    INACTIVE: '未触发',
+  }
+  return labels[status] || chineseLabel(status)
+}
+
 function DecisionBasis({ execution, fallback = [] }: { execution?: PositionExecutionState; fallback?: string[] }) {
   const evidence = execution?.evidence?.length ? execution.evidence : fallback
   return <div className="decision-basis">
@@ -917,6 +1109,76 @@ function DecisionBasis({ execution, fallback = [] }: { execution?: PositionExecu
     {(execution?.recovery_conditions ?? []).slice(0, 3).map(item => <p className="sensitive-evidence" key={item}>保留/恢复条件：{chineseEvidence(item)}</p>)}
     {!evidence.length && <p>等待下一次量价和执行状态采样补充依据。</p>}
   </div>
+}
+
+function ConsensusHighOpenFadeCard({ signal }: { signal: ConsensusHighOpenFade }) {
+  const view = buildConsensusHighOpenFadeView(signal)
+  const evidence = signal.evidence ?? []
+  const counterEvidence = signal.counter_evidence ?? []
+  const missingFields = signal.missing_fields ?? []
+  const forbiddenActions = signal.forbidden_actions ?? []
+  const sources = signal.source ?? []
+  const asOf = formatConsensusAsOf(signal.as_of)
+  const riskLabel = view.state === 'triggered-high'
+    ? '高风险'
+    : view.state === 'triggered-medium'
+      ? '中风险'
+      : view.state === 'data-gap'
+        ? '风险无法判断'
+        : '风险尚未确认'
+
+  return (
+    <article className={`consensus-fade-card ${view.toneClass}`} aria-label="一致性高开兑现风险">
+      <header>
+        <div>
+          <span className="consensus-fade-eyebrow">一致性高开兑现</span>
+          <strong>{view.statusLabel}</strong>
+          <p>{view.conclusion}</p>
+        </div>
+        <div className="consensus-fade-score">
+          <span>规则分数</span>
+          <strong>{view.scoreLabel}</strong>
+          <small>{riskLabel}</small>
+        </div>
+      </header>
+
+      <div className="consensus-fade-details">
+        <section>
+          <h4>支持与反向证据</h4>
+          {evidence.length
+            ? evidence.slice(0, 5).map(item => <p key={`fade-evidence-${item}`}>+ {item}</p>)
+            : <p>暂无已确认支持证据。</p>}
+          {counterEvidence.slice(0, 3).map(item => <p key={`fade-counter-${item}`}>− {item}</p>)}
+        </section>
+        <section className={missingFields.length ? 'consensus-fade-missing' : ''}>
+          <h4>缺失字段</h4>
+          <p>{missingFields.length ? missingFields.join('、') : '无已报告缺失字段'}</p>
+        </section>
+        <section className={forbiddenActions.length && view.riskColored ? 'consensus-fade-forbidden' : ''}>
+          <h4>禁止动作</h4>
+          {forbiddenActions.length
+            ? forbiddenActions.slice(0, 5).map(item => <p key={`fade-forbidden-${item}`}>禁止：{item}</p>)
+            : <p>暂无新增禁止动作，仍须等待后续量价验证。</p>}
+        </section>
+        <section>
+          <h4>数据来源与时点</h4>
+          <p>{sources.length ? sources.join('、') : '暂无可追溯数据源'}</p>
+          <p>证据时点：{asOf} · 交易日：{signal.trade_date || '--'}</p>
+        </section>
+      </div>
+
+      {(signal.next_validation_points ?? []).length > 0 && (
+        <p className="consensus-fade-next"><b>下一验证：</b>{signal.next_validation_points.slice(0, 3).join('；')}</p>
+      )}
+      <small className="consensus-fade-method">{signal.methodology_note}</small>
+    </article>
+  )
+}
+
+function formatConsensusAsOf(value: string | null) {
+  if (!value) return '--'
+  const parsed = new Date(value)
+  return Number.isNaN(parsed.getTime()) ? value : parsed.toLocaleString('zh-CN')
 }
 
 function inferMarketCycle(temperature?: string, marketMode?: string) {
@@ -928,10 +1190,18 @@ function inferMarketCycle(temperature?: string, marketMode?: string) {
 }
 
 function isMarketSession(includeClosingGrace = false) {
-  const now = new Date()
-  const minutes = now.getHours() * 60 + now.getMinutes()
+  const parts = new Intl.DateTimeFormat('en-GB', {
+    timeZone: 'Asia/Shanghai',
+    weekday: 'short',
+    hour: '2-digit',
+    minute: '2-digit',
+    hourCycle: 'h23',
+  }).formatToParts(new Date())
+  const value = Object.fromEntries(parts.map(part => [part.type, part.value]))
+  const weekday = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri'].includes(value.weekday || '')
+  const minutes = Number(value.hour || 0) * 60 + Number(value.minute || 0)
   const closeMinute = 15 * 60 + (includeClosingGrace ? 5 : 0)
-  return now.getDay() >= 1 && now.getDay() <= 5 && minutes >= 9 * 60 + 15 && minutes <= closeMinute
+  return weekday && minutes >= 9 * 60 + 15 && minutes <= closeMinute
 }
 
 function inferEarningEffect(theme: ThemeRadar | null, seesaw: MarketSeesaw | null) {

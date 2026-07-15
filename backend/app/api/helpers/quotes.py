@@ -1,13 +1,62 @@
 import json
 import re
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal, ROUND_HALF_UP
 from typing import Any
 import requests
+from app.core.trading_clock import shanghai_now_naive, shanghai_today
 from app.services.market_data import _last_trading_day
 from app.models.trading import Holding
 
 _QUOTE_META_CACHE: dict[str, dict[str, Any]] = {}
+_SHANGHAI_TZ = timezone(timedelta(hours=8))
+
+
+def _provider_event_metadata(
+    provider_event_at: datetime | None,
+    *,
+    received_at: datetime | None = None,
+) -> dict[str, Any]:
+    """Return exchange-event and server-receipt times without conflating them."""
+    received = shanghai_now_naive(received_at)
+    if received.tzinfo is not None:
+        received = received.astimezone(_SHANGHAI_TZ).replace(tzinfo=None)
+    event_at = provider_event_at
+    if event_at is not None and event_at.tzinfo is not None:
+        event_at = event_at.astimezone(_SHANGHAI_TZ).replace(tzinfo=None)
+    return {
+        "provider_event_at": event_at,
+        "received_at": received,
+        "age_seconds": round((received - event_at).total_seconds(), 3) if event_at else None,
+        "timestamp_quality": "exchange" if event_at else "missing",
+    }
+
+
+def _eastmoney_event_at(raw: Any) -> datetime | None:
+    """Parse Eastmoney f124 (Unix seconds/milliseconds) as Shanghai time."""
+    try:
+        timestamp = float(raw)
+    except (TypeError, ValueError):
+        return None
+    if timestamp <= 0:
+        return None
+    if timestamp > 10_000_000_000:
+        timestamp /= 1000
+    try:
+        return datetime.fromtimestamp(timestamp, tz=_SHANGHAI_TZ).replace(tzinfo=None)
+    except (OSError, OverflowError, ValueError):
+        return None
+
+
+def _sina_event_at(raw_date: Any, raw_time: Any) -> datetime | None:
+    date_text = str(raw_date or "").strip()
+    time_text = str(raw_time or "").strip()
+    if not date_text or not time_text:
+        return None
+    try:
+        return datetime.fromisoformat(f"{date_text}T{time_text}")
+    except ValueError:
+        return None
 
 def _safe_float(value: Any) -> float:
     try:
@@ -114,6 +163,7 @@ def _latest_a_share_quotes_sina(codes: list[str]) -> dict[str, dict[str, Any]]:
     )
     resp.raise_for_status()
     text = resp.content.decode("gbk", errors="ignore")
+    received_at = shanghai_now_naive()
     quotes: dict[str, dict[str, Any]] = {}
     for symbol, payload in re.findall(r'var hq_str_(s[hz]\d{6})="([^"]*)"', text):
         parts = payload.split(",")
@@ -130,6 +180,10 @@ def _latest_a_share_quotes_sina(codes: list[str]) -> dict[str, dict[str, Any]]:
         if price <= 0:
             continue
         change_pct = (price - prev_close) / prev_close * 100 if prev_close else 0
+        provider_event_at = _sina_event_at(
+            parts[30] if len(parts) > 30 else None,
+            parts[31] if len(parts) > 31 else None,
+        )
         quotes[code] = {
             "price": price,
             "change_pct": change_pct,
@@ -140,6 +194,10 @@ def _latest_a_share_quotes_sina(codes: list[str]) -> dict[str, dict[str, Any]]:
             "high": high_price,
             "low": low_price,
             "volume": volume,
+            "provider": "sina-hq",
+            "provider_endpoint": "hq.sinajs.cn",
+            "is_delayed_endpoint": False,
+            **_provider_event_metadata(provider_event_at, received_at=received_at),
             "note": "新浪实时行情",
         }
     return quotes
@@ -158,10 +216,12 @@ def _latest_a_share_quotes_eastmoney(codes: list[str]) -> dict[str, dict[str, An
     params = urlencode({
         "fltt": "2",
         "invt": "2",
-        "fields": "f12,f14,f2,f3,f6,f8,f15,f16,f17,f18,f21",
+        "fields": "f12,f14,f2,f3,f6,f8,f15,f16,f17,f18,f21,f124",
         "secids": secids,
     })
     payload = None
+    selected_host = ""
+    received_at: datetime | None = None
     last_error: Exception | None = None
     # push2 主站在部分云服务器网络中会返回空响应；两个官方边缘域名
     # 使用同一接口和字段，可作为真实行情的顺序回退源。
@@ -175,6 +235,8 @@ def _latest_a_share_quotes_eastmoney(codes: list[str]) -> dict[str, dict[str, An
             response.raise_for_status()
             payload = response.json()
             if (payload.get("data") or {}).get("diff"):
+                selected_host = host
+                received_at = shanghai_now_naive()
                 break
         except Exception as exc:
             last_error = exc
@@ -184,11 +246,18 @@ def _latest_a_share_quotes_eastmoney(codes: list[str]) -> dict[str, dict[str, An
         return {}
     rows = payload.get("data", {}).get("diff", []) or []
     quotes: dict[str, dict[str, Any]] = {}
+    delayed_endpoint = "push2delay" in selected_host
+    provider_name = (
+        "eastmoney-push2delay" if delayed_endpoint
+        else "eastmoney-push2ex" if "push2ex" in selected_host
+        else "eastmoney-push2"
+    )
     for row in rows:
         code = str(row.get("f12") or "").zfill(6)
         price = _safe_float(row.get("f2"))
         if not code or price <= 0:
             continue
+        provider_event_at = _eastmoney_event_at(row.get("f124"))
         quotes[code] = {
             "price": price,
             "change_pct": _safe_float(row.get("f3")),
@@ -201,6 +270,10 @@ def _latest_a_share_quotes_eastmoney(codes: list[str]) -> dict[str, dict[str, An
             "prev_close": _safe_float(row.get("f18")),
             "high": _safe_float(row.get("f15")),
             "low": _safe_float(row.get("f16")),
+            "provider": provider_name,
+            "provider_endpoint": selected_host,
+            "is_delayed_endpoint": delayed_endpoint,
+            **_provider_event_metadata(provider_event_at, received_at=received_at),
             "note": "东方财富实时行情",
         }
     return quotes
@@ -243,7 +316,7 @@ def _attach_minute_bars(quotes: dict[str, dict[str, Any]]) -> None:
         quote["minute_bar_source"] = source
         quote["minute_bar_status"] = status
         quote["minute_bar_trade_date"] = bars[-1].get("trade_date") or _last_trading_day()
-        date_note = "" if quote["minute_bar_trade_date"] == datetime.now().date().isoformat() else f"({quote['minute_bar_trade_date']})"
+        date_note = "" if quote["minute_bar_trade_date"] == shanghai_today().isoformat() else f"({quote['minute_bar_trade_date']})"
         source_note = "东方财富1分钟成交" if status == "ok" else source
         quote["note"] = f"{quote.get('note') or '实时行情'} + {source_note}{date_note}"
 

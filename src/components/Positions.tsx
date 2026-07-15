@@ -2,6 +2,9 @@ import { useEffect, useRef, useState } from 'react'
 import { CheckCircle2, Pencil, Plus, RefreshCcw, Save, ShieldAlert, Trash2, X } from 'lucide-react'
 import { API_BASE } from '../api'
 import { chineseEvidence, chineseLabel } from '../labels'
+import { intradayEventSemantics } from '../eventSemantics'
+import { SensitiveEvidenceText, SensitiveValue } from '../privacy'
+import { usePrivacyMode } from '../privacy-context'
 
 import type {
   HoldingOut as Holding,
@@ -14,6 +17,7 @@ import type {
 } from '../types'
 
 export default function Positions({ mode = 'overview' }: { mode?: 'overview' | 'discipline' }) {
+  const privacyMode = usePrivacyMode()
   const [holdings, setHoldings] = useState<Holding[]>([])
   const [seesaw, setSeesaw] = useState<SeesawMonitor | null>(null)
   const [executionStates, setExecutionStates] = useState<PositionExecutionState[]>([])
@@ -441,7 +445,7 @@ export default function Positions({ mode = 'overview' }: { mode?: 'overview' | '
       </header>
       {refreshMessage && <p className="refresh-note">{refreshMessage}</p>}
       {feedbackMessage && <p className="refresh-note">{feedbackMessage}</p>}
-      {tPlanMessage && <p className="refresh-note">{tPlanMessage}</p>}
+      {tPlanMessage && <p className="refresh-note"><SensitiveEvidenceText value={tPlanMessage} /></p>}
 
       <section className="panel account-asset-panel">
         <div>
@@ -451,9 +455,11 @@ export default function Positions({ mode = 'overview' }: { mode?: 'overview' | '
         </div>
         <div className="asset-editor">
           <input
-            type="number"
-            placeholder="填写总资产"
-            value={accountAsset}
+            type={privacyMode ? 'text' : 'number'}
+            aria-label="账户总资产"
+            placeholder={privacyMode ? '******' : '填写总资产'}
+            value={privacyMode ? '' : accountAsset}
+            readOnly={privacyMode}
             onChange={e => {
               setAccountAsset(e.target.value)
               setAssetMessage('')
@@ -465,16 +471,23 @@ export default function Positions({ mode = 'overview' }: { mode?: 'overview' | '
           {assetMessage && <span className="asset-message">{assetMessage}</span>}
         </div>
         <div className="asset-editor">
-          <input type="number" placeholder="当日期初资产" value={openingAsset} onChange={e => setOpeningAsset(e.target.value)} />
+          <input
+            type={privacyMode ? 'text' : 'number'}
+            aria-label="当日期初资产"
+            placeholder={privacyMode ? '******' : '当日期初资产'}
+            value={privacyMode ? '' : openingAsset}
+            readOnly={privacyMode}
+            onChange={e => setOpeningAsset(e.target.value)}
+          />
           <button className="grade-btn" onClick={saveAccountRisk} disabled={assetSaving}>
             <ShieldAlert size={16} /> 保存今日风控基线
           </button>
         </div>
         {accountRisk && <div className="account-risk-summary">
           <strong>账户风险 {chineseLabel(accountRisk.level)}</strong>
-          <span className={accountRisk.daily_profit_ratio >= 0 ? 'num-up' : 'num-down'}>{accountRisk.data_complete ? `${accountRisk.daily_profit_ratio.toFixed(2)}%` : '待设置期初资产'}</span>
-          <p>{accountRisk.recommended_action}</p>
-          {accountRisk.evidence.map(item => <small key={item}>{item}</small>)}
+          <span className={accountRisk.daily_profit_ratio >= 0 ? 'num-up' : 'num-down'}><SensitiveValue>{accountRisk.data_complete ? `${accountRisk.daily_profit_ratio.toFixed(2)}%` : '待设置期初资产'}</SensitiveValue></span>
+          <p><SensitiveEvidenceText value={accountRisk.recommended_action} /></p>
+          {accountRisk.evidence.map(item => <small key={item}><SensitiveValue>{item}</SensitiveValue></small>)}
         </div>}
       </section>
 
@@ -566,8 +579,23 @@ export default function Positions({ mode = 'overview' }: { mode?: 'overview' | '
           <div className="form-grid">
             <input placeholder="代码" value={form.code} onChange={e => setForm(p => ({ ...p, code: e.target.value }))} />
             <input placeholder="名称" value={form.name} onChange={e => setForm(p => ({ ...p, name: e.target.value }))} />
-            <input placeholder="数量" type="number" value={form.quantity} onChange={e => setForm(p => ({ ...p, quantity: e.target.value }))} />
-            <input placeholder="成本价" type="number" step="0.01" value={form.cost_price} onChange={e => setForm(p => ({ ...p, cost_price: e.target.value }))} />
+            <input
+              aria-label="持仓数量"
+              placeholder={privacyMode ? '******' : '数量'}
+              type={privacyMode ? 'text' : 'number'}
+              value={privacyMode ? '' : form.quantity}
+              readOnly={privacyMode}
+              onChange={e => setForm(p => ({ ...p, quantity: e.target.value }))}
+            />
+            <input
+              aria-label="持仓成本价"
+              placeholder={privacyMode ? '******' : '成本价'}
+              type={privacyMode ? 'text' : 'number'}
+              step="0.01"
+              value={privacyMode ? '' : form.cost_price}
+              readOnly={privacyMode}
+              onChange={e => setForm(p => ({ ...p, cost_price: e.target.value }))}
+            />
             <input placeholder="当前价" type="number" step="0.01" value={form.current_price} onChange={e => setForm(p => ({ ...p, current_price: e.target.value }))} />
             <select value={form.position_type} onChange={e => setForm(p => ({ ...p, position_type: e.target.value }))}>
               {['盈利趋势仓', '亏损修复仓', '退出型风险仓'].map(t => <option key={t}>{t}</option>)}
@@ -581,33 +609,33 @@ export default function Positions({ mode = 'overview' }: { mode?: 'overview' | '
       <div className="pos-summary">
         <div className="summary-card">
           <span>总资产</span>
-          <strong>{savedTotalAsset ? `${savedTotalAsset.toLocaleString()} 元` : '--'}</strong>
+          <strong><SensitiveValue>{savedTotalAsset ? `${savedTotalAsset.toLocaleString()} 元` : '--'}</SensitiveValue></strong>
         </div>
         <div className="summary-card">
           <span>可用资金</span>
           <strong style={{ color: cashAvailable >= 0 ? 'var(--ink)' : 'var(--down)' }}>
-            {savedTotalAsset ? `${cashAvailable.toLocaleString(undefined, { maximumFractionDigits: 2 })} 元` : '--'}
+            <SensitiveValue>{savedTotalAsset ? `${cashAvailable.toLocaleString(undefined, { maximumFractionDigits: 2 })} 元` : '--'}</SensitiveValue>
           </strong>
         </div>
         <div className="summary-card">
           <span>总仓位</span>
-          <strong>{savedTotalAsset ? `${(totalPositionRatio * 100).toFixed(1)}%` : '--'}</strong>
+          <strong><SensitiveValue>{savedTotalAsset ? `${(totalPositionRatio * 100).toFixed(1)}%` : '--'}</SensitiveValue></strong>
         </div>
         <div className="summary-card">
           <span>持仓市值</span>
-          <strong>{totalMarketValue.toLocaleString(undefined, { maximumFractionDigits: 2 })} 元</strong>
+          <strong><SensitiveValue>{totalMarketValue.toLocaleString(undefined, { maximumFractionDigits: 2 })} 元</SensitiveValue></strong>
         </div>
         <div className="summary-card">
           <span>今日盈亏</span>
           <strong style={{ color: totalTodayPnL >= 0 ? 'var(--up)' : 'var(--down)' }}>
-            {money(totalTodayPnL)}
+            <SensitiveValue>{money(totalTodayPnL)}</SensitiveValue>
           </strong>
-          {accountSummary && <small title="今日盈亏 = 当前持仓今日浮动盈亏 + 今日卖出/清仓已实现盈亏">持仓 {money(accountSummary.today_open_profit_amount)} · 已实现 {money(accountSummary.today_realized_profit_amount)}</small>}
+          {accountSummary && <small title="今日盈亏 = 当前持仓今日浮动盈亏 + 今日卖出/清仓已实现盈亏"><SensitiveValue>持仓 {money(accountSummary.today_open_profit_amount)} · 已实现 {money(accountSummary.today_realized_profit_amount)}</SensitiveValue></small>}
         </div>
         <div className="summary-card">
           <span>累计浮盈</span>
           <strong style={{ color: totalPnL >= 0 ? 'var(--up)' : 'var(--down)' }}>
-            {money(totalPnL)}
+            <SensitiveValue>{money(totalPnL)}</SensitiveValue>
           </strong>
         </div>
       </div>
@@ -615,9 +643,9 @@ export default function Positions({ mode = 'overview' }: { mode?: 'overview' | '
       {mode === 'overview' && portfolioExposure && (
         <section className="panel portfolio-exposure-panel">
           <div className="selected-theme-head"><div><strong>组合暴露</strong><span>按真实持仓市值统计行业、题材和单一风险因子集中度。</span></div></div>
-          {!!portfolioExposure.warnings.length && <div className="portfolio-warning-list">{portfolioExposure.warnings.map(item => <p key={item}>{item}</p>)}</div>}
+          {!!portfolioExposure.warnings.length && <div className="portfolio-warning-list">{portfolioExposure.warnings.map(item => <p key={item}><SensitiveValue>{item}</SensitiveValue></p>)}</div>}
           <div className="portfolio-exposure-grid">
-            {([['行业', portfolioExposure.industries], ['题材', portfolioExposure.themes], ['风险因子', portfolioExposure.risk_factors]] as const).map(([label, rows]) => <article key={label}><b>{label}</b>{rows.slice(0, 6).map(item => <div key={item.name}><span>{item.name} · {item.holding_count}只</span><strong>{(item.ratio * 100).toFixed(1)}%</strong><i style={{ width: `${Math.min(100, item.ratio * 100)}%` }} /></div>)}</article>)}
+            {([['行业', portfolioExposure.industries], ['题材', portfolioExposure.themes], ['风险因子', portfolioExposure.risk_factors]] as const).map(([label, rows]) => <article key={label}><b>{label}</b>{rows.slice(0, 6).map(item => <div key={item.name}><span>{item.name} · {item.holding_count}只</span><strong><SensitiveValue>{(item.ratio * 100).toFixed(1)}%</SensitiveValue></strong><i style={{ width: privacyMode ? '0%' : `${Math.min(100, item.ratio * 100)}%` }} /></div>)}</article>)}
           </div>
         </section>
       )}
@@ -627,7 +655,7 @@ export default function Positions({ mode = 'overview' }: { mode?: 'overview' | '
           <div className="selected-theme-head">
             <div>
               <strong>盘中资金跷跷板监控 · {seesaw.market_mode}</strong>
-              <span>{seesaw.summary}</span>
+              <SensitiveEvidenceText value={seesaw.summary} />
             </div>
           </div>
           <div className="auction-evidence-grid">
@@ -663,7 +691,7 @@ export default function Positions({ mode = 'overview' }: { mode?: 'overview' | '
                     <span key={tag}>{tag}</span>
                   ))}
                 </div>
-                <p className="seesaw-signal">{item.signal}</p>
+                <p className="seesaw-signal"><SensitiveEvidenceText value={item.signal} /></p>
                 <div className="seesaw-facts">
                   <div>
                     <b>主资金曲线</b>
@@ -693,22 +721,22 @@ export default function Positions({ mode = 'overview' }: { mode?: 'overview' | '
                     <span>{item.external_inflow_target || '同主线内轮动/暂无'}</span>
                   </div>
                 </div>
-                {item.profit_protection_state && <p>{item.profit_protection_state}</p>}
-                <p className="seesaw-advice">{item.advice}</p>
+                {item.profit_protection_state && <p><SensitiveEvidenceText value={item.profit_protection_state} /></p>}
+                <p className="seesaw-advice"><SensitiveEvidenceText value={item.advice} /></p>
                 <div className="trigger-mini-grid">
-                  <div><b>板块退潮</b><span>{item.sector_ebb_trigger[0] || '未触发'}</span></div>
-                  <div><b>个股弱化</b><span>{item.stock_weakening_trigger[0] || '未触发'}</span></div>
+                  <div><b>板块退潮</b><span><SensitiveEvidenceText value={item.sector_ebb_trigger[0] || '未触发'} /></span></div>
+                  <div><b>个股弱化</b><span><SensitiveEvidenceText value={item.stock_weakening_trigger[0] || '未触发'} /></span></div>
                   <div>
                     <b>利润回撤</b>
-                    <span>{item.profit_drawdown_trigger[0] || '未触发'}</span>
+                    <span><SensitiveEvidenceText value={item.profit_drawdown_trigger[0] || '未触发'} /></span>
                   </div>
                   <div>
                     <b>接回条件</b>
-                    <span>{item.buyback_trigger[0] || '等待重新转强'}</span>
+                    <span><SensitiveEvidenceText value={item.buyback_trigger[0] || '等待重新转强'} /></span>
                   </div>
                 </div>
                 <ul>
-                  {item.evidence.slice(0, 3).map(line => <li key={line}>{line}</li>)}
+                  {item.evidence.slice(0, 3).map(line => <li key={line}><SensitiveEvidenceText value={line} /></li>)}
                 </ul>
               </article>
             )) : (
@@ -734,7 +762,11 @@ export default function Positions({ mode = 'overview' }: { mode?: 'overview' | '
                   return plan ? (
                     <div className="t-execution-strip">
                       <div><b>{plan.t_type}</b><span>{plan.status}</span></div>
-                      <small>计划卖出 {plan.planned_sell_quantity} 股 · 已卖 {plan.actual_sell_quantity} · 已接回 {plan.actual_buyback_quantity}</small>
+                      <small>
+                        计划卖出 <SensitiveValue>{plan.planned_sell_quantity} 股</SensitiveValue>
+                        {' · '}已卖 <SensitiveValue>{plan.actual_sell_quantity}</SensitiveValue>
+                        {' · '}已接回 <SensitiveValue>{plan.actual_buyback_quantity}</SensitiveValue>
+                      </small>
                       <div className="t-execution-actions">
                         {plan.status === 'planned' && <button type="button" onClick={() => updateTExecution(plan, 'sell')}>记录卖出</button>}
                         {['sold_wait_buyback', 'partially_bought_back'].includes(plan.status) && <button type="button" onClick={() => updateTExecution(plan, 'buyback')}>记录接回</button>}
@@ -751,17 +783,17 @@ export default function Positions({ mode = 'overview' }: { mode?: 'overview' | '
                   <span style={{ color: actionColor(item.state) }}>{chineseEvidence(item.recommended_action)}</span>
                 </div>
                 <div className="execution-line-grid">
-                  <div><b>最大浮盈</b><span>{item.profit_snapshot ? `${item.profit_snapshot.maximum_profit_pct.toFixed(2)}%` : '--'}</span></div>
-                  <div><b>利润回撤</b><span>{item.profit_snapshot ? `${item.profit_snapshot.profit_drawdown_pct.toFixed(2)}pct` : '--'}</span></div>
+                  <div><b>最大浮盈</b><span><SensitiveValue>{item.profit_snapshot ? `${item.profit_snapshot.maximum_profit_pct.toFixed(2)}%` : '--'}</SensitiveValue></span></div>
+                  <div><b>利润回撤</b><span><SensitiveValue>{item.profit_snapshot ? `${item.profit_snapshot.profit_drawdown_pct.toFixed(2)}pct` : '--'}</SensitiveValue></span></div>
                   <div><b>结构止损</b><span>{item.structure_stop_price ? item.structure_stop_price.toFixed(2) : '--'}</span></div>
                   <div><b>止损来源</b><span>{stopSourceLabel(item.stop_source)}</span></div>
                   <div><b>利润保护</b><span>{item.profit_protection_price ? item.profit_protection_price.toFixed(2) : '--'}</span></div>
-                  <div><b>建议仓位</b><span>{(item.recommended_position_ratio * 100).toFixed(1)}%</span></div>
+                  <div><b>建议仓位</b><span><SensitiveValue>{(item.recommended_position_ratio * 100).toFixed(1)}%</SensitiveValue></span></div>
                   <div><b>做T</b><span>{item.t_eligible ? item.t_type : '禁止'}</span></div>
                 </div>
-                <p className="execution-stop-source">{item.stop_source_detail || '止损来源待下一次状态刷新确认。'}</p>
+                <p className="execution-stop-source"><SensitiveEvidenceText value={item.stop_source_detail || '止损来源待下一次状态刷新确认。'} /></p>
                 <div className="execution-evidence">
-                  {(item.evidence.length ? item.evidence : ['暂无强触发证据，按原计划观察。']).slice(0, 3).map(line => <p key={line}>{line}</p>)}
+                  {(item.evidence.length ? item.evidence : ['暂无强触发证据，按原计划观察。']).slice(0, 3).map(line => <p key={line}><SensitiveEvidenceText value={line} /></p>)}
                 </div>
                 <div className="execution-mini-sections">
                   <div>
@@ -769,7 +801,7 @@ export default function Positions({ mode = 'overview' }: { mode?: 'overview' | '
                     {(item.state_history?.length ? item.state_history.slice(0, 3) : []).map(history => (
                       <p key={history.id ?? `${history.captured_at}-${history.new_state}`}>
                         <span>{timeLabel(history.captured_at)}</span>
-                        {history.old_state || '初始'} → {history.new_state} · {history.reason}
+                        {history.old_state || '初始'} → {history.new_state} · <SensitiveEvidenceText value={history.reason} />
                       </p>
                     ))}
                     {!item.state_history?.length && <p><span>--</span>等待下一次状态变化</p>}
@@ -777,16 +809,16 @@ export default function Positions({ mode = 'overview' }: { mode?: 'overview' | '
                   <div>
                     <b>盘中事件</b>
                     {(item.events?.length ? item.events.slice(0, 3) : []).map(event => (
-                      <p key={event.id ?? `${event.captured_at}-${event.event_type}`}>
+                      <p className={intradayEventSemantics(event.event_type, event.severity).toneClass} key={event.id ?? `${event.captured_at}-${event.event_type}`}>
                         <span>{timeLabel(event.captured_at)}</span>
-                        {chineseLabel(event.event_type)} · {event.confirmed ? '已确认' : '观察'} · {chineseEvidence(event.evidence?.[0] ?? chineseLabel(event.severity))}
+                        {chineseLabel(event.event_type)} · {event.confirmed ? '已确认' : '观察'} · <SensitiveEvidenceText value={chineseEvidence(event.evidence?.[0] ?? chineseLabel(event.severity))} />
                       </p>
                     ))}
                     {!item.events?.length && <p><span>--</span>暂无新事件</p>}
                   </div>
                   <div>
                     <b>做T口径</b>
-                    <p><span>可卖</span>{item.sellable_quantity.toLocaleString()} 股 · 今日买入 {item.today_buy_quantity.toLocaleString()} 股</p>
+                    <p><span>可卖</span><SensitiveValue>{item.sellable_quantity.toLocaleString()} 股</SensitiveValue> · 今日买入 <SensitiveValue>{item.today_buy_quantity.toLocaleString()} 股</SensitiveValue></p>
                     <p><span>类型</span>{item.t_eligible ? item.t_type : '禁止做T'} · {item.t_eligible ? '等待计划生成' : '禁止做T'}</p>
                   </div>
                 </div>
@@ -810,7 +842,7 @@ export default function Positions({ mode = 'overview' }: { mode?: 'overview' | '
 
       {!holdingsError && holdings.length > 0 && <div className="pos-table-wrap simple-holdings-table">
         <table className="pos-table"><thead><tr><th>代码</th><th>名称</th><th className="num">数量</th><th className="num">成本</th><th className="num">现价</th><th className="num">市值</th><th className="num">浮动盈亏</th><th className="num">浮盈%</th><th className="num">今日盈亏</th><th>仓位类型</th><th>操作</th></tr></thead>
-          <tbody>{holdings.map(h => <tr key={`simple-${h.id}`}><td className="mono">{h.code}</td><td>{h.name}</td><td className="num">{h.quantity.toLocaleString()}</td><td className="num">{h.cost_price.toFixed(2)}</td><td className="num">{h.current_price.toFixed(2)}</td><td className="num">{h.market_value.toLocaleString()}</td><td className={h.profit_amount >= 0 ? 'num num-up' : 'num num-down'}>{money(h.profit_amount)}</td><td className={h.profit_ratio >= 0 ? 'num num-up' : 'num num-down'}>{(h.profit_ratio * 100).toFixed(2)}%</td><td className={h.today_profit_amount >= 0 ? 'num num-up' : 'num num-down'}>{money(h.today_profit_amount)}</td><td>{h.position_type}</td><td><div className="table-actions"><button type="button" onClick={() => startEdit(h)}><Pencil size={14}/></button><button type="button" onClick={() => deleteHolding(h)}><Trash2 size={14}/></button></div></td></tr>)}</tbody>
+          <tbody>{holdings.map(h => <tr key={`simple-${h.id}`}><td className="mono">{h.code}</td><td>{h.name}</td><td className="num"><SensitiveValue>{h.quantity.toLocaleString()}</SensitiveValue></td><td className="num"><SensitiveValue>{h.cost_price.toFixed(2)}</SensitiveValue></td><td className="num market-price">{h.current_price.toFixed(2)}</td><td className="num"><SensitiveValue>{h.market_value.toLocaleString()}</SensitiveValue></td><td className={h.profit_amount >= 0 ? 'num num-up' : 'num num-down'}><SensitiveValue>{money(h.profit_amount)}</SensitiveValue></td><td className={h.profit_ratio >= 0 ? 'num num-up' : 'num num-down'}><SensitiveValue>{(h.profit_ratio * 100).toFixed(2)}%</SensitiveValue></td><td className={h.today_profit_amount >= 0 ? 'num num-up' : 'num num-down'}><SensitiveValue>{money(h.today_profit_amount)}</SensitiveValue></td><td>{h.position_type}</td><td><div className="table-actions"><button type="button" onClick={() => startEdit(h)}><Pencil size={14}/></button><button type="button" onClick={() => deleteHolding(h)}><Trash2 size={14}/></button></div></td></tr>)}</tbody>
         </table>
       </div>}
 
@@ -838,24 +870,24 @@ export default function Positions({ mode = 'overview' }: { mode?: 'overview' | '
                       <>
                   <td className="mono">{h.code}</td>
                   <td>{h.name}</td>
-                  <td className="num">{h.quantity.toLocaleString()}</td>
-                  <td className="num">{h.cost_price.toFixed(2)}</td>
-                  <td className="num" title={h.price_note || '手动录入价'}>
+                  <td className="num"><SensitiveValue>{h.quantity.toLocaleString()}</SensitiveValue></td>
+                  <td className="num"><SensitiveValue>{h.cost_price.toFixed(2)}</SensitiveValue></td>
+                  <td className="num market-price" title={h.price_note || '手动录入价'}>
                     {h.current_price.toFixed(2)}
                     <span className={`price-dot ${h.price_source === 'realtime' ? 'live' : 'stale'}`} title={h.price_note || '手动录入价'}>●</span>
                   </td>
-                  <td className="num">{h.market_value.toLocaleString()}</td>
+                  <td className="num"><SensitiveValue>{h.market_value.toLocaleString()}</SensitiveValue></td>
                   <td className="num" style={{ color: h.profit_amount >= 0 ? 'var(--up)' : 'var(--down)' }}>
-                    {h.profit_amount >= 0 ? '+' : ''}{h.profit_amount.toLocaleString()}
+                    <SensitiveValue>{h.profit_amount >= 0 ? '+' : ''}{h.profit_amount.toLocaleString()}</SensitiveValue>
                   </td>
                   <td className="num" style={{ color: h.profit_ratio >= 0 ? 'var(--up)' : 'var(--down)' }}>
-                    {h.profit_ratio >= 0 ? '+' : ''}{(h.profit_ratio * 100).toFixed(2)}%
+                    <SensitiveValue>{h.profit_ratio >= 0 ? '+' : ''}{(h.profit_ratio * 100).toFixed(2)}%</SensitiveValue>
                   </td>
                   <td className="num" style={{ color: h.today_profit_amount >= 0 ? 'var(--up)' : 'var(--down)' }} title={h.prev_close ? `昨收 ${h.prev_close.toFixed(2)}，涨跌幅 ${h.change_pct.toFixed(2)}%` : '缺少昨收行情'}>
-                    {h.today_profit_amount >= 0 ? '+' : ''}{h.today_profit_amount.toLocaleString()}
+                    <SensitiveValue>{h.today_profit_amount >= 0 ? '+' : ''}{h.today_profit_amount.toLocaleString()}</SensitiveValue>
                   </td>
                   <td className="num" style={{ color: h.today_profit_ratio >= 0 ? 'var(--up)' : 'var(--down)' }}>
-                    {h.today_profit_ratio >= 0 ? '+' : ''}{(h.today_profit_ratio * 100).toFixed(2)}%
+                    <SensitiveValue>{h.today_profit_ratio >= 0 ? '+' : ''}{(h.today_profit_ratio * 100).toFixed(2)}%</SensitiveValue>
                   </td>
                   <td className="seesaw-cell">
                     {alert ? (
@@ -870,11 +902,11 @@ export default function Positions({ mode = 'overview' }: { mode?: 'overview' | '
                           <span>概念辅助：{(alert.concept_flow_sectors?.length ? alert.concept_flow_sectors.slice(0, 3).join('、') : '不参与主曲线')}</span>
                           <span>外部吸金：{alert.external_inflow_target || '暂无'}</span>
                         </div>
-                        <p>{alert.signal}</p>
-                        <p className="seesaw-advice">{alert.advice}</p>
+                        <p><SensitiveEvidenceText value={alert.signal} /></p>
+                        <p className="seesaw-advice"><SensitiveEvidenceText value={alert.advice} /></p>
                         <div className="seesaw-trigger-stack">
-                          {alert.profit_protection_state && <span>{alert.profit_protection_state}</span>}
-                          <span>触发：{alert.trigger_action || alert.stock_weakening_trigger[0] || alert.sector_ebb_trigger[0] || '继续观察'}</span>
+                          {alert.profit_protection_state && <span><SensitiveEvidenceText value={alert.profit_protection_state} /></span>}
+                          <span>触发：<SensitiveEvidenceText value={alert.trigger_action || alert.stock_weakening_trigger[0] || alert.sector_ebb_trigger[0] || '继续观察'} /></span>
                         </div>
                         <small>个股高点回撤 {alert.pullback_from_high_pct.toFixed(2)}% · 主线主力 {alert.sector_main_inflow.toFixed(2)} 亿</small>
                       </div>
@@ -888,17 +920,17 @@ export default function Positions({ mode = 'overview' }: { mode?: 'overview' | '
                           <span>{chineseLabel(execution.state)}</span>
                         </div>
                         <div className="execution-cell-lines">
-                          <span>最大浮盈 {execution.profit_snapshot?.maximum_profit_pct.toFixed(2) ?? '--'}%</span>
-                          <span>回撤 {execution.profit_snapshot?.profit_drawdown_pct.toFixed(2) ?? '--'}pct</span>
+                          <span>最大浮盈 <SensitiveValue>{execution.profit_snapshot?.maximum_profit_pct.toFixed(2) ?? '--'}%</SensitiveValue></span>
+                          <span>回撤 <SensitiveValue>{execution.profit_snapshot?.profit_drawdown_pct.toFixed(2) ?? '--'}pct</SensitiveValue></span>
                           <span>结构 {execution.structure_stop_price.toFixed(2)} / 硬止损 {execution.hard_stop_price.toFixed(2)}</span>
                           <span>来源 {stopSourceLabel(execution.stop_source)}</span>
                           <span>{execution.t_eligible ? `允许${execution.t_type}` : '禁止做T'}</span>
                         </div>
-                        <p>{execution.evidence[0] || '按原计划观察。'}</p>
+                        <p><SensitiveEvidenceText value={execution.evidence[0] || '按原计划观察。'} /></p>
                       </div>
                     ) : '--'}
                   </td>
-                  <td className="num">{h.total_asset ? `${(h.position_ratio * 100).toFixed(1)}%` : '--'}</td>
+                  <td className="num"><SensitiveValue>{h.total_asset ? `${(h.position_ratio * 100).toFixed(1)}%` : '--'}</SensitiveValue></td>
                   <td className="num">{h.stop_loss_price.toFixed(2)}</td>
                   <td className="num">{h.profit_guard_price?.toFixed(2) ?? '--'}</td>
                   <td><span className="type-tag" style={{ color: typeColor(h.position_type), borderColor: typeColor(h.position_type) }}>{h.position_type}</span></td>

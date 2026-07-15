@@ -1,5 +1,5 @@
 from concurrent.futures import ThreadPoolExecutor, wait
-from datetime import date, datetime, timedelta
+from datetime import datetime, time, timedelta
 import json
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -20,6 +20,7 @@ from app.api.helpers.decision import (
 )
 from app.api.helpers.volume_price import build_volume_price_snapshot
 from app.api.helpers.reflexivity import build_market_reflexivity, build_stock_reflexivity
+from app.core.trading_clock import shanghai_now_naive, shanghai_today
 from app.core.database import get_db
 from app.models.trading import DataCaptureSnapshot, ExpectationRevision, ExpectationRule, ExpectationScenario, ExpectationSnapshot, Holding, IntradayEvidenceEvent, NextDayPlan, PositionExecutionState, VolumePriceSnapshot, WatchlistEntry
 from app.schemas.trading import (
@@ -45,6 +46,27 @@ from app.schemas.trading import (
 from app.services.market_regime import get_market_regime
 
 router = APIRouter()
+
+
+def _completed_trading_days(count: int, now: datetime | None = None) -> list[str]:
+    """Return completed A-share trading dates, newest first.
+
+    During a trading day we keep serving the pool generated from the previous
+    close.  After 15:00 the just-finished session becomes eligible for the
+    nightly rotation.  The market-data provider remains the final authority on
+    whether that date actually has a trading snapshot (holiday gaps are simply
+    skipped by the provider calls below).
+    """
+    current = shanghai_now_naive(now)
+    cursor = current.date()
+    if cursor.weekday() >= 5 or current.time() < time(15, 0):
+        cursor -= timedelta(days=1)
+    result: list[str] = []
+    while len(result) < count:
+        if cursor.weekday() < 5:
+            result.append(cursor.isoformat())
+        cursor -= timedelta(days=1)
+    return result
 
 
 def _expectation_revision_out(row: ExpectationRevision, scenarios: list[ExpectationScenario]) -> ExpectationRevisionOut:
@@ -73,19 +95,10 @@ def _expectation_revision_out(row: ExpectationRevision, scenarios: list[Expectat
 
 @router.get("/watchlist-recommendations", response_model=list[WatchlistRecommendationOut])
 def watchlist_recommendations(db: Session = Depends(get_db)) -> list[WatchlistRecommendationOut]:
-    from app.services.market_data import MarketDataProvider
+    from app.services.market_data import MarketDataProvider, _is_valid_limit_up_ladder
 
     provider = MarketDataProvider()
-    def previous_trading_days(count: int) -> list[str]:
-        result: list[str] = []
-        cursor = date.today()
-        while len(result) < count:
-            cursor -= timedelta(days=1)
-            if cursor.weekday() < 5:
-                result.append(cursor.isoformat())
-        return result
-
-    recent_dates = previous_trading_days(5)
+    recent_dates = _completed_trading_days(5)
     def load_ladder(value: str):
         try:
             return provider.limit_up_ladder(value)
@@ -107,26 +120,55 @@ def watchlist_recommendations(db: Session = Depends(get_db)) -> list[WatchlistRe
         ladder = ladder_future.result() if ladder_future in done else None
     except Exception:
         ladder = None
+    if not _is_valid_limit_up_ladder(ladder):
+        # A typed ``LimitUpLadderOut`` with ``source=unavailable`` and empty
+        # groups is the provider's real failure shape.  Treat it exactly like
+        # an exception: it must never advance or clear the persisted pool.
+        ladder = None
     historical_ladders = []
     for value, future in historical_futures.items():
         if future not in done:
             continue
         try:
-            historical_ladders.append((value, future.result()))
+            history_ladder = future.result()
+            if _is_valid_limit_up_ladder(history_ladder):
+                historical_ladders.append((value, history_ladder))
         except Exception:
             continue
     try:
         broken_stocks = broken_future.result() if broken_future in done else []
     except Exception:
         broken_stocks = []
+    if ladder is None:
+        # Broken-limit rows for a date whose confirmed limit-up pool is absent
+        # are not sufficient evidence to rotate the daily automatic ten.
+        historical_ladders = []
+        broken_stocks = []
     for future in pending:
         future.cancel()
     executor.shutdown(wait=False, cancel_futures=True)
-    if radar is None and ladder is None:
-        raise HTTPException(status_code=503, detail="主线题材与涨停行情源暂不可用，请稍后重试；已有观察池和持仓数据未受影响")
-
     holding_codes = {row.code for row in db.query(Holding.code).all()}
     overrides = {row.code: row for row in db.query(WatchlistEntry).all()}
+    latest_auto_snapshot = max(
+        (row.snapshot_date for row in overrides.values() if row.source == "auto" and row.snapshot_date),
+        default="",
+    )
+    live_snapshot_date = str(getattr(ladder, "trade_date", "") or "")
+    if latest_auto_snapshot and live_snapshot_date and live_snapshot_date < latest_auto_snapshot:
+        # Some upstream fallbacks return the last *available* historical pool
+        # while carrying no explicit degradation flag.  Never rotate a newer
+        # persisted watchlist backwards to that older trading date.
+        ladder = None
+        historical_ladders = []
+        broken_stocks = []
+        live_snapshot_date = ""
+    snapshot_date = live_snapshot_date or latest_auto_snapshot or recent_dates[0]
+    rotation_available = bool(
+        ladder is not None
+        and live_snapshot_date
+        and _is_valid_limit_up_ladder(ladder)
+    )
+    display_snapshot_date = snapshot_date if rotation_available else latest_auto_snapshot
     rows: dict[str, dict] = {}
     theme_source = radar.source if radar else "题材数据不可用"
     for theme in (radar.themes[:20] if radar else []):
@@ -238,13 +280,22 @@ def watchlist_recommendations(db: Session = Depends(get_db)) -> list[WatchlistRe
 
     codes = list(rows)
     for entry in overrides.values():
-        if entry.status == "active" and entry.code not in rows:
+        is_current_entry = entry.source == "manual" or (
+            entry.source == "auto" and entry.snapshot_date == display_snapshot_date
+        )
+        if entry.status == "active" and is_current_entry and entry.code not in rows:
+            is_manual = entry.source == "manual"
             rows[entry.code] = {
                 "code": entry.code, "name": entry.name or entry.code, "theme_score": 70, "limit_score": 15,
-                "theme": "手动观察", "role": "用户加入", "limit_level": 0, "limit_quality": "等待行情验证",
+                "theme": "手动观察" if is_manual else "盘后系统观察",
+                "role": "用户加入" if is_manual else "系统盘后入选",
+                "limit_level": 0, "limit_quality": "等待行情验证",
                 "fund_signal": "", "current_price": 0.0, "sealed_amount": 0.0, "turnover": 0.0,
                 "break_count": 0, "first_limit_time": "", "last_limit_time": "",
-                "reasons": ["用户手动加入观察池"], "risks": [], "sources": {"用户维护"}, "category": "手动自选",
+                "reasons": [entry.entry_reason or ("用户手动加入观察池" if is_manual else "系统盘后评分入选")],
+                "risks": [],
+                "sources": {"用户维护" if is_manual else f"盘后观察池快照 {entry.snapshot_date}"},
+                "category": "手动自选" if is_manual else (entry.category or "系统观察"),
             }
     codes = list(rows)
     expectations: dict[str, ExpectationSnapshot] = {}
@@ -260,9 +311,15 @@ def watchlist_recommendations(db: Session = Depends(get_db)) -> list[WatchlistRe
 
     outputs: list[WatchlistRecommendationOut] = []
     for row in rows.values():
-        if overrides.get(row["code"]) and overrides[row["code"]].status == "excluded":
+        override = overrides.get(row["code"])
+        # Manual removals are persistent.  Automatic removals only block the
+        # snapshot from which they were removed, so the name may legitimately
+        # qualify again after the next close without causing a same-day refill.
+        if override and override.status == "excluded" and (
+            override.source == "manual" or override.snapshot_date == snapshot_date
+        ):
             continue
-        if overrides.get(row["code"]) and overrides[row["code"]].status == "active" and overrides[row["code"]].source == "manual":
+        if override and override.status == "active" and override.source == "manual":
             row["category"] = "手动自选"
             row["reasons"].insert(0, "用户手动加入观察池")
         score_value = row["theme_score"] + row["limit_score"]
@@ -332,19 +389,36 @@ def watchlist_recommendations(db: Session = Depends(get_db)) -> list[WatchlistRe
             reasons=list(dict.fromkeys(row["reasons"])), risks=list(dict.fromkeys(row["risks"])),
             source=" + ".join(sorted(row["sources"])),
             category=str(row.get("category") or "主线题材观察"),
-            entry_reason=(overrides.get(row["code"]).entry_reason if overrides.get(row["code"]) else "") or (row["reasons"][0] if row["reasons"] else "系统评分入选"),
-            observation_days=max(1, (datetime.now().date() - (overrides.get(row["code"]).created_at.date() if overrides.get(row["code"]) else datetime.now().date())).days + 1),
-            converted=bool(overrides.get(row["code"]) and overrides[row["code"]].converted_at),
+            entry_reason=(override.entry_reason if override else "") or (row["reasons"][0] if row["reasons"] else "系统评分入选"),
+            observation_days=max(1, (shanghai_today() - (override.created_at.date() if override else shanghai_today())).days + 1),
+            converted=bool(override and override.converted_at),
             updated_at=max([value for value in (radar.updated_at if radar else None, ladder.updated_at if ladder else None) if value is not None], default=None),
         ))
     output_by_code = {item.code: item for item in outputs}
-    snapshot_date = str(getattr(ladder, "trade_date", "") or date.today().isoformat())
+    # Once a valid closing snapshot exists, rotate the automatic ten exactly
+    # once.  Old automatic rows are expired; manual rows are never touched.
+    # An excluded row still counts as part of today's snapshot, which is what
+    # prevents a delete followed by a GET from silently filling the vacancy.
+    if rotation_available:
+        for stale in db.query(WatchlistEntry).filter(
+            WatchlistEntry.source == "auto",
+            WatchlistEntry.status == "active",
+            WatchlistEntry.snapshot_date != snapshot_date,
+        ).all():
+            stale.status = "expired"
+            stale.updated_at = shanghai_now_naive()
+            db.add(stale)
+        db.commit()
     today_auto = db.query(WatchlistEntry).filter(
         WatchlistEntry.source == "auto",
         WatchlistEntry.snapshot_date == snapshot_date,
     ).all()
-    if not today_auto:
-        ranked = [item for item in sorted(outputs, key=lambda item: (-item.score, item.code)) if item.category in {"昨日涨停承接观察", "近几日涨停／炸板承接观察"}]
+    if rotation_available and not today_auto:
+        ranked = [
+            item for item in sorted(outputs, key=lambda item: (-item.score, item.code))
+            if item.category in {"昨日涨停承接观察", "近几日涨停／炸板承接观察"}
+            and item.code not in holding_codes
+        ]
         def select_diverse(candidates: list[WatchlistRecommendationOut], limit: int) -> list[WatchlistRecommendationOut]:
             """同一题材仅保留龙头、换手核心、低位补涨三个不同角色。"""
             selected_items: list[WatchlistRecommendationOut] = []
@@ -369,24 +443,19 @@ def watchlist_recommendations(db: Session = Depends(get_db)) -> list[WatchlistRe
         selected = (first + second)[:10]
         if len(selected) < 10:
             selected_codes = {item.code for item in selected}
-            theme_roles = {
-                (item.theme or "未分类", "龙头" if item.limit_level >= 2 or "龙头" in item.role else "换手核心" if item.score >= 70 or "核心" in item.role else "低位补涨")
-                for item in selected
-            }
             for item in ranked:
-                role_bucket = "龙头" if item.limit_level >= 2 or "龙头" in item.role else "换手核心" if item.score >= 70 or "核心" in item.role else "低位补涨"
-                key = (item.theme or "未分类", role_bucket)
-                if item.code in selected_codes or key in theme_roles:
+                if item.code in selected_codes:
                     continue
                 selected.append(item)
                 selected_codes.add(item.code)
-                theme_roles.add(key)
                 if len(selected) >= 10:
                     break
             selected = selected[:10]
         for rank, item in enumerate(selected, start=1):
             existing = overrides.get(item.code)
-            if existing and existing.status == "excluded":
+            if existing and existing.status == "excluded" and (
+                existing.source == "manual" or existing.snapshot_date == snapshot_date
+            ):
                 continue
             if existing is None:
                 existing = WatchlistEntry(code=item.code, name=item.name, source="auto")
@@ -397,6 +466,9 @@ def watchlist_recommendations(db: Session = Depends(get_db)) -> list[WatchlistRe
                 existing.category = item.category
                 existing.snapshot_rank = rank
                 existing.entry_reason = item.reasons[0] if item.reasons else f"{item.category}评分入选"
+                existing.exit_reason = ""
+                existing.exited_at = None
+                existing.updated_at = shanghai_now_naive()
                 db.add(existing)
         db.commit()
         today_auto = db.query(WatchlistEntry).filter(WatchlistEntry.source == "auto", WatchlistEntry.snapshot_date == snapshot_date).all()
@@ -404,10 +476,15 @@ def watchlist_recommendations(db: Session = Depends(get_db)) -> list[WatchlistRe
     active_entries = db.query(WatchlistEntry).filter(WatchlistEntry.status == "active").all()
     for entry in active_entries:
         if entry.code in holding_codes and entry.converted_at is None:
-            entry.converted_at = datetime.now()
+            entry.converted_at = shanghai_now_naive()
             db.add(entry)
     db.commit()
-    active_codes = {item.code for item in active_entries if item.source == "manual" or item.snapshot_date == snapshot_date}
+    active_codes = {
+        item.code for item in active_entries
+        if item.source == "manual" or item.snapshot_date == display_snapshot_date
+    }
+    if not active_codes and radar is None and ladder is None:
+        raise HTTPException(status_code=503, detail="主线题材与涨停行情源暂不可用，请稍后重试；已有观察池和持仓数据未受影响")
     return sorted(
         [output_by_code[code] for code in active_codes if code in output_by_code],
         key=lambda item: next((entry.snapshot_rank for entry in active_entries if entry.code == item.code and entry.snapshot_rank), 999),
@@ -432,24 +509,26 @@ def add_watchlist_entry(payload: WatchlistEntryIn, db: Session = Depends(get_db)
         row.name = resolved_name or row.name or code
         row.status = "active"
         row.source = "manual"
+        row.snapshot_date = ""
+        row.snapshot_rank = 0
         row.category = "手动自选"
         row.entry_reason = row.entry_reason or "用户手动加入观察池"
         row.exit_reason = ""
         row.exited_at = None
-        row.updated_at = datetime.now()
+        row.updated_at = shanghai_now_naive()
     db.add(row); db.commit(); db.refresh(row)
-    return WatchlistEntryOut(code=row.code, name=row.name, status=row.status, source=row.source, entry_reason=row.entry_reason, exit_reason=row.exit_reason, observation_days=max(1, (datetime.now().date() - row.created_at.date()).days + 1), converted=bool(row.converted_at))
+    return WatchlistEntryOut(code=row.code, name=row.name, status=row.status, source=row.source, entry_reason=row.entry_reason, exit_reason=row.exit_reason, observation_days=max(1, (shanghai_today() - row.created_at.date()).days + 1), converted=bool(row.converted_at))
 
 
 @router.delete("/watchlist/{code}", response_model=WatchlistEntryOut)
 def exclude_watchlist_entry(code: str, exit_reason: str = "用户手动剔除", db: Session = Depends(get_db)) -> WatchlistEntryOut:
     row = db.query(WatchlistEntry).filter(WatchlistEntry.code == code).first()
     if row is None:
-        row = WatchlistEntry(code=code, name=code, status="excluded", source="manual", exit_reason=exit_reason, exited_at=datetime.now())
+        row = WatchlistEntry(code=code, name=code, status="excluded", source="manual", exit_reason=exit_reason, exited_at=shanghai_now_naive())
     else:
-        row.status = "excluded"; row.exit_reason = exit_reason; row.exited_at = datetime.now(); row.updated_at = datetime.now()
+        row.status = "excluded"; row.exit_reason = exit_reason; row.exited_at = shanghai_now_naive(); row.updated_at = shanghai_now_naive()
     db.add(row); db.commit(); db.refresh(row)
-    return WatchlistEntryOut(code=row.code, name=row.name, status=row.status, source=row.source, entry_reason=row.entry_reason, exit_reason=row.exit_reason, observation_days=max(1, (datetime.now().date() - row.created_at.date()).days + 1), converted=bool(row.converted_at))
+    return WatchlistEntryOut(code=row.code, name=row.name, status=row.status, source=row.source, entry_reason=row.entry_reason, exit_reason=row.exit_reason, observation_days=max(1, (shanghai_today() - row.created_at.date()).days + 1), converted=bool(row.converted_at))
 
 
 def _infer_limit_up_expectation(row: dict) -> tuple[str, float | None, list[str]]:
@@ -603,13 +682,50 @@ def get_stock_expectation(code: str, db: Session = Depends(get_db)) -> Expectati
 @router.get("/stocks/{code}/expectation-chain", response_model=ExpectationChainOut)
 def get_stock_expectation_chain(code: str, trade_date: str = "", db: Session = Depends(get_db)) -> ExpectationChainOut:
     normalized = code.zfill(6)
-    selected_date = trade_date or date.today().isoformat()
+    selected_date = trade_date or shanghai_today().isoformat()
     revisions = (
         db.query(ExpectationRevision)
         .filter(ExpectationRevision.code.in_([code, normalized]), ExpectationRevision.trade_date == selected_date)
         .order_by(ExpectationRevision.version.asc(), ExpectationRevision.id.asc())
         .all()
     )
+    def semantic_signal(pattern: str) -> str:
+        text = pattern or ""
+        if any(value in text for value in ("跌停开板V形修复", "深水开板V形修复", "水下V形反转", "水下V形修复", "重新站回VWAP且低点抬高")):
+            return "REVERSAL_CONFIRMED"
+        if "深水V形反抽待确认" in text:
+            return "REVERSAL_PENDING"
+        if "冲高回落跌破VWAP" in text:
+            return "VOLUME_PRICE_WEAKENING"
+        if "跌破VWAP" in text:
+            return "VWAP_BREAKDOWN"
+        if "VWAP上方强势" in text:
+            return "VWAP_STRONG"
+        return text
+
+    # Historical deployments could append a version on every refresh.  Keep
+    # the audit rows in the database, but present only decision-relevant nodes;
+    # the latest sample wins inside an unchanged semantic phase.
+    compacted: list[ExpectationRevision] = []
+    compacted_signatures: list[tuple[object, ...]] = []
+    for row in revisions:
+        signature = (
+            row.stage,
+            row.base_expectation,
+            round(row.expected_open_low, 2),
+            round(row.expected_open_high, 2),
+            row.expectation_result,
+            row.state_transition,
+            semantic_signal(row.volume_price_state),
+            "usable" if row.data_quality not in {"missing", "manual"} else "missing",
+        )
+        if compacted_signatures and signature == compacted_signatures[-1]:
+            compacted[-1] = row
+        else:
+            compacted.append(row)
+            compacted_signatures.append(signature)
+    revisions = compacted
+
     scenario_rows = db.query(ExpectationScenario).filter(
         ExpectationScenario.revision_id.in_([row.id for row in revisions] or [0])
     ).order_by(ExpectationScenario.id.asc()).all()
@@ -617,7 +733,7 @@ def get_stock_expectation_chain(code: str, trade_date: str = "", db: Session = D
     for scenario in scenario_rows:
         scenarios_by_revision.setdefault(scenario.revision_id, []).append(scenario)
     return ExpectationChainOut(
-        code=normalized, trade_date=selected_date, generated_at=datetime.now(),
+        code=normalized, trade_date=selected_date, generated_at=shanghai_now_naive(),
         current_stage=revisions[-1].stage if revisions else current_expectation_stage(),
         revisions=[_expectation_revision_out(row, scenarios_by_revision.get(row.id, [])) for row in revisions],
     )
@@ -701,7 +817,7 @@ def get_stock_intraday_review(code: str, db: Session = Depends(get_db)) -> Intra
         return IntradayReviewOut(
             code=latest_state.code,
             name=latest_state.name,
-            generated_at=datetime.now(),
+            generated_at=shanghai_now_naive(),
             latest_action=latest_state.recommended_action,
             latest_state=latest_state.state,
             data_quality=latest_state.data_quality,
@@ -716,7 +832,7 @@ def get_stock_intraday_review(code: str, db: Session = Depends(get_db)) -> Intra
     return IntradayReviewOut(
         code=state.code,
         name=state.name,
-        generated_at=datetime.now(),
+        generated_at=shanghai_now_naive(),
         latest_action=state.recommended_action,
         latest_state=state.state,
         data_quality=state.data_quality,

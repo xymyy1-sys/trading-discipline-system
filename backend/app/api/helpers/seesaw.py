@@ -1,11 +1,11 @@
 import json
 import re
 from collections import Counter, defaultdict
-from datetime import datetime
 from types import SimpleNamespace
 from typing import Any
 import requests
 from sqlalchemy.orm import Session
+from app.core.trading_clock import shanghai_now_naive
 from app.models.trading import Holding
 from app.schemas.trading import MarketSeesawOut, SectorRotationItem, HoldingSeesawItem, SellPlanOut
 from app.services.market_data import MarketDataProvider, _get_response_cache, _set_response_cache, _last_trading_day
@@ -81,7 +81,7 @@ def _market_seesaw_monitor(holdings: list[Holding], force_refresh: bool = False)
     if not holdings:
         return MarketSeesawOut(
             source="empty",
-            updated_at=datetime.now(),
+            updated_at=shanghai_now_naive(),
             market_mode="暂无持仓",
             summary="暂无持仓可监控。",
             inflow_targets=[],
@@ -160,7 +160,7 @@ def _market_seesaw_monitor(holdings: list[Holding], force_refresh: bool = False)
     )
     return MarketSeesawOut(
         source="+".join(dict.fromkeys(sources)) or "数据源不可用",
-        updated_at=datetime.now(),
+        updated_at=shanghai_now_naive(),
         market_mode=market_mode,
         summary=summary,
         inflow_targets=inflow_targets[:8],
@@ -186,6 +186,12 @@ def _dedupe_sector_flows(flows: list[Any]) -> list[Any]:
 
 def _sector_rotation_item(item: Any, rank: int, limit_counts: dict[str, int]) -> SectorRotationItem:
     acceleration = _sector_acceleration(item)
+    flow_speed = getattr(item, "flow_speed", None)
+    flow_acceleration = getattr(item, "flow_acceleration", None)
+    flow_direction = str(getattr(item, "flow_direction", "") or "") or None
+    flow_turning = str(getattr(item, "flow_turning", "") or "") or None
+    flow_signal = str(getattr(item, "flow_signal", "") or "") or None
+    flow_as_of = str(getattr(item, "flow_as_of", "") or "") or None
     names = _sector_aliases(item)
     limit_count = max(limit_counts.get(name, 0) for name in names) if names else 0
     direction = "加速流入" if acceleration > 0 else "流入减速" if acceleration < 0 else "资金平稳"
@@ -200,6 +206,14 @@ def _sector_rotation_item(item: Any, rank: int, limit_counts: dict[str, int]) ->
         net_inflow=round(float(item.net_inflow or 0), 2),
         main_inflow=round(float(item.main_inflow or 0), 2),
         acceleration=round(acceleration, 2),
+        flow_speed=round(float(flow_speed), 4) if flow_speed is not None else None,
+        flow_acceleration=round(float(flow_acceleration), 6) if flow_acceleration is not None else None,
+        flow_direction=flow_direction,
+        flow_turning=flow_turning,
+        flow_signal=flow_signal,
+        flow_as_of=flow_as_of,
+        flow_window_minutes=getattr(item, "flow_window_minutes", None),
+        flow_kinetics_reliable=bool(getattr(item, "flow_kinetics_reliable", False)),
         limit_up_count=limit_count,
         leaders=[str(leader) for leader in getattr(item, "leaders", [])[:4]],
         evidence=evidence,
@@ -284,6 +298,12 @@ def _holding_seesaw_item(
     sector_net = float(theme_flow["current"])
     sector_main = float(theme_flow["main"])
     sector_acc = float(theme_flow["acceleration"])
+    sector_flow_speed = getattr(matched_flow, "flow_speed", None) if matched_flow is not None else None
+    sector_flow_acceleration = getattr(matched_flow, "flow_acceleration", None) if matched_flow is not None else None
+    sector_flow_direction = str(getattr(matched_flow, "flow_direction", "") or "") if matched_flow is not None else ""
+    sector_flow_turning = str(getattr(matched_flow, "flow_turning", "") or "") if matched_flow is not None else ""
+    sector_flow_signal = str(getattr(matched_flow, "flow_signal", "") or "") if matched_flow is not None else ""
+    sector_flow_as_of = str(getattr(matched_flow, "flow_as_of", "") or "") if matched_flow is not None else ""
     theme_flow_peak = float(theme_flow["peak"])
     theme_flow_pullback = float(theme_flow["pullback"])
     theme_flow_pullback_pct = float(theme_flow["pullback_pct"])
@@ -313,6 +333,10 @@ def _holding_seesaw_item(
         evidence.append(theme_flow_summary)
     else:
         evidence.append("主资金曲线：未在行业/概念资金流中精确匹配；仅展示个股画像，不强行替代。")
+    if sector_flow_signal:
+        flow_time = f"（截至{sector_flow_as_of}）" if sector_flow_as_of else ""
+        speed_text = f"，流速{float(sector_flow_speed):+.3f}亿/分钟" if sector_flow_speed is not None else ""
+        evidence.append(f"资金拐点证据{flow_time}：{sector_flow_signal}{speed_text}。")
     if concept_flow_sectors:
         evidence.append(concept_flow_summary)
     if strongest:
@@ -331,6 +355,10 @@ def _holding_seesaw_item(
         sector_net=sector_net,
         sector_main=sector_main,
         sector_acc=sector_acc,
+        sector_flow_speed=float(sector_flow_speed) if sector_flow_speed is not None else None,
+        sector_flow_acceleration=float(sector_flow_acceleration) if sector_flow_acceleration is not None else None,
+        sector_flow_turning=sector_flow_turning,
+        sector_flow_signal=sector_flow_signal,
         sector_flow_peak=theme_flow_peak,
         sector_flow_current=sector_net,
         sector_flow_pullback=theme_flow_pullback,
@@ -343,6 +371,8 @@ def _holding_seesaw_item(
     if strongest_is_other and strongest.net_inflow > max(0, sector_net):
         score += 2
     if sector_net < 0 or sector_main < 0 or sector_acc < -1:
+        score += 2
+    if sector_flow_turning in {"TURN_TO_OUTFLOW", "OUTFLOW_ACCELERATING", "INFLOW_FADING", "FLOW_WEAKENING"}:
         score += 2
     if theme_flow_pullback >= 20 or theme_flow_pullback_pct >= 20:
         score += 2
@@ -411,6 +441,14 @@ def _holding_seesaw_item(
         sector_net_inflow=round(sector_net, 2),
         sector_main_inflow=round(sector_main, 2),
         sector_acceleration=round(sector_acc, 2),
+        sector_flow_speed=round(float(sector_flow_speed), 4) if sector_flow_speed is not None else None,
+        sector_flow_acceleration=round(float(sector_flow_acceleration), 6) if sector_flow_acceleration is not None else None,
+        sector_flow_direction=sector_flow_direction or None,
+        sector_flow_turning=sector_flow_turning or None,
+        sector_flow_signal=sector_flow_signal or None,
+        sector_flow_as_of=sector_flow_as_of or None,
+        sector_flow_window_minutes=getattr(matched_flow, "flow_window_minutes", None) if matched_flow is not None else None,
+        sector_flow_kinetics_reliable=bool(getattr(matched_flow, "flow_kinetics_reliable", False)) if matched_flow is not None else False,
         risk_level=risk_level,
         signal=signal,
         advice=advice,
@@ -437,6 +475,10 @@ def _intraday_sell_triggers(
     sector_net: float,
     sector_main: float,
     sector_acc: float,
+    sector_flow_speed: float | None = None,
+    sector_flow_acceleration: float | None = None,
+    sector_flow_turning: str = "",
+    sector_flow_signal: str = "",
     sector_flow_peak: float = 0.0,
     sector_flow_current: float = 0.0,
     sector_flow_pullback: float = 0.0,
@@ -457,6 +499,18 @@ def _intraday_sell_triggers(
         sector_triggers.append(f"{sector or '所属板块'}主力净流入转负：{sector_main:.2f}亿。")
     if sector_acc < -1:
         sector_triggers.append(f"{sector or '所属板块'}盘中资金变化{sector_acc:+.2f}亿，出现退潮。")
+    if sector_flow_turning == "TURN_TO_OUTFLOW":
+        speed_text = f"，流速{sector_flow_speed:+.3f}亿/分钟" if sector_flow_speed is not None else ""
+        sector_triggers.append(f"{sector or '所属板块'}资金由净流入拐为净流出{speed_text}。")
+    elif sector_flow_turning in {"OUTFLOW_ACCELERATING", "INFLOW_FADING", "FLOW_WEAKENING"}:
+        speed_text = f"，流速{sector_flow_speed:+.3f}亿/分钟" if sector_flow_speed is not None else ""
+        acceleration_text = (
+            f"、加速度{sector_flow_acceleration:+.4f}亿/分钟²"
+            if sector_flow_acceleration is not None else ""
+        )
+        sector_triggers.append(
+            f"{sector or '所属板块'}{sector_flow_signal or '资金边际转弱'}{speed_text}{acceleration_text}。"
+        )
     if sector_flow_pullback >= 20 or sector_flow_pullback_pct >= 20:
         sector_triggers.append(
             f"{sector or '所属板块'}主线资金从高点{sector_flow_peak:.2f}亿回落到{sector_flow_current:.2f}亿，"
@@ -512,6 +566,11 @@ def _intraday_sell_triggers(
         "个股不再创新低，并重新站回分时均价/VWAP。",
         "下跌缩量、反弹放量；买回后设置失败位，跌破日内低点或VWAP不继续补。",
     ]
+    if sector_flow_turning in {"TURN_TO_INFLOW", "OUTFLOW_NARROWING", "INFLOW_ACCELERATING", "FLOW_IMPROVING"}:
+        buyback.insert(
+            0,
+            f"{sector or '所属板块'}{sector_flow_signal or '资金边际改善'}；仍需个股站回真实VWAP后确认。",
+        )
     return {
         "profit_protection_state": protection_state,
         "trigger_action": action,
@@ -731,13 +790,25 @@ def _cached_holding_theme_flow_profile(holding: Holding) -> dict[str, Any]:
     ranked_concept = sorted(unique_concept, key=lambda item: (item.net_inflow, item.main_inflow, item.change_pct), reverse=True)
     industry_rank_map = {item.name: idx for idx, item in enumerate(ranked_industry, start=1)}
     concept_rank_map = {item.name: idx for idx, item in enumerate(ranked_concept, start=1)}
-    return _holding_theme_flow_profile(
+    profile = _holding_theme_flow_profile(
         holding,
         ranked_industry,
         industry_rank_map,
         ranked_concept,
         concept_rank_map
     )
+    # Preserve the actual cache/source timestamps.  Callers such as the
+    # evidence-grounded AI assistant must never label an older sector-flow
+    # cache with the current request time.
+    flow_snapshots = [item for item in (cached_industry, cached_concept) if item]
+    source_times = [getattr(item, "updated_at", None) for item in flow_snapshots]
+    source_times = [item for item in source_times if item is not None]
+    sources = [str(getattr(item, "source", "") or "") for item in flow_snapshots]
+    sources = list(dict.fromkeys(item for item in sources if item))
+    profile["as_of"] = min(source_times).isoformat() if source_times else "未知"
+    profile["source"] = "+".join(sources) or "板块资金缓存不可用"
+    profile["data_quality"] = "cached_source_timestamped" if source_times else "missing"
+    return profile
 
 def _broader_industry_timeline(
     ranked_industry_flows: list[Any],
@@ -835,7 +906,7 @@ def _fetch_eastmoney_h5_board_flow(secid: str, display_name: str) -> Any | None:
     return flow
 
 def _eastmoney_h5_board_timeline(secid: str, current: float) -> list[Any]:
-    now_label = datetime.now().strftime("%H:%M")
+    now_label = shanghai_now_naive().strftime("%H:%M")
     return [SimpleNamespace(time=now_label, value=current)]
 
 def _holding_flow_match_score(holding: Holding, flow: Any) -> int:

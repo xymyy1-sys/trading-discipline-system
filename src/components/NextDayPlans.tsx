@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { RefreshCcw, Save, Trash2 } from 'lucide-react'
 import { API_BASE } from '../api'
+import { usePrivacyMode } from '../privacy-context'
+import { SensitiveValue } from '../privacy'
 
 import type {
   ClassificationBasis as Basis,
@@ -12,6 +14,7 @@ import type {
 const categories = ['超预期', '强预期', '符合预期', '弱转强', '弱于预期', '分歧转弱']
 
 export default function NextDayPlans({ mode = 'holding' }: { mode?: 'holding' | 'limit' }) {
+  const privacyMode = usePrivacyMode()
   const [plans, setPlans] = useState<Plan[]>([])
   const [selectedId, setSelectedId] = useState<number | null>(null)
   const [draft, setDraft] = useState<Plan | null>(null)
@@ -206,7 +209,10 @@ export default function NextDayPlans({ mode = 'holding' }: { mode?: 'holding' | 
                 <strong>{plan.name}</strong>
                 <span>{plan.code} · {plan.holding_category}</span>
                 {plan.plan_type === 'limit_up_auction' && <em>打板/竞价预案</em>}
-                <small>{plan.plan_date} · 仓位 {(plan.position_ratio * 100).toFixed(1)}% · 浮盈 {(plan.profit_ratio * 100).toFixed(2)}%</small>
+                <small>
+                  {plan.plan_date} · 仓位 <SensitiveValue>{(plan.position_ratio * 100).toFixed(1)}%</SensitiveValue>
+                  {' · '}浮盈 <SensitiveValue>{(plan.profit_ratio * 100).toFixed(2)}%</SensitiveValue>
+                </small>
               </button>
               <button className="plan-delete-btn" type="button" title="删除计划" onClick={() => deletePlan(plan)}>
                 <Trash2 size={14} />
@@ -223,8 +229,13 @@ export default function NextDayPlans({ mode = 'holding' }: { mode?: 'holding' | 
                 <div>
                   <strong>{draft.name} <span className="mono">{draft.code}</span></strong>
                   <span>
-                    {draft.quantity.toLocaleString()} 股 · 成本 {draft.cost_price.toFixed(2)} · 现价 {draft.current_price.toFixed(2)}
-                    {draft.plan_type === 'holding' && ` · 市值 ${draft.market_value.toLocaleString()} · 盈亏 ${draft.profit_amount >= 0 ? '+' : ''}${draft.profit_amount.toLocaleString()}`}
+                    <SensitiveValue>{draft.quantity.toLocaleString()} 股</SensitiveValue>
+                    {' · '}成本 <SensitiveValue>{draft.cost_price.toFixed(2)}</SensitiveValue>
+                    {' · '}现价 {draft.current_price.toFixed(2)}
+                    {draft.plan_type === 'holding' && <>
+                      {' · '}市值 <SensitiveValue>{draft.market_value.toLocaleString()}</SensitiveValue>
+                      {' · '}盈亏 <SensitiveValue>{draft.profit_amount >= 0 ? '+' : ''}{draft.profit_amount.toLocaleString()}</SensitiveValue>
+                    </>}
                   </span>
                   {draft.plan_type === 'holding' && (
                     <span className={draft.price_source === 'realtime' ? 'quote-note live' : 'quote-note stale'}>
@@ -335,7 +346,7 @@ export default function NextDayPlans({ mode = 'holding' }: { mode?: 'holding' | 
                   <input type="number" step="0.01" value={draft.trim_price} onChange={e => updateDraft('trim_price', Number(e.target.value))} />
                 </label>
                 <label>高抛股数
-                  <input type="number" value={draft.trim_quantity} onChange={e => updateDraft('trim_quantity', Number(e.target.value))} />
+                  <SensitiveNumberInput privacyMode={privacyMode} value={draft.trim_quantity} onChange={value => updateDraft('trim_quantity', value)} />
                 </label>
                 <label>减仓线
                   <input type="number" step="0.01" value={draft.reduce_price} onChange={e => updateDraft('reduce_price', Number(e.target.value))} />
@@ -347,7 +358,7 @@ export default function NextDayPlans({ mode = 'holding' }: { mode?: 'holding' | 
                   <input type="number" step="0.01" value={draft.buyback_price} onChange={e => updateDraft('buyback_price', Number(e.target.value))} />
                 </label>
                 <label>最大买回股数
-                  <input type="number" value={draft.max_buyback_quantity} onChange={e => updateDraft('max_buyback_quantity', Number(e.target.value))} />
+                  <SensitiveNumberInput privacyMode={privacyMode} value={draft.max_buyback_quantity} onChange={value => updateDraft('max_buyback_quantity', value)} />
                 </label>
                 <label className="check-item done">
                   <input type="checkbox" checked={draft.allow_buyback} onChange={e => updateDraft('allow_buyback', e.target.checked)} />
@@ -392,7 +403,7 @@ export default function NextDayPlans({ mode = 'holding' }: { mode?: 'holding' | 
                 <div className="auction-metrics">
                   <span>连板高度 <strong>{draft.auction_plan.board_level || '--'}</strong></span>
                   <span>明日涨停 <strong>{draft.limit_up_price.toFixed(2)}</strong></span>
-                  <span>仓位上限 <strong>{(draft.auction_plan.max_position_ratio * 100).toFixed(0)}%</strong></span>
+                  <span>仓位上限 <strong><SensitiveValue>{(draft.auction_plan.max_position_ratio * 100).toFixed(0)}%</SensitiveValue></strong></span>
                   <span>预期级别 <strong>{draft.auction_plan.expectation_match || draft.auction_plan.expectation_level || draft.holding_category}</strong></span>
                 </div>
                 <div className="auction-evidence-grid">
@@ -440,7 +451,7 @@ export default function NextDayPlans({ mode = 'holding' }: { mode?: 'holding' | 
                     <input type="number" step="0.01" value={draft.limit_up_price} onChange={e => updateDraft('limit_up_price', Number(e.target.value))} />
                   </label>
                   <label>仓位上限
-                    <input type="number" step="0.01" value={draft.auction_plan.max_position_ratio} onChange={e => updateAuctionPlan('max_position_ratio', Number(e.target.value))} />
+                    <SensitiveNumberInput privacyMode={privacyMode} step="0.01" value={draft.auction_plan.max_position_ratio} onChange={value => updateAuctionPlan('max_position_ratio', value)} />
                   </label>
                   <label className="check-item done">
                     <input type="checkbox" checked={draft.auction_plan.overnight_order} onChange={e => updateAuctionPlan('overnight_order', e.target.checked)} />
@@ -504,6 +515,33 @@ export default function NextDayPlans({ mode = 'holding' }: { mode?: 'holding' | 
 
 function num(value: number) {
   return Number.isFinite(value) && value > 0 ? value.toFixed(2) : '--'
+}
+
+function SensitiveNumberInput({
+  privacyMode,
+  value,
+  onChange,
+  step,
+}: {
+  privacyMode: boolean
+  value: number
+  onChange: (value: number) => void
+  step?: string
+}) {
+  return (
+    <input
+      className="sensitive-number-input"
+      data-sensitive="true"
+      type={privacyMode ? 'text' : 'number'}
+      step={privacyMode ? undefined : step}
+      value={privacyMode ? '******' : value}
+      readOnly={privacyMode}
+      aria-label={privacyMode ? '敏感数据已隐藏' : undefined}
+      onChange={event => {
+        if (!privacyMode) onChange(Number(event.target.value))
+      }}
+    />
+  )
 }
 
 function Scenario({

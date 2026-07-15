@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -213,6 +213,26 @@ class PositionStateHistoryOut(BaseModel):
         from_attributes = True
 
 
+class HoldingExecutionSignalOut(BaseModel):
+    """A single, independently gated holding instruction.
+
+    High-level sell timing, panic protection and contrarian-add eligibility are
+    deliberately separated.  In particular, a panic-sell guard must never be
+    interpreted as permission to add risk.
+    """
+
+    code: str
+    status: str = "INACTIVE"
+    level: str = "NEUTRAL"
+    title: str
+    action: str
+    recommended_ratio: float = 0
+    evidence: list[str] = Field(default_factory=list)
+    missing_conditions: list[str] = Field(default_factory=list)
+    cancel_conditions: list[str] = Field(default_factory=list)
+    recovery_conditions: list[str] = Field(default_factory=list)
+
+
 class PositionExecutionStateOut(BaseModel):
     id: int | None = None
     holding_id: int
@@ -247,6 +267,9 @@ class PositionExecutionStateOut(BaseModel):
     recommendation: ActionRecommendationOut | None = None
     profit_snapshot: ProfitProtectionSnapshotOut | None = None
     state_history: list[PositionStateHistoryOut] = Field(default_factory=list)
+    high_sell_signal: HoldingExecutionSignalOut | None = None
+    panic_sell_guard: HoldingExecutionSignalOut | None = None
+    contrarian_add_signal: HoldingExecutionSignalOut | None = None
     data_quality: str = "manual"
     data_time: str = ""
     updated_at: datetime
@@ -1104,6 +1127,26 @@ class ReflexivityScenarioOut(BaseModel):
     next_validation_points: list[str] = Field(default_factory=list)
 
 
+class ConsensusHighOpenFadeOut(BaseModel):
+    code: str
+    label: str
+    status: str
+    triggered: bool = False
+    risk_level: str = "UNKNOWN"
+    score: int | None = None
+    evidence: list[str] = Field(default_factory=list)
+    counter_evidence: list[str] = Field(default_factory=list)
+    missing_fields: list[str] = Field(default_factory=list)
+    allowed_actions: list[str] = Field(default_factory=list)
+    forbidden_actions: list[str] = Field(default_factory=list)
+    next_validation_points: list[str] = Field(default_factory=list)
+    methodology_note: str = ""
+    as_of: datetime | None = None
+    trade_date: str = ""
+    source: list[str] = Field(default_factory=list)
+    input_evidence: dict[str, Any] = Field(default_factory=dict)
+
+
 class ReflexivityAssessmentOut(BaseModel):
     level: str
     code: str = ""
@@ -1126,6 +1169,7 @@ class ReflexivityAssessmentOut(BaseModel):
     market_gate: ReflexivityMarketGateOut | None = None
     hard_stop_triggered: bool = False
     scenarios: list[ReflexivityScenarioOut] = Field(default_factory=list)
+    consensus_high_open_fade: ConsensusHighOpenFadeOut | None = None
     methodology_note: str
 
 
@@ -1205,6 +1249,48 @@ class OpportunityRadarItemOut(BaseModel):
     buy_signal: bool = False
     url: str | None = None
     expires_at: str | None = None
+    claim_level: str = "RUMOR"
+    news_impact_status: str = "UNVERIFIED"
+    market_validation: str = "PENDING"
+    sentiment: str = "待验证"
+    sentiment_reason: str = ""
+    escalate_to_holding_risk: bool = False
+
+
+class SectorExpansionItemOut(BaseModel):
+    sector: str
+    status: str
+    confirmation_score: int
+    window_minutes: int
+    total_limit_up_count: int
+    new_limit_up_count: int
+    highest_board: int
+    change_pct: float | None = None
+    net_inflow: float | None = None
+    flow_speed: float | None = None
+    flow_acceleration: float | None = None
+    flow_turning: str | None = None
+    leaders: list[str] = Field(default_factory=list)
+    evidence: list[str] = Field(default_factory=list)
+    counter_evidence: list[str] = Field(default_factory=list)
+    missing: list[str] = Field(default_factory=list)
+    risk: list[str] = Field(default_factory=list)
+    action: str = ""
+    invalidation: list[str] = Field(default_factory=list)
+    source: list[str] = Field(default_factory=list)
+    as_of: str = ""
+    buy_signal: Literal[False] = False
+
+
+class SectorExpansionRadarOut(BaseModel):
+    updated_at: str
+    as_of: str
+    window_minutes: int = 0
+    data_quality: str = "missing"
+    source: list[str] = Field(default_factory=list)
+    items: list[SectorExpansionItemOut] = Field(default_factory=list)
+    counts: dict[str, int] = Field(default_factory=dict)
+    notes: list[str] = Field(default_factory=list)
 
 
 class OpportunityRadarOut(BaseModel):
@@ -1217,6 +1303,8 @@ class OpportunityRadarOut(BaseModel):
     discipline: str
     notes: list[str] = Field(default_factory=list)
     available_sector_evidence: int = 0
+    intraday_expansion: SectorExpansionRadarOut | None = None
+    consensus_high_open_fade: ConsensusHighOpenFadeOut | None = None
 
 
 class PreTradeCheckIn(BaseModel):
@@ -1330,6 +1418,15 @@ class SectorFlowItem(BaseModel):
     flow_pullback: float | None = None
     flow_pullback_pct: float | None = None
     flow_event: str | None = None
+    flow_direction: str | None = None
+    flow_speed: float | None = None
+    flow_acceleration: float | None = None
+    flow_turning: str | None = None
+    flow_signal: str | None = None
+    flow_signal_level: str | None = None
+    flow_as_of: str | None = None
+    flow_window_minutes: int | None = None
+    flow_kinetics_reliable: bool = False
     index_timeline: list[SectorIndexPoint] = Field(default_factory=list)
     sector_price: float | None = None
     sector_vwap: float | None = None
@@ -1412,6 +1509,14 @@ class SectorRotationItem(BaseModel):
     net_inflow: float = 0
     main_inflow: float = 0
     acceleration: float = 0
+    flow_speed: float | None = None
+    flow_acceleration: float | None = None
+    flow_direction: str | None = None
+    flow_turning: str | None = None
+    flow_signal: str | None = None
+    flow_as_of: str | None = None
+    flow_window_minutes: int | None = None
+    flow_kinetics_reliable: bool = False
     limit_up_count: int = 0
     leaders: list[str] = Field(default_factory=list)
     evidence: str = ""
@@ -1470,6 +1575,14 @@ class HoldingSeesawItem(BaseModel):
     sector_net_inflow: float = 0
     sector_main_inflow: float = 0
     sector_acceleration: float = 0
+    sector_flow_speed: float | None = None
+    sector_flow_acceleration: float | None = None
+    sector_flow_direction: str | None = None
+    sector_flow_turning: str | None = None
+    sector_flow_signal: str | None = None
+    sector_flow_as_of: str | None = None
+    sector_flow_window_minutes: int | None = None
+    sector_flow_kinetics_reliable: bool = False
     risk_level: str = "观察"
     signal: str = ""
     advice: str = ""
@@ -1573,6 +1686,74 @@ class LimitUpLadderOut(BaseModel):
     notes: list[str] = Field(default_factory=list)
 
 
+class LimitUpAtmosphereMetrics(BaseModel):
+    limit_up_count: int = 0
+    limit_down_count: int | None = None
+    broken_count: int | None = None
+    seal_rate: float | None = None
+    break_rate: float | None = None
+    highest_board: int = 0
+    previous_limit_up_count: int | None = None
+    promoted_count: int | None = None
+    promotion_rate: float | None = None
+    next_day_open_sample_count: int = 0
+    next_day_premium_sample_count: int = 0
+    next_day_average_open_pct: float | None = None
+    next_day_average_premium_pct: float | None = None
+    next_day_low_open_ratio: float | None = None
+    top_theme: str | None = None
+    top_theme_count: int | None = None
+    theme_concentration_pct: float | None = None
+
+
+class LimitUpIdentityRoleOut(BaseModel):
+    code: str
+    name: str
+    level: int
+    roles: list[str] = Field(default_factory=list)
+    role_score: int = 0
+    amount: float = 0
+    sealed_amount: float = 0
+    break_count: int = 0
+    reason: str
+
+
+class LimitUpThemeLadderOut(BaseModel):
+    name: str
+    limit_up_count: int
+    broken_count: int | None = None
+    seal_rate: float | None = None
+    first_board_count: int = 0
+    second_board_count: int = 0
+    high_board_count: int = 0
+    highest_level: int = 0
+    layer_count: int = 0
+    completeness_score: int = 0
+    completeness_label: str
+    action: str
+    continuation_expectation: str
+    invalidation_conditions: list[str] = Field(default_factory=list)
+    identity_roles: list[LimitUpIdentityRoleOut] = Field(default_factory=list)
+
+
+class LimitUpAtmosphereOut(BaseModel):
+    source: str
+    trade_date: str
+    previous_trade_date: str | None = None
+    updated_at: datetime
+    decision: str
+    decision_label: str
+    score: int
+    data_quality: str
+    metrics: LimitUpAtmosphereMetrics
+    evidence: list[str] = Field(default_factory=list)
+    risks: list[str] = Field(default_factory=list)
+    missing_data: list[str] = Field(default_factory=list)
+    theme_ladders: list[LimitUpThemeLadderOut] = Field(default_factory=list)
+    role_disclaimer: str = "身份仅为量价与梯队规则标签，不代表已知主力意图。"
+    notes: list[str] = Field(default_factory=list)
+
+
 class ThemeStockRole(BaseModel):
     code: str
     name: str
@@ -1631,6 +1812,8 @@ class InformationItem(BaseModel):
     sentiment: str = "中性"
     sentiment_reason: str = "需结合资金与价格验证"
     related_holdings: list[str] = Field(default_factory=list)
+    verification_level: str = "RUMOR"
+    attribution: str = ""
 
 
 class InformationDifferentialOut(BaseModel):

@@ -14,6 +14,8 @@ from datetime import datetime, timedelta
 from typing import Any, Iterable, Mapping
 from zoneinfo import ZoneInfo
 
+from app.services.reflexivity import analyze_news_impact
+
 
 SHANGHAI_TZ = ZoneInfo("Asia/Shanghai")
 
@@ -48,6 +50,11 @@ class SectorEvidence:
     net_inflow: float | None = None
     main_inflow: float | None = None
     acceleration: float | None = None
+    flow_direction: str | None = None
+    flow_speed: float | None = None
+    flow_acceleration: float | None = None
+    flow_turning: str | None = None
+    flow_kinetics_reliable: bool = False
     price: float | None = None
     vwap: float | None = None
     vwap_reliable: bool = False
@@ -71,13 +78,20 @@ class SectorEvidence:
         return cls(
             name=str(_value(value, "name", "") or _value(value, "display_name", "") or ""),
             source=str(_value(value, "source", "") or _value(value, "provider", "") or ""),
-            captured_at=_parse_datetime(_value(value, "captured_at") or _value(value, "updated_at")),
+            captured_at=_parse_datetime(
+                _value(value, "flow_as_of") or _value(value, "captured_at") or _value(value, "updated_at")
+            ),
             change_pct=change,
             market_change_pct=market_change,
             relative_change_pct=relative,
             net_inflow=_optional_float(_value(value, "net_inflow")),
             main_inflow=_optional_float(_value(value, "main_inflow")),
             acceleration=acceleration,
+            flow_direction=str(_value(value, "flow_direction", "") or "") or None,
+            flow_speed=_optional_float(_value(value, "flow_speed")),
+            flow_acceleration=_optional_float(_value(value, "flow_acceleration")),
+            flow_turning=str(_value(value, "flow_turning", "") or "") or None,
+            flow_kinetics_reliable=bool(_value(value, "flow_kinetics_reliable", False)),
             price=_optional_float(_value(value, "sector_price") or _value(value, "price")),
             vwap=_optional_float(_value(value, "sector_vwap") or _value(value, "vwap")),
             vwap_reliable=bool(_value(value, "sector_vwap_reliable", _value(value, "vwap_reliable", False))),
@@ -122,6 +136,12 @@ class OpportunityAssessment:
     buy_signal: bool = False
     url: str | None = None
     expires_at: str | None = None
+    claim_level: str = "RUMOR"
+    news_impact_status: str = "UNVERIFIED"
+    market_validation: str = "PENDING"
+    sentiment: str = "待验证"
+    sentiment_reason: str = ""
+    escalate_to_holding_risk: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -245,6 +265,58 @@ class OpportunityRadarService:
         evidence = list(primary.evidence) if primary else []
         counter = list(primary.counter_evidence) if primary else []
         missing = list(primary.missing) if primary else ["未映射到可验证板块"]
+        market_evidence: dict[str, Any] = {}
+        if primary:
+            primary_value = _find_sector_evidence(primary.sector, evidence_index)
+            if primary_value:
+                market_evidence = {
+                    "fund_direction": primary_value.flow_direction
+                    or (
+                        "NET_INFLOW" if primary_value.net_inflow is not None and primary_value.net_inflow > 0
+                        else "NET_OUTFLOW" if primary_value.net_inflow is not None and primary_value.net_inflow < 0
+                        else "NEUTRAL"
+                    ),
+                    "flow_turning": primary_value.flow_turning or "",
+                    "price_direction": (
+                        "UP" if (primary_value.change_pct or 0) > 0
+                        else "DOWN" if (primary_value.change_pct or 0) < 0 else "FLAT"
+                    ),
+                    "vwap_position": (
+                        "ABOVE" if primary_value.vwap_reliable and primary_value.price is not None
+                        and primary_value.vwap is not None and primary_value.price >= primary_value.vwap
+                        else "BELOW" if primary_value.vwap_reliable and primary_value.price is not None
+                        and primary_value.vwap is not None else "UNKNOWN"
+                    ),
+                    "captured_at": primary_value.captured_at.isoformat() if primary_value.captured_at else None,
+                    "fund_reliable": primary_value.flow_kinetics_reliable,
+                    "price_reliable": bool(primary_value.vwap_reliable or primary_value.change_pct is not None),
+                    "holding_related": bool(list(_value(item, "related_holdings", []) or [])),
+                    # Sector-wide high-open crowding is evaluated separately;
+                    # absence must never be silently treated as confirmation.
+                    "consensus_high_open_fade": False,
+                }
+        impact = analyze_news_impact(
+            {
+                "title": title,
+                "source": str(_value(item, "source", "") or ""),
+                "url": _value(item, "url"),
+                "published_at": _value(item, "published_at"),
+                "verification_level": _value(item, "verification_level", "RUMOR"),
+                "attribution": _value(item, "attribution", ""),
+                "sentiment": _value(item, "sentiment", "待验证"),
+                "sentiment_reason": _value(item, "sentiment_reason", ""),
+                "sectors": sectors,
+                "related_stocks": list(_value(item, "related_stocks", []) or []),
+                "holding_related": bool(list(_value(item, "related_holdings", []) or [])),
+            },
+            market_evidence,
+            now=now,
+            max_age_minutes=self.max_age_minutes,
+        )
+        if impact["claim_level"] == "RUMOR":
+            action = f"传闻/未核验线索不得当作事实；{action}"
+        elif impact["market_validation"] == "CONFIRMED":
+            action = f"消息方向获得后续资金量价验证，但不等于因果已证实；{action}"
         return OpportunityAssessment(
             id=_news_id(item),
             title=title,
@@ -263,6 +335,12 @@ class OpportunityRadarService:
             action=action,
             url=str(_value(item, "url")) if _value(item, "url") else None,
             expires_at=expires_at.isoformat() if expires_at else None,
+            claim_level=str(impact["claim_level"]),
+            news_impact_status=str(impact["status"]),
+            market_validation=str(impact["market_validation"]),
+            sentiment=str(impact["sentiment"]),
+            sentiment_reason=str(impact["sentiment_reason"]),
+            escalate_to_holding_risk=bool(impact["escalate_to_holding_risk"]),
         )
 
     def _assess_sector(self, sector: str, evidence: SectorEvidence | None) -> SectorAssessment:
@@ -464,8 +542,11 @@ def _find_sector_evidence(sector: str, index: Mapping[str, SectorEvidence]) -> S
 def _evidence_completeness(value: SectorEvidence) -> int:
     return sum(
         item is not None
-        for item in (value.change_pct, value.net_inflow, value.main_inflow, value.price, value.vwap, value.acceleration)
-    ) + int(value.vwap_reliable)
+        for item in (
+            value.change_pct, value.net_inflow, value.main_inflow, value.price,
+            value.vwap, value.acceleration, value.flow_speed, value.flow_acceleration,
+        )
+    ) + int(value.vwap_reliable) + int(value.flow_kinetics_reliable)
 
 
 def _normalize_sector(value: str) -> str:

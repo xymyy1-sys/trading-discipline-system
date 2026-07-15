@@ -17,11 +17,14 @@ from app.services.rules import calculate_risk_position, run_pre_trade_check
 from fastapi import HTTPException
 from app.services.market_data import MarketDataProvider
 from app.services.opportunity_radar import OpportunityRadarService
+from app.services.sector_expansion import SectorExpansionRadarService
+from app.api.helpers.reflexivity import build_consensus_high_open_fade
 from app.core.limiter import limiter
 
 router = APIRouter()
 market_provider = MarketDataProvider()
 opportunity_radar_service = OpportunityRadarService()
+sector_expansion_service = SectorExpansionRadarService()
 SHANGHAI_TZ = ZoneInfo("Asia/Shanghai")
 OPPORTUNITY_MARKET_SNAPSHOT_MAX_AGE = timedelta(minutes=15)
 
@@ -106,11 +109,51 @@ def opportunity_radar(
         db,
         trade_date=target_trade_date,
     )
+    try:
+        sector_opening = market_provider.sector_opening_breadth(
+            trade_date=target_trade_date,
+            force_refresh=force_refresh,
+        )
+    except Exception as exc:
+        sector_opening = {
+            "trade_date": target_trade_date,
+            "data_quality": "missing",
+            "source": "",
+            "sample_count": 0,
+            "notes": [f"行业板块真实开盘广度暂不可用：{type(exc).__name__}"],
+        }
     result = opportunity_radar_service.assess(
         information,
         sector_flows,
         market_change_pct=(latest_regime.index_composite_change_pct if latest_regime else None),
     )
+    result["consensus_high_open_fade"] = build_consensus_high_open_fade(
+        db,
+        latest_regime,
+        sector_opening,
+    )
+    try:
+        ladder = market_provider.limit_up_ladder(
+            target_trade_date,
+            force_refresh=force_refresh,
+        )
+        result["intraday_expansion"] = sector_expansion_service.assess(
+            ladder,
+            sector_flows,
+            as_of=datetime.now(SHANGHAI_TZ),
+        )
+    except Exception:
+        now = datetime.now(SHANGHAI_TZ).isoformat()
+        result["intraday_expansion"] = {
+            "updated_at": now,
+            "as_of": now,
+            "window_minutes": 0,
+            "data_quality": "missing",
+            "source": [],
+            "items": [],
+            "counts": {"增量已确认": 0, "增量待确认": 0},
+            "notes": ["涨停梯队或板块资金暂不可用，本轮不生成模拟增量方向。"],
+        }
     if regime_note:
         result["notes"] = list(dict.fromkeys([*(result.get("notes") or []), regime_note]))
         if result.get("data_quality") == "ok":

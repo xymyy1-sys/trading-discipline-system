@@ -11,6 +11,7 @@ from app.api.helpers.holdings_calc import _find_holding_by_code
 from app.api.helpers.quotes import _latest_a_share_quotes, _quote_lookup_code, _safe_float
 from app.api.helpers.seesaw import _holding_theme_profile
 from app.api.helpers.volume_price import build_volume_price_snapshot
+from app.core.trading_clock import shanghai_now_naive, shanghai_today
 from app.models.trading import (
     ExpectationRevision,
     ExpectationRule,
@@ -39,8 +40,8 @@ from app.services.t_trading_engine import (
 )
 
 
-def _today() -> str:
-    return datetime.now().date().isoformat()
+def _today(now: datetime | None = None) -> str:
+    return shanghai_today(now).isoformat()
 
 
 def _json_dumps(value: Any) -> str:
@@ -124,6 +125,19 @@ def minute_evidence_timeline(code: str, name: str, quote: dict[str, Any]) -> lis
                 break
         last = valid_rows[-1]
         last_price = _safe_float(last.get("price") or last.get("close"))
+        from app.api.helpers.volume_price import _minute_reversal_signals
+        final_vwap = float(processed[-1]["vwap"]) if processed else 0.0
+        reversal_pattern, reversal_evidence = _minute_reversal_signals(quote, final_vwap)
+        if reversal_pattern:
+            points.append({
+                "row": last,
+                "price": last_price,
+                "vwap": final_vwap,
+                "peak": peak,
+                "type": "INTRADAY_REVERSAL_PENDING" if "待确认" in reversal_pattern else "INTRADAY_REVERSAL_CONFIRMED",
+                "severity": "info",
+                "text": f"{reversal_pattern}：{'；'.join(reversal_evidence)}",
+            })
         points.append({"row": last, "price": last_price, "vwap": 0, "peak": peak, "type": "CLOSE_CONFIRMATION", "severity": "info", "text": f"收盘前最后分钟价格 {last_price:.2f}，用于盘后次日预期校准。"})
     outputs: list[IntradayEvidenceEventOut] = []
     seen: set[tuple[str, str]] = set()
@@ -138,7 +152,7 @@ def minute_evidence_timeline(code: str, name: str, quote: dict[str, Any]) -> lis
         try:
             captured_at = datetime.fromisoformat(f"{trade_date}T{minute}:00")
         except ValueError:
-            captured_at = datetime.now().replace(hour=15, minute=0, second=0, microsecond=0)
+            captured_at = shanghai_now_naive().replace(hour=15, minute=0, second=0, microsecond=0)
         outputs.append(IntradayEvidenceEventOut(
             captured_at=captured_at, scope="stock", target_code=code, target_name=name,
             event_type=str(point["type"]), severity=str(point["severity"]), value=round(float(point["price"]), 2),
@@ -148,7 +162,7 @@ def minute_evidence_timeline(code: str, name: str, quote: dict[str, Any]) -> lis
 
 
 def current_expectation_stage(now: datetime | None = None) -> str:
-    now = now or datetime.now()
+    now = shanghai_now_naive(now)
     current = now.time()
     if current < time(9, 25):
         return "盘前预期"
@@ -286,21 +300,82 @@ def _scenario_rows(revision: ExpectationRevision) -> list[ExpectationScenario]:
 
 
 def _persist_expectation_revision(db: Session, row: ExpectationSnapshot, trigger: str = "collector") -> ExpectationRevision | None:
+    aliases = {row.code, row.code.zfill(6), row.code.lstrip("0")}
     latest = (
         db.query(ExpectationRevision)
-        .filter(ExpectationRevision.trade_date == row.trade_date, ExpectationRevision.code == row.code)
+        .filter(ExpectationRevision.trade_date == row.trade_date, ExpectationRevision.code.in_(list(aliases)))
         .order_by(ExpectationRevision.version.desc(), ExpectationRevision.id.desc())
         .first()
     )
-    fingerprint = (row.stage, row.expectation_result, row.state_transition, row.expectation_gap_score)
-    if latest and fingerprint == (latest.stage, latest.expectation_result, latest.state_transition, latest.expectation_gap_score):
-        return None
-    volume = (
+    volume_query = (
         db.query(VolumePriceSnapshot)
-        .filter(VolumePriceSnapshot.code == row.code)
+        .filter(
+            VolumePriceSnapshot.code.in_(list(aliases)),
+        )
+    )
+    volume = (
+        volume_query.filter(VolumePriceSnapshot.trade_date == row.trade_date)
         .order_by(VolumePriceSnapshot.captured_at.desc(), VolumePriceSnapshot.id.desc())
         .first()
     )
+    if volume is None and trigger == "close_baseline":
+        # A next-day baseline is intentionally derived from the just-finished
+        # session, whose trade_date precedes the expectation's validation date.
+        volume = (
+            volume_query.filter(VolumePriceSnapshot.trade_date <= row.trade_date)
+            .order_by(VolumePriceSnapshot.trade_date.desc(), VolumePriceSnapshot.captured_at.desc(), VolumePriceSnapshot.id.desc())
+            .first()
+        )
+
+    def volume_signal(pattern: str) -> str:
+        text = pattern or ""
+        if any(value in text for value in ("跌停开板V形修复", "深水开板V形修复", "水下V形反转", "水下V形修复", "重新站回VWAP且低点抬高")):
+            return "REVERSAL_CONFIRMED"
+        if "深水V形反抽待确认" in text:
+            return "REVERSAL_PENDING"
+        if "冲高回落跌破VWAP" in text:
+            return "VOLUME_PRICE_WEAKENING"
+        if "跌破VWAP" in text:
+            return "VWAP_BREAKDOWN"
+        if "VWAP上方强势" in text:
+            return "VWAP_STRONG"
+        return text
+
+    current_volume_signal = volume_signal(volume.pattern if volume else "")
+    latest_volume_signal = volume_signal(latest.volume_price_state if latest else "")
+    # Opening change is an immutable fact for the trading day.  A revision is
+    # appended only when the validation stage or a decision-relevant conclusion
+    # changes; price ticks and intermittent quote gaps must not create dozens of
+    # near-identical versions.
+    fingerprint = (
+        row.stage,
+        row.base_expectation,
+        round(row.expected_open_low, 2),
+        round(row.expected_open_high, 2),
+        row.expectation_result,
+        row.state_transition,
+        current_volume_signal,
+        "usable" if volume and volume.data_quality not in {"missing", "manual"} else "missing",
+    )
+    latest_fingerprint = (
+        latest.stage,
+        latest.base_expectation,
+        round(latest.expected_open_low, 2),
+        round(latest.expected_open_high, 2),
+        latest.expectation_result,
+        latest.state_transition,
+        latest_volume_signal,
+        "usable" if latest.data_quality not in {"missing", "manual"} else "missing",
+    ) if latest else None
+    if latest and fingerprint == latest_fingerprint:
+        manual_content_changed = trigger == "manual_update" and (
+            latest.evidence_json != row.evidence_json
+            or latest.counter_evidence_json != row.counter_evidence_json
+            or latest.suggestion != row.suggestion
+            or latest.expectation_gap_score != row.expectation_gap_score
+        )
+        if not manual_content_changed:
+            return None
     invalid_conditions = [
         f"竞价/开盘低于 {row.underperform_threshold:+.2f}%",
         "开盘后跌破真实VWAP且量能转弱",
@@ -319,7 +394,7 @@ def _persist_expectation_revision(db: Session, row: ExpectationSnapshot, trigger
         data_quality=(volume.data_quality if volume else "missing"), evidence_json=row.evidence_json,
         counter_evidence_json=row.counter_evidence_json,
         invalid_conditions_json=_json_dumps(invalid_conditions), suggestion=row.suggestion,
-        created_at=datetime.now(),
+        created_at=shanghai_now_naive(),
     )
     db.add(revision)
     db.flush()
@@ -378,14 +453,28 @@ def build_expectation_snapshot(
     base_hint: str = "",
     persist: bool = True,
 ) -> ExpectationSnapshotOut:
-    quote = quote or quote_for_code(code)
     stage = stage or current_expectation_stage()
+    quote = quote_for_code(code) if quote is None else quote
+    existing = db.query(ExpectationSnapshot).filter(
+        ExpectationSnapshot.trade_date == _today(),
+        ExpectationSnapshot.code.in_([code, code.zfill(6), code.lstrip("0")]),
+        ExpectationSnapshot.stage == stage,
+    ).order_by(ExpectationSnapshot.created_at.desc(), ExpectationSnapshot.id.desc()).first()
     open_pct = _safe_float(quote.get("open_pct"))
     change_pct = _safe_float(quote.get("change_pct"))
     current = _safe_float(quote.get("price"))
     previous_close = _safe_float(quote.get("prev_close"))
     if not open_pct and quote.get("open") and previous_close:
         open_pct = (_safe_float(quote.get("open")) - previous_close) / previous_close * 100
+    quote_is_usable = bool(
+        (current > 0 or _safe_float(quote.get("open")) > 0)
+        and (previous_close > 0 or quote.get("open_pct") is not None)
+    )
+    if not quote_is_usable and existing is not None:
+        # Keep the last verified stage snapshot when a provider briefly returns
+        # an empty quote.  Replacing it with 0% creates alternating +0/+6
+        # revisions and can also resurrect a stale sell instruction.
+        return _expectation_out(existing)
     base_expectation = base_hint if base_hint in EXPECTATION_DEFAULTS else "NEUTRAL"
     if any(key in base_hint for key in ("一字", "极强", "超强", "核心总龙")):
         base_expectation = "EXTREME_STRONG"
@@ -433,7 +522,12 @@ def build_expectation_snapshot(
     if current <= 0:
         counter.append("实时行情缺口，预期差可信度降低。")
 
-    if open_score >= 16:
+    if not quote_is_usable:
+        result, transition, suggestion = "UNKNOWN", "DATA_GAP", "实时行情缺失，保留上一阶段计划，不生成新的买卖结论。"
+        evidence = ["实时价格或昨收数据缺失，本阶段不参与预期证伪。"]
+        counter = []
+        open_score = 0
+    elif open_score >= 16:
         result, transition, suggestion = "STRONGER", "STRONG_TO_STRONGER", "超预期强化，只允许按计划确认，不追最高点。"
     elif open_score >= 8:
         result, transition, suggestion = "STRONGER", "WEAK_TO_STRONG", "小幅超预期，等待量价确认后再提高仓位。"
@@ -443,12 +537,33 @@ def build_expectation_snapshot(
         result, transition, suggestion = "WEAKER", "CONSENSUS_TO_DIVERGENCE", "预期转分歧，观察修复失败就减仓。"
     else:
         result, transition, suggestion = "MATCHED", "MATCHED", "基本符合预期，按原计划和失效条件执行。"
-    confidence = 0.72 if quote else 0.42
-    row = db.query(ExpectationSnapshot).filter(
-        ExpectationSnapshot.trade_date == _today(),
-        ExpectationSnapshot.code == code,
-        ExpectationSnapshot.stage == stage,
-    ).order_by(ExpectationSnapshot.created_at.desc()).first()
+    latest_volume = (
+        db.query(VolumePriceSnapshot)
+        .filter(
+            VolumePriceSnapshot.trade_date == _today(),
+            VolumePriceSnapshot.code.in_([code, code.zfill(6), code.lstrip("0")]),
+        )
+        .order_by(VolumePriceSnapshot.captured_at.desc(), VolumePriceSnapshot.id.desc())
+        .first()
+    )
+    volume_pattern = str(latest_volume.pattern or "") if latest_volume else ""
+    reversal_confirmed = any(value in volume_pattern for value in (
+        "跌停开板V形修复", "深水开板V形修复", "水下V形反转",
+        "水下V形修复", "重新站回VWAP且低点抬高",
+    ))
+    reversal_pending = "深水V形反抽待确认" in volume_pattern
+    if reversal_confirmed:
+        prior_transition = transition
+        transition = "INVALIDATION_TO_REVERSAL" if result in {"WEAKER", "INVALID"} else "INTRADAY_REVERSAL_CONFIRMED"
+        suggestion = "盘中V形修复已确认：暂缓沿用低点时的减仓结论，禁止追高；再次跌破真实VWAP和抬高后的次低点才恢复降风险。"
+        evidence.extend(_json_list(latest_volume.evidence_json)[:3])
+        counter.append(f"开盘预期结论仍为{result}（原状态{prior_transition}），但盘中新增反转证据，执行建议已动态修正。")
+    elif reversal_pending:
+        transition = "INTRADAY_REVERSAL_PENDING"
+        suggestion = "价格已脱离深水低点，但V形反转尚待VWAP与次低点确认；不追高，确认失败仍按原风险计划处理。"
+        evidence.extend(_json_list(latest_volume.evidence_json)[:2])
+    confidence = 0.72 if quote_is_usable else 0.2
+    row = existing
     if row is None:
         row = ExpectationSnapshot(trade_date=_today(), code=code, stage=stage)
     row.name = name or code
@@ -467,7 +582,7 @@ def build_expectation_snapshot(
     row.evidence_json = _json_dumps(evidence)
     row.counter_evidence_json = _json_dumps(counter)
     row.suggestion = suggestion
-    row.created_at = datetime.now()
+    row.created_at = shanghai_now_naive()
     if persist:
         db.add(row)
         db.flush()
@@ -537,7 +652,7 @@ def decision_card(db: Session, code: str) -> StockDecisionCardOut:
     name = holding.name if holding else str(quote.get("name") or code)
     theme = _holding_theme_profile(holding) if holding else {"industry": "", "concepts": [], "source": "quote-only"}
     base_hint = holding.position_type if holding else ""
-    now = datetime.now()
+    now = shanghai_now_naive()
     stage = current_expectation_stage(now)
     during_market = now.weekday() < 5 and time(9, 15) <= now.time() <= time(15, 0)
     baseline = (
@@ -550,6 +665,14 @@ def decision_card(db: Session, code: str) -> StockDecisionCardOut:
         .order_by(ExpectationSnapshot.trade_date.asc(), ExpectationSnapshot.created_at.desc())
         .first()
     )
+    # Persist the latest minute/volume structure before revising expectation so
+    # a newly confirmed V reversal is reflected in this response rather than
+    # one refresh later.
+    daily_metrics = _daily_history_metrics(code)
+    volume_price = build_volume_price_snapshot(
+        db, code, name=name, stage=stage, quote=quote,
+        daily_metrics=daily_metrics, persist=during_market,
+    )
     if during_market:
         expectation = build_expectation_snapshot(
             db, code, name=name, stage=stage, quote=quote,
@@ -561,8 +684,6 @@ def decision_card(db: Session, code: str) -> StockDecisionCardOut:
         expectation = build_expectation_snapshot(
             db, code, name=name, stage=stage, quote=quote, base_hint=base_hint, persist=False,
         )
-    daily_metrics = _daily_history_metrics(code)
-    volume_price = build_volume_price_snapshot(db, code, name=name, stage=stage, quote=quote, daily_metrics=daily_metrics, persist=during_market)
     consensus_risk = build_consensus_risk(quote, expectation, volume_price, daily_metrics)
     cumulative_amount = 0.0
     cumulative_volume = 0.0

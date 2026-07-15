@@ -9,6 +9,7 @@ be passed directly to a future Pydantic response model and cached as JSON.
 """
 
 from collections.abc import Mapping
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 
@@ -613,3 +614,384 @@ class ReflexivityService:
         market_context: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         return analyze_stock_reflexivity(metrics, market_context)
+
+    @staticmethod
+    def analyze_consensus_open(metrics: Mapping[str, Any]) -> dict[str, Any]:
+        return analyze_consensus_high_open_fade(metrics)
+
+    @staticmethod
+    def analyze_news(
+        message: Mapping[str, Any],
+        market_evidence: Mapping[str, Any] | None = None,
+        *,
+        now: datetime | None = None,
+        max_age_minutes: int = 360,
+    ) -> dict[str, Any]:
+        return analyze_news_impact(
+            message,
+            market_evidence,
+            now=now,
+            max_age_minutes=max_age_minutes,
+        )
+
+
+CONSENSUS_OPEN_REQUIRED_LABELS = {
+    "previous_reversal_confirmed": "昨日深水V形反转/修复证据",
+    "opening_data_real": "真实集合竞价/开盘数据",
+    "actual_open_pct": "实际开盘涨幅",
+    "sector_opening_consensus": "板块高开广度或多只成分股高开",
+    "post_open_drawdown_pct": "开盘后相对高点回撤",
+    "weakening_confirmation": "分时均价或资金转弱证据",
+}
+
+
+def _consensus_opening_breadth(metrics: Mapping[str, Any]) -> tuple[float | None, int | None, int | None]:
+    """Read a real sector opening breadth without manufacturing a denominator."""
+    breadth = _ratio(_number(metrics, "sector_high_open_ratio", "sector_open_breadth_ratio"))
+    high_count_value = _number(metrics, "sector_high_open_count", "component_high_open_count")
+    total_count_value = _number(metrics, "sector_component_count", "component_count")
+    high_count = int(high_count_value) if high_count_value is not None and high_count_value >= 0 else None
+    total_count = int(total_count_value) if total_count_value is not None and total_count_value > 0 else None
+    if breadth is None and high_count is not None and total_count:
+        breadth = high_count / total_count
+    return breadth, high_count, total_count
+
+
+def analyze_consensus_high_open_fade(metrics: Mapping[str, Any]) -> dict[str, Any]:
+    """Identify a crowded high-open fade from causal, observable evidence.
+
+    This function is deliberately stricter than a generic ``high open`` alert.
+    It needs a prior-session repair/reversal, a *real* auction/open observation,
+    sector-wide opening consensus, and post-open price/fund weakening.  Missing
+    inputs return ``DATA_GAP`` and can never become a risk event.
+    """
+
+    previous_reversal = _boolean(metrics, "previous_reversal_confirmed")
+    opening_real = _boolean(metrics, "opening_data_real")
+    open_pct = _number(metrics, "actual_open_pct", "opening_change_pct")
+    breadth, high_count, component_count = _consensus_opening_breadth(metrics)
+    drawdown = _number(metrics, "post_open_drawdown_pct", "high_drawdown_pct")
+    vwap_deviation = _number(metrics, "vwap_deviation_pct", "price_vs_vwap_pct")
+    vwap_reliable = _boolean(metrics, "vwap_reliable") is True
+    flow_speed = _number(metrics, "sector_flow_speed_yi_per_minute", "flow_speed")
+    flow_acceleration = _number(metrics, "sector_flow_acceleration", "flow_acceleration")
+    flow_turning = str(metrics.get("sector_flow_turning") or metrics.get("flow_turning") or "").upper()
+    flow_reliable = _boolean(metrics, "flow_kinetics_reliable") is True
+
+    missing: list[str] = []
+    if previous_reversal is None:
+        missing.append(CONSENSUS_OPEN_REQUIRED_LABELS["previous_reversal_confirmed"])
+    if opening_real is not True:
+        missing.append(CONSENSUS_OPEN_REQUIRED_LABELS["opening_data_real"])
+    if open_pct is None:
+        missing.append(CONSENSUS_OPEN_REQUIRED_LABELS["actual_open_pct"])
+    if breadth is None and high_count is None:
+        missing.append(CONSENSUS_OPEN_REQUIRED_LABELS["sector_opening_consensus"])
+    if drawdown is None:
+        missing.append(CONSENSUS_OPEN_REQUIRED_LABELS["post_open_drawdown_pct"])
+    if not (vwap_reliable and vwap_deviation is not None) and not (
+        flow_reliable and (flow_speed is not None or flow_acceleration is not None or bool(flow_turning))
+    ):
+        missing.append(CONSENSUS_OPEN_REQUIRED_LABELS["weakening_confirmation"])
+
+    base = {
+        "code": "DATA_GAP" if missing else "CONSENSUS_HIGH_OPEN_WATCH",
+        "label": "证据不足，不能判断一致性兑现" if missing else "一致性高开兑现观察",
+        "status": "DATA_GAP" if missing else "WATCH",
+        "triggered": False,
+        "risk_level": "UNKNOWN" if missing else "LOW",
+        "score": None if missing else 0,
+        "evidence": [],
+        "counter_evidence": [],
+        "missing_fields": list(dict.fromkeys(missing)),
+        "allowed_actions": ["补齐真实竞价、板块广度和开盘后量价证据后再判断"] if missing else ["继续观察开盘后的承接与资金方向"],
+        "forbidden_actions": ["用缺失或模拟数据生成追涨、清仓结论", "仅凭高开或单条消息自动卖出"],
+        "next_validation_points": ["价格能否重新站回真实分时均价", "板块资金流速是否停止恶化并拐回流入"],
+        "methodology_note": "只识别可观测的一致性兑现风险，不推断主力意图，也不自动触发卖出。",
+    }
+    if missing:
+        return base
+
+    opening_consensus = bool(
+        (breadth is not None and breadth >= 0.60)
+        or (high_count is not None and high_count >= 3)
+    )
+    high_open = bool(open_pct is not None and open_pct >= 0.50)
+    meaningful_fade = bool(drawdown is not None and drawdown >= 1.50)
+    below_vwap = bool(vwap_reliable and vwap_deviation is not None and vwap_deviation <= -0.20)
+    flow_weakening = bool(
+        flow_reliable and (flow_turning in {
+            "TURN_TO_OUTFLOW", "INFLOW_FADING", "OUTFLOW_ACCELERATING", "FLOW_WEAKENING",
+        }
+        or (flow_speed is not None and flow_speed < 0)
+        or (flow_acceleration is not None and flow_acceleration < 0))
+    )
+
+    evidence: list[str] = []
+    counter: list[str] = []
+    if previous_reversal:
+        evidence.append("昨日存在可追溯的深水V形反转/修复，今日高开容易形成一致性预期。")
+    else:
+        counter.append("昨日未确认深水V形反转/修复，不满足本规则前提。")
+    if high_open:
+        evidence.append(f"真实集合竞价/开盘涨幅 {open_pct:+.2f}%。")
+    else:
+        counter.append(f"实际开盘 {open_pct:+.2f}%，未达到高开阈值。")
+    if opening_consensus:
+        breadth_text = f"{breadth:.0%}" if breadth is not None else "--"
+        count_text = f"{high_count}/{component_count}" if high_count is not None and component_count else str(high_count or "--")
+        evidence.append(f"板块高开广度 {breadth_text}，高开成分 {count_text}，开盘预期较一致。")
+    else:
+        counter.append("板块高开未形成足够广度或多只成分股共振。")
+    if meaningful_fade:
+        evidence.append(f"开盘后相对高点回撤 {drawdown:.2f}%，一致性承接转弱。")
+    else:
+        counter.append(f"开盘后回撤仅 {drawdown:.2f}%，尚未出现明显兑现。")
+    if below_vwap:
+        evidence.append(f"价格位于真实分时均价下方 {abs(vwap_deviation or 0):.2f}%。")
+    elif vwap_reliable and vwap_deviation is not None:
+        counter.append(f"价格仍在真实分时均价上方 {vwap_deviation:+.2f}%。")
+    if flow_weakening:
+        details = []
+        if flow_turning:
+            details.append(flow_turning)
+        if flow_speed is not None:
+            details.append(f"流速 {flow_speed:+.3f} 亿/分钟")
+        if flow_acceleration is not None:
+            details.append(f"加速度 {flow_acceleration:+.4f} 亿/分钟²")
+        evidence.append("板块资金边际转弱：" + "，".join(details) + "。")
+    elif flow_reliable and (flow_speed is not None or flow_acceleration is not None or flow_turning):
+        counter.append("板块资金尚未确认由强转弱。")
+
+    trigger = bool(
+        previous_reversal is True
+        and opening_real is True
+        and high_open
+        and opening_consensus
+        and meaningful_fade
+        and (below_vwap or flow_weakening)
+    )
+    score = sum((20 if previous_reversal else 0, 15 if high_open else 0, 20 if opening_consensus else 0,
+                 20 if meaningful_fade else 0, 15 if below_vwap else 0, 10 if flow_weakening else 0))
+    base.update({
+        "code": "CONSENSUS_HIGH_OPEN_FADE" if trigger else "CONSENSUS_HIGH_OPEN_NOT_CONFIRMED",
+        "label": "一致性高开后兑现转弱" if trigger else "一致性高开兑现尚未确认",
+        "status": "CONFIRMED" if trigger else "NOT_TRIGGERED",
+        "triggered": trigger,
+        "risk_level": "HIGH" if trigger and below_vwap and flow_weakening else "MEDIUM" if trigger else "LOW",
+        "score": min(100, score),
+        "evidence": evidence,
+        "counter_evidence": counter,
+        "allowed_actions": (
+            ["禁止在开盘一致阶段追涨", "等待首次承接；反抽不能收复分时均价且资金继续转弱时，按计划分批减仓"]
+            if trigger else ["保持观察，只有价格和资金进一步转弱才升级风险"]
+        ),
+        "forbidden_actions": ["仅凭高开或消息自动卖出", "在尚未确认承接失败时一次性清仓", "在转弱过程中盲目接飞刀"],
+    })
+    return base
+
+
+def _parse_evidence_datetime(value: Any) -> datetime | None:
+    if isinstance(value, datetime):
+        parsed = value
+    else:
+        text = str(value or "").strip().replace("Z", "+00:00")
+        if not text:
+            return None
+        try:
+            parsed = datetime.fromisoformat(text)
+        except ValueError:
+            return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone(timedelta(hours=8)))
+    return parsed
+
+
+def _news_claim_level(message: Mapping[str, Any]) -> tuple[str, str | None]:
+    raw = str(message.get("verification_level") or message.get("claim_level") or "").strip().upper()
+    if raw in {"OFFICIAL", "FORMAL_ANNOUNCEMENT", "ANNOUNCEMENT", "正式公告", "官方"}:
+        return "OFFICIAL", None
+    if raw in {"MEDIA", "MEDIA_ATTRIBUTION", "媒体归因", "媒体"}:
+        attribution = str(message.get("attribution") or "").strip()
+        return "MEDIA_ATTRIBUTION", None if attribution else "媒体归因原始出处"
+    # Missing classification is intentionally not inferred from a bullish or
+    # bearish title.  It remains a rumour/unverified claim.
+    return "RUMOR", None
+
+
+def analyze_news_impact(
+    message: Mapping[str, Any],
+    market_evidence: Mapping[str, Any] | None = None,
+    *,
+    now: datetime | None = None,
+    max_age_minutes: int = 360,
+) -> dict[str, Any]:
+    """Preserve a news claim and separately validate its observable impact.
+
+    The result never upgrades a rumour into a fact.  ``market_validation`` only
+    says whether subsequent fund/price/VWAP observations align with the stated
+    direction; it does not verify the underlying claim itself.
+    """
+
+    market_evidence = market_evidence or {}
+    evaluated_at = now or datetime.now(timezone(timedelta(hours=8)))
+    if evaluated_at.tzinfo is None:
+        evaluated_at = evaluated_at.replace(tzinfo=timezone(timedelta(hours=8)))
+    title = str(message.get("title") or "").strip()
+    source = str(message.get("source") or "").strip()
+    url = str(message.get("url") or "").strip()
+    published_raw = message.get("published_at")
+    published = _parse_evidence_datetime(published_raw)
+    sectors = [str(item).strip() for item in list(message.get("sectors") or []) if str(item).strip()]
+    stocks = [str(item).strip() for item in list(message.get("related_stocks") or []) if str(item).strip()]
+    claim_level, claim_missing = _news_claim_level(message)
+
+    missing: list[str] = []
+    if not source:
+        missing.append("消息来源")
+    if not title:
+        missing.append("消息标题")
+    if not url:
+        missing.append("原文URL")
+    if published is None:
+        missing.append("发布时间")
+    if not sectors and not stocks:
+        missing.append("关联板块或股票")
+    if claim_missing:
+        missing.append(claim_missing)
+
+    age_minutes = None
+    future_minutes = None
+    if published is not None:
+        reference = evaluated_at.astimezone(published.tzinfo) if published.tzinfo else evaluated_at
+        delta_minutes = int((reference - published).total_seconds() // 60)
+        if delta_minutes < -5:
+            future_minutes = abs(delta_minutes)
+            missing.append("发布时间晚于评估时点")
+        age_minutes = max(0, delta_minutes)
+    fresh = age_minutes is not None and age_minutes <= max(1, int(max_age_minutes))
+
+    sentiment_raw = str(message.get("sentiment") or message.get("impact_direction") or "待验证").strip()
+    if sentiment_raw in {"利好", "POSITIVE", "BULLISH"}:
+        sentiment = "利好"
+    elif sentiment_raw in {"利空", "NEGATIVE", "BEARISH"}:
+        sentiment = "利空"
+    elif sentiment_raw in {"中性", "NEUTRAL"}:
+        sentiment = "中性"
+    else:
+        sentiment = "待验证"
+
+    fund_direction = str(market_evidence.get("fund_direction") or "").upper()
+    flow_turning = str(market_evidence.get("flow_turning") or "").upper()
+    price_direction = str(market_evidence.get("price_direction") or "").upper()
+    vwap_position = str(market_evidence.get("vwap_position") or "").upper()
+    market_captured_at = _parse_evidence_datetime(market_evidence.get("captured_at"))
+    fund_reliable = market_evidence.get("fund_reliable") is True
+    price_reliable = market_evidence.get("price_reliable") is True
+    market_time_valid = False
+    if market_captured_at is not None:
+        captured_reference = market_captured_at.astimezone(evaluated_at.tzinfo)
+        if captured_reference > evaluated_at + timedelta(seconds=5):
+            missing.append("资金量价验证时点晚于评估时点")
+        elif published is not None:
+            published_reference = published.astimezone(captured_reference.tzinfo)
+            if captured_reference < published_reference:
+                missing.append("缺少消息发布后的资金量价验证")
+            else:
+                market_time_valid = True
+        else:
+            market_time_valid = True
+    fund_present = bool(market_time_valid and fund_reliable and (fund_direction or flow_turning))
+    price_present = bool(market_time_valid and price_reliable and (price_direction or vwap_position))
+    if sentiment == "利好":
+        fund_aligned = fund_direction == "NET_INFLOW" or flow_turning in {"TURN_TO_INFLOW", "INFLOW_ACCELERATING", "FLOW_IMPROVING"}
+        price_aligned = price_direction == "UP" or vwap_position == "ABOVE"
+        fund_opposed = fund_direction == "NET_OUTFLOW" or flow_turning in {"TURN_TO_OUTFLOW", "INFLOW_FADING", "OUTFLOW_ACCELERATING", "FLOW_WEAKENING"}
+        price_opposed = price_direction == "DOWN" or vwap_position == "BELOW"
+    elif sentiment == "利空":
+        fund_aligned = fund_direction == "NET_OUTFLOW" or flow_turning in {"TURN_TO_OUTFLOW", "INFLOW_FADING", "OUTFLOW_ACCELERATING", "FLOW_WEAKENING"}
+        price_aligned = price_direction == "DOWN" or vwap_position == "BELOW"
+        fund_opposed = fund_direction == "NET_INFLOW" or flow_turning in {"TURN_TO_INFLOW", "INFLOW_ACCELERATING", "FLOW_IMPROVING"}
+        price_opposed = price_direction == "UP" or vwap_position == "ABOVE"
+    else:
+        fund_aligned = price_aligned = fund_opposed = price_opposed = False
+
+    if sentiment == "待验证" or sentiment == "中性":
+        market_validation = "PENDING"
+    elif fund_present and price_present and fund_aligned and price_aligned:
+        market_validation = "CONFIRMED"
+    elif fund_present and price_present and fund_opposed and price_opposed:
+        market_validation = "INVALIDATED"
+    elif not fund_present or not price_present:
+        market_validation = "DATA_GAP"
+    else:
+        market_validation = "MIXED"
+
+    holding_related = bool(message.get("holding_related") or market_evidence.get("holding_related"))
+    consensus_fade = bool(market_evidence.get("consensus_high_open_fade"))
+    negative_holding_risk = bool(
+        sentiment == "利空"
+        and holding_related
+        and consensus_fade
+        and market_validation == "CONFIRMED"
+        and claim_level in {"OFFICIAL", "MEDIA_ATTRIBUTION"}
+        and fresh
+        and not missing
+    )
+
+    if missing:
+        status = "DATA_GAP"
+    elif claim_level == "RUMOR":
+        status = "UNVERIFIED"
+    elif not fresh:
+        status = "STALE"
+    elif market_validation == "CONFIRMED":
+        status = "IMPACT_CONFIRMED"
+    elif market_validation == "INVALIDATED":
+        status = "IMPACT_INVALIDATED"
+    else:
+        status = "PENDING"
+
+    evidence: list[str] = []
+    if fund_present:
+        evidence.append(f"资金方向 {fund_direction or '--'}，拐点 {flow_turning or '--'}。")
+    if price_present:
+        evidence.append(f"价格方向 {price_direction or '--'}，相对分时均价 {vwap_position or '--'}。")
+    if market_captured_at:
+        evidence.append(f"资金量价验证时点 {market_captured_at.isoformat()}。")
+    if market_validation == "CONFIRMED":
+        evidence.append("消息方向与后续资金、价格/分时均价表现同向；这只验证市场影响，不验证消息内容真伪。")
+
+    if negative_holding_risk:
+        action = "持仓相关负面消息与一致性高开转弱共振：禁止追高；等待承接，反抽不能收复分时均价且资金继续转弱时再按计划分批减仓。"
+    elif claim_level == "RUMOR":
+        action = "传闻仅列为待验证线索；不得写成事实，不得据此追涨、抄底或卖出。"
+    elif market_validation == "CONFIRMED":
+        action = "市场影响已获量价与资金同向验证；继续按持仓/观察池既有失效条件执行，不自动交易。"
+    elif market_validation == "INVALIDATED":
+        action = "资金与量价未支持消息方向，降低该消息权重，不据此交易。"
+    else:
+        action = "等待资金方向与价格/分时均价共同验证，禁止仅凭消息交易。"
+
+    return {
+        "status": status,
+        "claim_level": claim_level,
+        "title": title,
+        "source": source,
+        "url": url or None,
+        "published_at": published.isoformat() if published else str(published_raw or ""),
+        "age_minutes": age_minutes,
+        "future_minutes": future_minutes,
+        "freshness": "FRESH" if fresh else "STALE" if published is not None else "UNKNOWN",
+        "sentiment": sentiment,
+        "sentiment_reason": str(message.get("sentiment_reason") or "未提供结构化判定依据，需人工复核。"),
+        "sectors": list(dict.fromkeys(sectors)),
+        "related_stocks": list(dict.fromkeys(stocks)),
+        "market_validation": market_validation,
+        "market_evidence": evidence,
+        "missing_fields": list(dict.fromkeys(missing)),
+        "holding_related": holding_related,
+        "escalate_to_holding_risk": negative_holding_risk,
+        "action": action,
+        "trade_constraint": "消息不自动触发卖出；只允许禁追、等待承接或在量价继续证伪后按计划分批减仓。",
+    }

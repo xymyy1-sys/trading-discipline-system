@@ -10,8 +10,10 @@ import {
   X,
   Eye,
   EyeOff,
+  FlaskConical,
 } from 'lucide-react'
 import { API_BASE } from './api'
+import { PrivacyModeProvider } from './privacy'
 import './App.css'
 import { TodayDecisionSummary, WorkspacePage } from './components/workspaces/WorkspacePages'
 
@@ -28,6 +30,13 @@ import ReviewCalibration from './components/ReviewCalibration'
 import CandidatePool from './components/CandidatePool'
 import StrategyTemplates from './components/StrategyTemplates'
 import HistoricalReplay from './components/HistoricalReplay'
+import {
+  SimulationAccountOverview,
+  SimulationEvidenceLedger,
+  SimulationOrdersAndPositions,
+  SimulationPerformanceDesk,
+  SimulationStrategyLab,
+} from './components/SimulationDesk'
 
 const PositionOverview = () => <Positions mode="overview" />
 const PositionDiscipline = () => <Positions mode="discipline" />
@@ -40,6 +49,7 @@ const navItems = [
   ['选股中心', Target, '/选股中心'],
   ['打板预期', Flame, '/打板预期'],
   ['持仓执行', WalletCards, '/持仓执行'],
+  ['模拟盘', FlaskConical, '/模拟盘'],
   ['复盘校准', BookOpenCheck, '/复盘校准'],
 ] as const
 
@@ -119,6 +129,7 @@ export default function App() {
   }, [activePath, navigate])
 
   return (
+    <PrivacyModeProvider value={privacyMode}>
     <main className={`terminal-shell ${privacyMode ? 'privacy-mode' : ''}`}>
       <aside className={`sidebar ${sidebarOpen ? 'open' : ''}`}>
         <div className="brand" style={{ display: 'flex', width: '100%', alignItems: 'center' }}>
@@ -191,9 +202,11 @@ export default function App() {
         {visitedWorkspaces.has('/选股中心') && <div hidden={normalizedWorkspacePath !== '/选股中心'}><StockSelectionWorkspace /></div>}
         {visitedWorkspaces.has('/打板预期') && <div hidden={normalizedWorkspacePath !== '/打板预期'}><LimitExpectationWorkspace /></div>}
         {visitedWorkspaces.has('/持仓执行') && <div hidden={normalizedWorkspacePath !== '/持仓执行'}><PositionExecutionWorkspace /></div>}
+        {visitedWorkspaces.has('/模拟盘') && <div hidden={normalizedWorkspacePath !== '/模拟盘'}><SimulationWorkspace /></div>}
         {visitedWorkspaces.has('/复盘校准') && <div hidden={normalizedWorkspacePath !== '/复盘校准'}><ReviewCalibrationWorkspace /></div>}
       </section>
     </main>
+    </PrivacyModeProvider>
   )
 }
 
@@ -261,6 +274,25 @@ function PositionExecutionWorkspace() {
         { key: 'expectation', label: '持仓预期驾驶舱', description: '次日基准、竞价验证、分钟量价、事件轨迹与预期差', Component: HoldingExpectationCockpit },
         { key: 'discipline', label: '执行纪律', description: '状态机、时间止损、利润保护和做T约束', Component: PositionDiscipline },
         { key: 'next-plan', label: '持仓次日计划', description: '仅针对普通持仓的下一交易日操作计划', Component: HoldingPlans },
+      ]}
+    />
+  )
+}
+
+function SimulationWorkspace() {
+  return (
+    <WorkspacePage
+      title="模拟交易实验室"
+      subtitle="独立模拟账本与策略验证"
+      objective="在不连接券商、不改变真实持仓的前提下，用带时点的真实行情证据验证打板、预期量价和持仓执行策略。"
+      allowed={['仅提交模拟委托', '记录未成交原因', '按市场环境与预期差分层验证']}
+      forbidden={['暗示真实下单', '用模拟成交替代真实执行', '缺少数据时伪造收益或胜率']}
+      modules={[
+        { key: 'account', label: '账户概览', description: '独立模拟资金、权益、持仓市值与盈亏', Component: SimulationAccountOverview },
+        { key: 'orders', label: '模拟委托/持仓', description: '模拟委托、撮合状态、未成交原因和模拟持仓', Component: SimulationOrdersAndPositions },
+        { key: 'strategies', label: '策略实验', description: '打板、预期量价与持仓执行三类实验', Component: SimulationStrategyLab },
+        { key: 'evidence', label: '成交与决策证据', description: '成交、未成交、决策依据与行情时点回放', Component: SimulationEvidenceLedger },
+        { key: 'performance', label: '绩效统计', description: '胜率、盈亏比、回撤及多维分层统计', Component: SimulationPerformanceDesk },
       ]}
     />
   )

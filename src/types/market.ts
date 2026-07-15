@@ -197,6 +197,68 @@ export interface OpportunityRadarItem {
   buy_signal: boolean;
   url: string | null;
   expires_at: string | null;
+  claim_level: string;
+  news_impact_status: string;
+  market_validation: string;
+  sentiment: string;
+  sentiment_reason: string;
+  escalate_to_holding_risk: boolean;
+}
+
+export interface SectorExpansionItem {
+  sector: string;
+  status: '增量已确认' | '增量待确认' | string;
+  confirmation_score: number;
+  window_minutes: number;
+  total_limit_up_count: number;
+  new_limit_up_count: number;
+  highest_board: number;
+  change_pct: number | null;
+  net_inflow: number | null;
+  flow_speed: number | null;
+  flow_acceleration: number | null;
+  flow_turning: string | null;
+  leaders: string[];
+  evidence: string[];
+  counter_evidence: string[];
+  missing: string[];
+  risk: string[];
+  action: string;
+  invalidation: string[];
+  source: string[];
+  as_of: string;
+  buy_signal: false;
+}
+
+export interface SectorExpansionRadar {
+  updated_at: string;
+  as_of: string;
+  window_minutes: number;
+  data_quality: string;
+  source: string[];
+  items: SectorExpansionItem[];
+  counts: Record<string, number>;
+  notes: string[];
+}
+
+export interface ConsensusHighOpenFade {
+  code: string;
+  label: string;
+  status: string;
+  triggered: boolean;
+  risk_level: string;
+  score: number | null;
+  evidence: string[];
+  counter_evidence: string[];
+  missing_fields: string[];
+  allowed_actions: string[];
+  forbidden_actions: string[];
+  next_validation_points: string[];
+  methodology_note: string;
+  as_of: string | null;
+  trade_date: string;
+  source: string[];
+  input_evidence: Record<string, unknown>;
 }
 
 export interface OpportunityRadar {
@@ -209,6 +271,8 @@ export interface OpportunityRadar {
   discipline: string;
   notes: string[];
   available_sector_evidence: number;
+  intraday_expansion: SectorExpansionRadar | null;
+  consensus_high_open_fade?: ConsensusHighOpenFade | null;
 }
 
 export interface ReflexivityCrowding {
@@ -253,6 +317,7 @@ export interface ReflexivityAssessment {
   next_validation_points: string[];
   scenarios: ReflexivityScenario[];
   methodology_note: string;
+  consensus_high_open_fade?: ConsensusHighOpenFade | null;
 }
 
 export interface SectorConstituent {
@@ -321,6 +386,15 @@ export interface SectorFlowItem {
   flow_pullback: number | null;
   flow_pullback_pct: number | null;
   flow_event: 'FLOW_NEW_HIGH' | 'FLOW_PEAK_REVERSAL' | 'FLOW_TURN_NEGATIVE' | null;
+  flow_direction: string | null;
+  flow_speed: number | null;
+  flow_acceleration: number | null;
+  flow_turning: string | null;
+  flow_signal: string | null;
+  flow_signal_level: string | null;
+  flow_as_of: string | null;
+  flow_window_minutes: number | null;
+  flow_kinetics_reliable: boolean;
   index_timeline: SectorIndexPoint[];
   sector_price: number | null;
   sector_vwap: number | null;
@@ -439,6 +513,74 @@ export interface LimitUpLadder {
   notes: string[];
 }
 
+export interface LimitUpAtmosphereMetrics {
+  limit_up_count: number;
+  limit_down_count: number | null;
+  broken_count: number | null;
+  seal_rate: number | null;
+  break_rate: number | null;
+  highest_board: number;
+  previous_limit_up_count: number | null;
+  promoted_count: number | null;
+  promotion_rate: number | null;
+  next_day_open_sample_count: number;
+  next_day_premium_sample_count: number;
+  next_day_average_open_pct: number | null;
+  next_day_average_premium_pct: number | null;
+  next_day_low_open_ratio: number | null;
+  top_theme: string | null;
+  top_theme_count: number | null;
+  theme_concentration_pct: number | null;
+}
+
+export interface LimitUpIdentityRole {
+  code: string;
+  name: string;
+  level: number;
+  roles: string[];
+  role_score: number;
+  amount: number;
+  sealed_amount: number;
+  break_count: number;
+  reason: string;
+}
+
+export interface LimitUpThemeLadder {
+  name: string;
+  limit_up_count: number;
+  broken_count: number | null;
+  seal_rate: number | null;
+  first_board_count: number;
+  second_board_count: number;
+  high_board_count: number;
+  highest_level: number;
+  layer_count: number;
+  completeness_score: number;
+  completeness_label: string;
+  action: string;
+  continuation_expectation: string;
+  invalidation_conditions: string[];
+  identity_roles: LimitUpIdentityRole[];
+}
+
+export interface LimitUpAtmosphere {
+  source: string;
+  trade_date: string;
+  previous_trade_date: string | null;
+  updated_at: string;
+  decision: 'ALLOW' | 'CAUTION' | 'FORBID' | 'DATA_GAP';
+  decision_label: string;
+  score: number;
+  data_quality: string;
+  metrics: LimitUpAtmosphereMetrics;
+  evidence: string[];
+  risks: string[];
+  missing_data: string[];
+  theme_ladders: LimitUpThemeLadder[];
+  role_disclaimer: string;
+  notes: string[];
+}
+
 export interface MarketGrade {
   grade: string;
   total_position_limit: string;
@@ -464,6 +606,8 @@ export interface InformationItem {
   sentiment: string;
   sentiment_reason: string;
   related_holdings: string[];
+  verification_level: string;
+  attribution: string;
 }
 
 export interface InformationDifferentialOut {

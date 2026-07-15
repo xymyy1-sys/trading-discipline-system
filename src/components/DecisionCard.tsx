@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { RefreshCcw, Search } from 'lucide-react'
 import { API_BASE } from '../api'
 import { chineseEvidence, chineseLabel } from '../labels'
+import { intradayEventSemantics } from '../eventSemantics'
 import * as echarts from 'echarts/core'
 import { BarChart, LineChart, ScatterChart } from 'echarts/charts'
 import { GridComponent, LegendComponent, TooltipComponent } from 'echarts/components'
@@ -9,6 +10,7 @@ import { CanvasRenderer } from 'echarts/renderers'
 
 import type { ExpectationChain, ExpectationRule, HoldingOut, StockDecisionCard } from '../types'
 import AiInsightButton from './AiInsightButton'
+import PositionAiAssistant from './PositionAiAssistant'
 
 type DecisionCardMode = 'watchlist' | 'holding'
 type WatchlistStock = { code: string; name: string; score: number; tier: string }
@@ -56,7 +58,7 @@ export default function DecisionCard({ mode = 'watchlist' }: { mode?: DecisionCa
       .then(r => r.json())
       .then((data: HoldingOut[] | WatchlistStock[]) => {
         if (mode === 'holding') setHoldings(data as HoldingOut[])
-        else setWatchlist((data as WatchlistStock[]).slice(0, 10))
+        else setWatchlist(data as WatchlistStock[])
         if (data[0]) {
           setCode(data[0].code)
           loadCard(data[0].code)
@@ -114,7 +116,9 @@ export default function DecisionCard({ mode = 'watchlist' }: { mode?: DecisionCa
             {loading ? <RefreshCcw size={16} /> : <Search size={16} />}
             查询
           </button>
-          <AiInsightButton scope="stock" target={card?.code || code.trim()} />
+          {mode === 'holding'
+            ? <PositionAiAssistant code={card?.code || code.trim()} name={card?.name} />
+            : <AiInsightButton scope="stock" target={card?.code || code.trim()} />}
         </div>
       </header>
       {message && <p className="refresh-note">{message}</p>}
@@ -299,7 +303,7 @@ export default function DecisionCard({ mode = 'watchlist' }: { mode?: DecisionCa
           {mode === 'holding' && <section className="panel decision-timeline">
             <h3>证据时间线</h3>
             {card.timeline.length ? card.timeline.map(item => (
-              <article key={`${item.event_type}-${item.captured_at}`}>
+              <article className={intradayEventSemantics(item.event_type, item.severity).toneClass} key={`${item.event_type}-${item.captured_at}`}>
                 <time>{new Date(item.captured_at).toLocaleTimeString('zh-CN', { hour12: false })}</time>
                 <strong>{chineseLabel(item.event_type)}</strong>
                 <span>{chineseLabel(item.severity)}</span>
@@ -350,15 +354,16 @@ function ExpectationVersionChain({ chain }: { chain: ExpectationChain | null }) 
   return (
     <section className="expectation-version-panel">
       <div className="expectation-journey-head">
-        <div><strong>预期 × 量价版本链</strong><span>阶段修正只追加、不覆盖；每个结论同时保存当时的量价状态、反证和失效条件。</span></div>
+        <div><strong>预期 × 量价版本链</strong><span>“当日开盘”全天固定；真正随版本变化的是采样时刻、当前涨幅、量价结构与执行结论。无有效变化的刷新不会重复成版。</span></div>
         <span className="expectation-date">{chain.revisions.length} 个版本</span>
       </div>
       <div className="expectation-version-strip">
         {chain.revisions.map(item => (
           <article key={item.id} className={item.expectation_result === 'INVALID' ? 'invalid' : item.expectation_result === 'WEAKER' ? 'weaker' : ''}>
-            <small>V{item.version} · {item.stage}</small>
+            <small>V{item.version} · {item.stage} · {new Date(item.created_at).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', hour12: false })}</small>
             <b>{chineseLabel(item.expectation_result)} · 预期差 {item.expectation_gap_score >= 0 ? '+' : ''}{item.expectation_gap_score}</b>
-            <span>开盘 {item.actual_open_pct >= 0 ? '+' : ''}{item.actual_open_pct.toFixed(2)}% · {item.volume_price_state ? chineseLabel(item.volume_price_state) : '量价待确认'}</span>
+            <span>当日开盘（固定）{item.actual_open_pct >= 0 ? '+' : ''}{item.actual_open_pct.toFixed(2)}% · 此刻涨幅 {item.actual_change_pct >= 0 ? '+' : ''}{item.actual_change_pct.toFixed(2)}%</span>
+            <span>{item.volume_price_state ? chineseLabel(item.volume_price_state) : '量价待确认'}{item.vwap > 0 ? ` · VWAP ${item.vwap.toFixed(2)}` : ''}</span>
             <p>{item.suggestion}</p>
           </article>
         ))}

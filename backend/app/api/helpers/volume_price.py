@@ -7,12 +7,13 @@ from typing import Any
 from sqlalchemy.orm import Session
 
 from app.api.helpers.quotes import _estimated_vwap, _is_realtime_note, _quote_lookup_code, _safe_float
+from app.core.trading_clock import shanghai_now_naive, shanghai_today
 from app.models.trading import VolumePriceSnapshot
 from app.schemas.trading import VolumePriceSnapshotOut
 
 
 def _today() -> str:
-    return datetime.now().date().isoformat()
+    return shanghai_today().isoformat()
 
 
 def _json_dumps(value: Any) -> str:
@@ -28,7 +29,7 @@ def _json_list(raw: str | None) -> list[str]:
 
 
 def _trading_elapsed_ratio(now: datetime | None = None) -> float:
-    now = now or datetime.now()
+    now = shanghai_now_naive(now)
     current = now.time()
     minutes = 0
     if current <= time(9, 30):
@@ -78,6 +79,120 @@ def _minute_vwap(quote: dict[str, Any]) -> tuple[float, int]:
             total_volume += volume
             count += 1
     return (round(total_amount / total_volume, 4), count) if total_amount > 0 and total_volume > 0 else (0.0, count)
+
+
+def _minute_reversal_signals(quote: dict[str, Any], session_vwap: float) -> tuple[str, list[str]]:
+    """Identify objective intraday reversal evidence from the minute tape.
+
+    These signals deliberately describe *what price and volume have done* rather
+    than guessing who bought the low.  A single bounce is only marked as
+    pending; a confirmed reversal requires a meaningful recovery plus either a
+    VWAP reclaim or a higher-low structure.
+    """
+    rows = _minute_rows(quote)
+    valid: list[dict[str, float]] = []
+    for row in rows:
+        price = _safe_float(row.get("price") or row.get("close"))
+        low = _safe_float(row.get("low")) or price
+        high = _safe_float(row.get("high")) or price
+        volume = _safe_float(row.get("volume"))
+        amount = _minute_amount(row)
+        if price > 0:
+            valid.append({"price": price, "low": low, "high": high, "volume": volume, "amount": amount})
+    if len(valid) < 5:
+        return "", []
+
+    low_index = min(range(len(valid)), key=lambda index: valid[index]["low"])
+    low_price = valid[low_index]["low"]
+    latest = valid[-1]["price"]
+    session_high = max(item["high"] for item in valid)
+    prev_close = _safe_float(quote.get("prev_close"))
+    minute_trade_date = str(quote.get("minute_bar_trade_date") or "")
+    quote_price = _safe_float(quote.get("price"))
+    if low_price <= 0 or latest <= 0 or low_index >= len(valid) - 2:
+        return "", []
+    if minute_trade_date and minute_trade_date != _today():
+        return "", []
+    if quote_price > 0 and abs(latest - quote_price) / quote_price > 0.02:
+        # Do not combine a stale minute tape with a newer quote into a false V.
+        return "", []
+
+    rebound_pct = (latest - low_price) / low_price * 100
+    recovered_range = (latest - low_price) / max(session_high - low_price, 1e-9)
+    low_change_pct = ((low_price - prev_close) / prev_close * 100) if prev_close > 0 else 0.0
+    meaningful_underwater_low = low_change_pct <= -3.0 or (session_high - low_price) / low_price * 100 >= 4.0
+
+    # A reclaim must persist for two observations; a one-tick cross is not
+    # sufficient evidence of renewed acceptance above VWAP.
+    reclaimed_vwap = bool(
+        session_vwap > 0
+        and low_price < session_vwap
+        and all(item["price"] >= session_vwap * 0.998 for item in valid[-2:])
+        and latest >= session_vwap
+    )
+
+    post_low = valid[low_index + 1:]
+    split = max(1, len(post_low) // 2)
+    early_post_low = post_low[:split]
+    late_post_low = post_low[split:]
+    early_floor = min((item["low"] for item in early_post_low), default=low_price)
+    late_floor = min((item["low"] for item in late_post_low), default=low_price)
+    higher_low = bool(
+        len(post_low) >= 4
+        and late_floor >= low_price * 1.006
+        and late_floor >= early_floor * 1.002
+    )
+
+    explicit_limit_down = _safe_float(quote.get("limit_down_price"))
+    limit_down_price = explicit_limit_down
+    if limit_down_price <= 0 and prev_close > 0:
+        # This is only a proximity guard.  Exact board-specific limits should
+        # be supplied by the quote provider when available.
+        limit_down_price = round(prev_close * 0.9, 2)
+    opened_from_limit_down = bool(
+        limit_down_price > 0
+        and low_price <= limit_down_price * 1.008
+        and latest >= limit_down_price * 1.02
+        and rebound_pct >= 1.5
+    )
+    v_reversal = bool(
+        meaningful_underwater_low
+        and rebound_pct >= 2.0
+        and recovered_range >= 0.45
+    )
+
+    evidence: list[str] = []
+    if opened_from_limit_down:
+        evidence.append(
+            f"盘中最低 {low_price:.2f} 接近{'明确跌停价' if explicit_limit_down > 0 else '深水参考区'}，随后回升至 {latest:.2f}，"
+            f"脱离低点 {rebound_pct:.2f}%，开板承接成立。"
+        )
+    if v_reversal:
+        evidence.append(
+            f"价格自日内低点 {low_price:.2f} V形回升 {rebound_pct:.2f}%，"
+            f"已收复日内振幅的 {recovered_range * 100:.0f}%。"
+        )
+    if reclaimed_vwap:
+        evidence.append(f"最近两次分钟观察维持在真实VWAP {session_vwap:.2f} 上方，确认重新站回均价线。")
+    if higher_low:
+        evidence.append(f"反弹后的后续低点抬高至 {late_floor:.2f}，未再次回踩日内低点 {low_price:.2f}。")
+
+    # A higher low by itself is only an observation signal.  It must not be
+    # promoted to a confirmed reversal when the minute VWAP is unavailable or
+    # has not actually been reclaimed; otherwise a weak bounce can cancel a
+    # valid risk-reduction plan.
+    if opened_from_limit_down and reclaimed_vwap:
+        return ("跌停开板V形修复" if explicit_limit_down > 0 else "深水开板V形修复"), evidence
+    if v_reversal and reclaimed_vwap and higher_low:
+        return "水下V形反转站回VWAP", evidence
+    if v_reversal and reclaimed_vwap:
+        return "水下V形修复站回VWAP", evidence
+    if reclaimed_vwap and higher_low:
+        return "重新站回VWAP且低点抬高", evidence
+    if v_reversal or opened_from_limit_down:
+        evidence.append("反弹尚未同时通过VWAP与低点抬高确认，只能视为反转观察，禁止据此追高。")
+        return "深水V形反抽待确认", evidence
+    return "", []
 
 
 def _minute_flow_metrics(quote: dict[str, Any]) -> tuple[float, float, float, float, float, float, float, float, list[str]]:
@@ -342,6 +457,13 @@ def build_volume_price_snapshot(
         price_vs_vwap=price_vs_vwap,
         high_drawdown=high_drawdown,
     )
+    reversal_pattern, reversal_evidence = _minute_reversal_signals(quote, vwap if vwap_reliable else 0)
+    if reversal_pattern:
+        # The latest confirmed structure supersedes a stale early-session
+        # breakdown label, while the original weak evidence remains available
+        # in the append-only minute/event history.
+        pattern = reversal_pattern
+        evidence = reversal_evidence + evidence
     if amount > 0:
         evidence.append(f"当前成交额 {amount:.2f} 亿，按交易进度估算全天 {estimated_full_day_amount:.2f} 亿。")
     if turnover > 0:
@@ -354,7 +476,7 @@ def build_volume_price_snapshot(
 
     row = VolumePriceSnapshot(
         trade_date=_today(),
-        captured_at=datetime.now(),
+        captured_at=shanghai_now_naive(),
         code=lookup_code,
         name=name or str(quote.get("name") or code),
         stage=stage,

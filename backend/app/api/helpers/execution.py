@@ -37,12 +37,14 @@ from app.models.trading import (
 from app.schemas.trading import (
     ActionRecommendationOut,
     ExpectationSnapshotOut,
+    HoldingExecutionSignalOut,
     IntradayEvidenceEventOut,
     PositionExecutionStateOut,
     PositionStateHistoryOut,
     ProfitProtectionSnapshotOut,
     VolumePriceSnapshotOut,
 )
+from app.services.flow_kinetics import FlowKinetics, classify_price_volume_flow_alerts
 
 WEAK_EXPECTATION_RESULTS = {"WEAKER", "INVALID", "SLIGHTLY_WEAKER"}
 STRONG_EXPECTATION_RESULTS = {"STRONGER", "SLIGHTLY_STRONGER"}
@@ -90,8 +92,18 @@ def _json_list(raw: str | None) -> list[str]:
     return [str(item) for item in value] if isinstance(value, list) else []
 
 
+def _shanghai_now_naive() -> datetime:
+    """Return the current Shanghai wall clock as a timezone-naive value.
+
+    Trading stages and deadlines are defined in China Standard Time.  Using the
+    host's local timezone made the same evidence produce different actions on
+    UTC-configured servers and developer machines.
+    """
+    return datetime.now(timezone(timedelta(hours=8))).replace(tzinfo=None)
+
+
 def _trade_date() -> str:
-    return datetime.now().date().isoformat()
+    return _shanghai_now_naive().date().isoformat()
 
 
 def _utc_now_naive() -> datetime:
@@ -101,8 +113,9 @@ def _utc_now_naive() -> datetime:
 
 def _utc_storage_bounds_for_local_trade_day() -> tuple[datetime, datetime]:
     """Return naive UTC bounds for timestamps persisted with UTC model defaults."""
-    local_start = datetime.combine(datetime.now().date(), time.min)
-    local_end = datetime.combine(datetime.now().date(), time.max)
+    shanghai_date = _shanghai_now_naive().date()
+    local_start = datetime.combine(shanghai_date, time.min)
+    local_end = datetime.combine(shanghai_date, time.max)
     china_offset = timedelta(hours=8)
     return local_start - china_offset, local_end - china_offset
 
@@ -244,6 +257,10 @@ def _volume_vwap_reliable(row: VolumePriceSnapshot | VolumePriceSnapshotOut | No
 
 
 def _volume_price_state(pattern: str, current: float, vwap: float, high_drawdown_pct: float) -> str:
+    if any(label in pattern for label in ("跌停开板V形修复", "深水开板V形修复", "水下V形反转站回VWAP", "水下V形修复站回VWAP", "重新站回VWAP且低点抬高")):
+        return "REVERSAL_CONFIRMED"
+    if "深水V形反抽待确认" in pattern:
+        return "REVERSAL_PENDING"
     if "冲高回落跌破VWAP" in pattern:
         return "VOLUME_PRICE_WEAKENING"
     if "跌破VWAP" in pattern or (vwap and current < vwap):
@@ -260,8 +277,9 @@ def _volume_price_state(pattern: str, current: float, vwap: float, high_drawdown
 def _position_quantities(db: Session, holding: Holding, trade_date: str) -> tuple[int, int, int]:
     normalized = _normalize_code(holding.code)
     candidates = {holding.code, normalized, normalized.lstrip("0")}
-    day_start = datetime.combine(datetime.now().date(), time.min)
-    day_end = datetime.combine(datetime.now().date(), time.max)
+    shanghai_date = _shanghai_now_naive().date()
+    day_start = datetime.combine(shanghai_date, time.min)
+    day_end = datetime.combine(shanghai_date, time.max)
     rows = (
         db.query(TradeLog)
         .filter(TradeLog.code.in_(list(candidates)), TradeLog.traded_at >= day_start, TradeLog.traded_at <= day_end)
@@ -517,6 +535,259 @@ def _near_intraday_extreme_low(
     return near_low and meaningful_decline
 
 
+def _latest_next_day_plan(db: Session, holding: Holding) -> NextDayPlan | None:
+    normalized = _normalize_code(holding.code)
+    candidates = {holding.code, normalized, normalized.lstrip("0")}
+    return (
+        db.query(NextDayPlan)
+        .filter(
+            NextDayPlan.code.in_(list(candidates)),
+            NextDayPlan.plan_type == "holding",
+            NextDayPlan.plan_date == _trade_date(),
+        )
+        .order_by(NextDayPlan.updated_at.desc(), NextDayPlan.id.desc())
+        .first()
+    )
+
+
+def _holding_execution_signals(
+    db: Session,
+    holding: Holding,
+    *,
+    now: datetime,
+    current: float,
+    high: float,
+    low: float,
+    prev_close: float,
+    vwap: float,
+    vwap_reliable: bool,
+    volume_state: str,
+    volume_price: VolumePriceSnapshot | VolumePriceSnapshotOut | None,
+    seesaw: Any | None,
+    market_regime: MarketRegimeSnapshot | None,
+    market_expansion_frozen: bool,
+    market_data_limited: bool,
+    hard_exit: bool,
+    hard_stop_price: float,
+    structure_stop_price: float,
+    near_extreme_low: bool,
+    expectation_result: str,
+    protection_level: str,
+    profit_drawdown_pct: float,
+) -> tuple[HoldingExecutionSignalOut, HoldingExecutionSignalOut, HoldingExecutionSignalOut]:
+    """Build three independent gates for sell timing, panic control and adds.
+
+    A signal is evidence-family based.  Floating P&L is never sufficient on its
+    own, and a panic-sell guard never opens the add-risk gate.
+    """
+    plan = _latest_next_day_plan(db, holding)
+    trim_price = float(getattr(plan, "trim_price", 0) or 0)
+    high_drawdown_pct = ((high - current) / high * 100) if high > 0 and current > 0 else 0.0
+    high_change_pct = ((high - prev_close) / prev_close * 100) if prev_close > 0 and high > 0 else 0.0
+
+    target_evidence: list[str] = []
+    plan_target_reached = bool(trim_price > 0 and high >= trim_price * 0.995)
+    morning_peak_reached = bool(
+        now.time() <= time(11, 30)
+        and high_change_pct >= 3.0
+        and high_drawdown_pct >= 1.5
+    )
+    if plan_target_reached:
+        target_evidence.append(f"盘中最高 {high:.2f} 已到达次日计划兑现位 {trim_price:.2f}。")
+    if morning_peak_reached:
+        target_evidence.append(
+            f"早盘最高涨幅 {high_change_pct:.2f}%，随后从高点回撤 {high_drawdown_pct:.2f}%，进入兑现观察窗。"
+        )
+
+    weakening_families: dict[str, str] = {}
+    if vwap_reliable and vwap > 0 and current < vwap:
+        weakening_families["vwap"] = f"当前价 {current:.2f} 已跌破真实分钟VWAP {vwap:.2f}。"
+    minute_count = int(getattr(volume_price, "minute_bar_count", 0) or 0)
+    attack_efficiency = float(getattr(volume_price, "attack_efficiency", 0) or 0)
+    pullback_sell_ratio = float(getattr(volume_price, "pullback_sell_ratio", 0) or 0)
+    if minute_count >= 5 and (pullback_sell_ratio >= 55 or (attack_efficiency <= 0.18 and high_drawdown_pct >= 2)):
+        weakening_families["stall"] = (
+            f"放量滞涨/回落卖压确认：上攻效率 {attack_efficiency:.2f}，"
+            f"回落段卖出占比 {pullback_sell_ratio:.1f}%。"
+        )
+    sector_risk = str(getattr(seesaw, "risk_level", "") or "") if seesaw else ""
+    sector_net = float(getattr(seesaw, "sector_net_inflow", 0) or 0) if seesaw else 0.0
+    sector_pullback = float(getattr(seesaw, "theme_flow_pullback_pct", 0) or 0) if seesaw else 0.0
+    if seesaw and (sector_risk in {"高", "中高"} or sector_net < 0 or sector_pullback >= 20):
+        weakening_families["sector"] = (
+            f"板块承接走弱：净流入 {sector_net:.2f} 亿，资金峰值回撤 {sector_pullback:.1f}%，风险{sector_risk or '观察'}。"
+        )
+    if high_drawdown_pct >= 2.5:
+        weakening_families["drawdown"] = f"个股从日内高点回撤 {high_drawdown_pct:.2f}%，冲高延续性下降。"
+    if protection_level != "NONE" and profit_drawdown_pct >= 2:
+        weakening_families["profit_protection"] = (
+            f"已进入{protection_level}利润保护且利润回撤 {profit_drawdown_pct:.2f} 个百分点。"
+        )
+
+    target_reached = plan_target_reached or morning_peak_reached
+    has_structural_weakening = any(
+        family in weakening_families for family in ("vwap", "stall", "sector")
+    )
+    high_sell_active = (
+        target_reached
+        and len(weakening_families) >= 2
+        and has_structural_weakening
+        and not hard_exit
+    )
+    high_sell_ratio = 0.50 if len(weakening_families) >= 4 else 0.25
+    if high_sell_active and near_extreme_low:
+        high_sell = HoldingExecutionSignalOut(
+            code="HIGH_SELL_WINDOW",
+            status="EXPIRED",
+            level="WATCH",
+            title="冲高兑现窗口已错过",
+            action="禁止在日内极低位补卖；等待反抽后重新评估",
+            evidence=target_evidence + list(weakening_families.values()),
+            cancel_conditions=["当前价已回到日内极低位，原冲高兑现信号不再作为即时卖点。"],
+            recovery_conditions=["反抽真实VWAP/固定压力位时，若板块仍弱且量价滞涨，再分批兑现。"],
+        )
+    elif high_sell_active:
+        high_sell = HoldingExecutionSignalOut(
+            code="HIGH_SELL_WINDOW",
+            status="ACTIVE",
+            level="HIGH" if high_sell_ratio >= 0.50 else "MEDIUM",
+            title="冲高兑现窗口",
+            action=f"分批兑现 {high_sell_ratio * 100:.0f}%，保留仓位继续验证",
+            recommended_ratio=high_sell_ratio,
+            evidence=target_evidence + list(weakening_families.values()),
+            cancel_conditions=[
+                "连续两个观察窗口重新站稳VWAP并有效突破日内高点/计划兑现位。",
+                "板块资金重新回到前排且上攻效率、主动买盘同步恢复。",
+            ],
+            recovery_conditions=["首批兑现后只在重新站稳VWAP、板块回流时保留剩余仓；否则继续按计划降风险。"],
+        )
+    elif target_reached:
+        high_sell_missing = []
+        if len(weakening_families) < 2:
+            high_sell_missing.append("尚未形成至少两类独立走弱证据。")
+        if not has_structural_weakening:
+            high_sell_missing.append("尚缺VWAP、放量滞涨或板块走弱中的至少一类结构证据。")
+        high_sell = HoldingExecutionSignalOut(
+            code="HIGH_SELL_WINDOW",
+            status="WATCH",
+            level="WATCH",
+            title="到达兑现区，等待走弱确认",
+            action="不盲目看多，也不因单一冲高立即卖出",
+            evidence=target_evidence + list(weakening_families.values()),
+            missing_conditions=high_sell_missing,
+            cancel_conditions=["突破兑现位并持续站稳VWAP，取消本轮兑现观察。"],
+            recovery_conditions=["出现跌破VWAP、放量滞涨、板块走弱或高点回撤中的至少两项后再执行。"],
+        )
+    else:
+        high_sell = HoldingExecutionSignalOut(
+            code="HIGH_SELL_WINDOW",
+            status="INACTIVE",
+            level="NEUTRAL",
+            title="尚未进入冲高兑现区",
+            action="按计划观察，不提前猜顶",
+            missing_conditions=["尚未到达次日计划兑现位或有效早盘高点。"],
+            cancel_conditions=["未触发。"],
+            recovery_conditions=["到达计划压力位后，再等待量价、板块和回撤证据。"],
+        )
+
+    reversal_confirmed = volume_state == "REVERSAL_CONFIRMED"
+    reversal_pending = volume_state == "REVERSAL_PENDING"
+    panic_context = bool((near_extreme_low or reversal_confirmed or reversal_pending) and not hard_exit)
+    if panic_context and high_sell.status != "ACTIVE":
+        support_evidence: list[str] = []
+        if near_extreme_low:
+            support_evidence.append(f"当前价 {current:.2f} 接近日内极低位 {low:.2f}，此处追卖赔率不利。")
+        if reversal_confirmed:
+            support_evidence.append("已确认V形修复/开板承接、低点抬高或重新站回真实VWAP。")
+        elif reversal_pending:
+            support_evidence.append("价格已脱离低点进入反转观察，但尚未完成VWAP与低点抬高双确认。")
+        panic_guard = HoldingExecutionSignalOut(
+            code="PANIC_SELL_GUARD",
+            status="ACTIVE",
+            level="PROTECT",
+            title="禁止恐慌卖出" if not reversal_confirmed else "反转确认，禁止沿用低点卖出结论",
+            action="不在极低位割肉；等待反抽/VWAP确认后再决定",
+            evidence=support_evidence,
+            missing_conditions=[] if reversal_confirmed else ["尚需重新站稳VWAP或形成更高低点。"],
+            cancel_conditions=[
+                f"明确固定硬止损 {hard_stop_price:.2f} 被触发。" if hard_stop_price > 0 else "盘前尚未冻结明确硬止损；不能用盘中最低价临时制造止损。",
+                "反抽失败后再创新低，并连续5-15分钟无法收回VWAP/固定结构位。",
+            ],
+            recovery_conditions=["重新站稳VWAP、低点抬高且板块停止流出后，恢复为正常持有观察。"],
+        )
+    else:
+        panic_guard = HoldingExecutionSignalOut(
+            code="PANIC_SELL_GUARD",
+            status="BLOCKED" if hard_exit else "INACTIVE",
+            level="HIGH" if hard_exit else "NEUTRAL",
+            title="明确硬止损优先" if hard_exit else "未触发恐慌保护",
+            action="硬止损已触发，恐慌保护不得覆盖退出纪律" if hard_exit else "按正常证据链执行",
+            evidence=[f"当前价 {current:.2f} 已触发固定硬止损 {hard_stop_price:.2f}。"] if hard_exit else [],
+            cancel_conditions=["未触发。"],
+            recovery_conditions=["只有极低位且未触发明确硬止损时，才启用禁止恐慌卖保护。"],
+        )
+
+    market_gate_open = bool(market_regime is not None and not market_expansion_frozen and not market_data_limited)
+    sector_ebb = list(getattr(seesaw, "sector_ebb_trigger", []) or []) if seesaw else []
+    sector_acceleration = float(getattr(seesaw, "sector_acceleration", 0) or 0) if seesaw else 0.0
+    sector_turning_strong = bool(
+        seesaw
+        and sector_risk not in {"高", "中高"}
+        and sector_net > 0
+        and sector_acceleration >= 0
+        and not sector_ebb
+    )
+    stock_reversal_ready = bool(reversal_confirmed and vwap_reliable and vwap > 0 and current >= vwap)
+    expectation_allows = expectation_result not in WEAK_EXPECTATION_RESULTS
+    reward_target = trim_price if trim_price > current else 0.0
+    risk_floor = hard_stop_price if hard_stop_price > 0 else structure_stop_price
+    downside = current - risk_floor if current > risk_floor > 0 else 0.0
+    upside = reward_target - current if reward_target > current else 0.0
+    risk_reward = upside / downside if upside > 0 and downside > 0 else 0.0
+    risk_reward_ok = risk_reward >= 1.5
+    add_missing: list[str] = []
+    if not market_gate_open:
+        add_missing.append("全市场扩仓闸门未开放或市场数据质量不足。")
+    if not sector_turning_strong:
+        add_missing.append("所属板块资金尚未转强并形成正向加速。")
+    if not stock_reversal_ready:
+        add_missing.append("个股尚未完成V形/低点抬高并重新站稳真实VWAP。")
+    if not expectation_allows:
+        add_missing.append("当前预期仍弱于阈值，禁止用补仓掩盖证伪。")
+    if not risk_reward_ok:
+        add_missing.append("从当前价到计划兑现位的风险收益比尚未达到1.5。")
+    add_eligible = not add_missing
+    contrarian_add = HoldingExecutionSignalOut(
+        code="CONTRARIAN_ADD_EVALUATION",
+        status="ELIGIBLE" if add_eligible else "BLOCKED",
+        level="OPPORTUNITY" if add_eligible else "NEUTRAL",
+        title="允许评估逆势试错" if add_eligible else "禁止逆势补仓",
+        action=(
+            "仅允许评估小仓试错；下单前再次核对VWAP、板块资金和固定止损"
+            if add_eligible
+            else "不恐慌卖出不等于允许抄底，四道闸门未齐前禁止补仓"
+        ),
+        evidence=(
+            [
+                f"全市场扩仓闸门开放：{market_regime.regime_name if market_regime else '未知'}。",
+                f"板块资金净流入 {sector_net:.2f} 亿、加速度 {sector_acceleration:.2f}。",
+                f"个股反转确认并站上VWAP {vwap:.2f}。",
+                f"计划兑现位 {reward_target:.2f} / 风险位 {risk_floor:.2f}，风险收益比 {risk_reward:.2f}。",
+            ]
+            if add_eligible
+            else []
+        ),
+        missing_conditions=add_missing,
+        cancel_conditions=[
+            "重新跌破VWAP或抬高后的次低点。",
+            "板块资金再次转负/扩仓闸门关闭。",
+            "风险收益比跌破1.5或预期再次证伪。",
+        ],
+        recovery_conditions=["四道闸门必须同时满足；这里只给出评估资格，不自动生成买入指令。"],
+    )
+    return high_sell, panic_guard, contrarian_add
+
+
 def _high_open_failed_breakout_event(
     holding: Holding,
     quote: dict[str, Any],
@@ -587,7 +858,7 @@ def _high_open_failed_breakout_event(
     }[level]
     evidence.append(action)
     return {
-        "captured_at": datetime.now(),
+        "captured_at": _shanghai_now_naive(),
         "scope": "stock",
         "target_code": holding.code,
         "target_name": holding.name,
@@ -674,7 +945,7 @@ def _build_events(
     volume_price: VolumePriceSnapshot | VolumePriceSnapshotOut | None = None,
     high_drawdown_pct: float = 0,
 ) -> list[dict[str, Any]]:
-    now = datetime.now()
+    now = _shanghai_now_naive()
     events: list[dict[str, Any]] = []
     if expectation_result == "INVALID":
         events.append({
@@ -760,6 +1031,120 @@ def _build_events(
             "group_key": "sector:flow",
             "evidence": [str(getattr(seesaw, "theme_flow_summary", "") or "板块资金从峰值回落。")],
         })
+    if seesaw:
+        flow_turning = str(getattr(seesaw, "sector_flow_turning", "") or "")
+        flow_signal = str(getattr(seesaw, "sector_flow_signal", "") or "")
+        flow_as_of = str(getattr(seesaw, "sector_flow_as_of", "") or "")
+        flow_captured_at: datetime | None = None
+        if flow_as_of:
+            try:
+                candidate = datetime.fromisoformat(flow_as_of)
+                if candidate.tzinfo is not None:
+                    candidate = candidate.astimezone(timezone(timedelta(hours=8))).replace(tzinfo=None)
+                if candidate.date() == now.date() and candidate <= now:
+                    flow_captured_at = candidate
+            except (TypeError, ValueError):
+                flow_captured_at = None
+        flow_event_map = {
+            "TURN_TO_OUTFLOW": ("SECTOR_FLOW_TURN_OUT", "warning", 86, "sector:flow-direction:out"),
+            "INFLOW_FADING": ("SECTOR_FLOW_WEAKENING", "warning", 74, "sector:flow-direction:weak"),
+            "OUTFLOW_ACCELERATING": ("SECTOR_FLOW_WEAKENING", "critical", 82, "sector:flow-direction:weak"),
+            "FLOW_WEAKENING": ("SECTOR_FLOW_WEAKENING", "warning", 70, "sector:flow-direction:weak"),
+            "TURN_TO_INFLOW": ("SECTOR_FLOW_TURN_IN", "info", 62, "sector:flow-direction:in"),
+            "OUTFLOW_NARROWING": ("SECTOR_FLOW_RECOVERY", "info", 48, "sector:flow-direction:recovery"),
+            "INFLOW_ACCELERATING": ("SECTOR_FLOW_RECOVERY", "info", 52, "sector:flow-direction:recovery"),
+            "FLOW_IMPROVING": ("SECTOR_FLOW_RECOVERY", "info", 42, "sector:flow-direction:recovery"),
+        }
+        mapped = flow_event_map.get(flow_turning)
+        # A flow event without a provider observation timestamp is not causal
+        # evidence and must not be stamped with the application clock.
+        if mapped and flow_captured_at is not None:
+            event_type, severity, priority, group_key = mapped
+            speed = getattr(seesaw, "sector_flow_speed", None)
+            acceleration = getattr(seesaw, "sector_flow_acceleration", None)
+            metrics = []
+            if speed is not None:
+                metrics.append(f"流速 {float(speed):+.3f} 亿/分钟")
+            if acceleration is not None:
+                metrics.append(f"加速度 {float(acceleration):+.4f} 亿/分钟²")
+            events.append({
+                "captured_at": flow_captured_at,
+                "scope": "sector",
+                "target_code": holding.code,
+                "target_name": str(getattr(seesaw, "holding_theme", "") or holding.name),
+                "event_type": event_type,
+                "severity": severity,
+                "value": round(float(getattr(seesaw, "sector_net_inflow", 0) or 0), 2),
+                "previous_value": 0.0,
+                "priority": priority,
+                "group_key": group_key,
+                "evidence": [
+                    f"截至 {flow_captured_at.strftime('%H:%M:%S')}，{flow_signal or flow_turning}。",
+                    "，".join(metrics) if metrics else "资金曲线已有至少两个带时点的真实观察。",
+                ],
+            })
+        flow_reliable = bool(getattr(seesaw, "sector_flow_kinetics_reliable", False))
+        if flow_reliable and flow_captured_at is not None and volume_price is not None:
+            direction = str(getattr(seesaw, "sector_flow_direction", "") or "")
+            if not direction:
+                sector_net = float(getattr(seesaw, "sector_net_inflow", 0) or 0)
+                direction = "NET_INFLOW" if sector_net > 0 else "NET_OUTFLOW" if sector_net < 0 else "NEUTRAL"
+            flow_state = FlowKinetics(
+                direction=direction,
+                speed=(
+                    float(getattr(seesaw, "sector_flow_speed"))
+                    if getattr(seesaw, "sector_flow_speed", None) is not None else None
+                ),
+                acceleration=(
+                    float(getattr(seesaw, "sector_flow_acceleration"))
+                    if getattr(seesaw, "sector_flow_acceleration", None) is not None else None
+                ),
+                turning=flow_turning or None,
+                signal=flow_signal or None,
+                severity="warning" if flow_turning in {
+                    "TURN_TO_OUTFLOW", "INFLOW_FADING", "OUTFLOW_ACCELERATING", "FLOW_WEAKENING",
+                } else "info",
+                as_of=flow_as_of or None,
+                window_minutes=getattr(seesaw, "sector_flow_window_minutes", None),
+                reliable=True,
+            )
+            snapshot_low = float(getattr(volume_price, "low_price", 0) or 0)
+            low_rebound_pct = (
+                (current - snapshot_low) / snapshot_low * 100
+                if snapshot_low > 0 and current >= snapshot_low else 0.0
+            )
+            price_vs_vwap_pct = (
+                float(getattr(volume_price, "price_vs_vwap", 0) or 0)
+                if vwap_reliable else None
+            )
+            composite_alerts = classify_price_volume_flow_alerts(
+                change_pct=float(getattr(volume_price, "change_pct", 0) or 0),
+                volume_ratio=float(getattr(volume_price, "volume_ratio", 0) or 0),
+                price_vs_vwap_pct=price_vs_vwap_pct,
+                vwap_reliable=vwap_reliable,
+                flow=flow_state,
+                low_rebound_pct=low_rebound_pct,
+                high_drawdown_pct=high_drawdown_pct,
+            )
+            for alert in composite_alerts:
+                # The execution engine already emits a richer, hard-stop-aware
+                # PANIC_SELL_GUARD below; keep this classifier focused on the
+                # remaining price-volume-flow semantics.
+                if alert.event_type == "LOW_PANIC_SELL_GUARD":
+                    continue
+                events.append({
+                    "captured_at": flow_captured_at or now,
+                    "scope": "stock",
+                    "target_code": holding.code,
+                    "target_name": holding.name,
+                    "event_type": alert.event_type,
+                    "severity": alert.severity,
+                    "value": round(current, 2),
+                    "previous_value": round(vwap, 2),
+                    "priority": 88 if alert.severity == "critical" else 72 if alert.severity == "warning" else 42,
+                    "group_key": f"stock:price-volume-flow:{alert.event_type.lower()}",
+                    "evidence": [*alert.evidence, alert.action],
+                })
     migration_confirmed, migration_confidence, migration_evidence, migration_value, migration_previous = _sector_migration_signal(seesaw)
     if migration_confirmed:
         events.append({
@@ -878,17 +1263,17 @@ def _time_stop_reasons(
             f"当前 {current:.2f} 低于回封阈值 {failed_limit_reseal_pct:.3f}。"
         )
 
-    if now.time() >= deadline and expectation_result in WEAK_EXPECTATION_RESULTS and volume_state not in {"REPAIR_CONFIRMED", "VWAP_STRONG"}:
+    if now.time() >= deadline and expectation_result in WEAK_EXPECTATION_RESULTS and volume_state not in {"REPAIR_CONFIRMED", "VWAP_STRONG", "REVERSAL_CONFIRMED", "REVERSAL_PENDING"}:
         reasons.append(f"{deadline.strftime('%H:%M')}确认截止后预期仍偏弱且量价未修复，触发时间止损确认。")
     return reasons
 
 
 def _recovery_events(db: Session, holding: Holding, volume_state: str, current: float, vwap: float) -> list[dict[str, Any]]:
-    if volume_state not in {"REPAIR_CONFIRMED", "VWAP_STRONG"}:
+    if volume_state not in {"REPAIR_CONFIRMED", "VWAP_STRONG", "REVERSAL_CONFIRMED"}:
         return []
     normalized = _normalize_code(holding.code)
     candidates = {holding.code, normalized, normalized.lstrip("0")}
-    since = datetime.now() - timedelta(minutes=45)
+    since = _shanghai_now_naive() - timedelta(minutes=45)
     risk_events = (
         db.query(IntradayEvidenceEvent)
         .filter(
@@ -909,11 +1294,11 @@ def _recovery_events(db: Session, holding: Holding, volume_state: str, current: 
     if not risk_events:
         return []
     return [{
-        "captured_at": datetime.now(),
+        "captured_at": _shanghai_now_naive(),
         "scope": "stock",
         "target_code": holding.code,
         "target_name": holding.name,
-        "event_type": "RISK_RECOVERY_CONFIRMED",
+        "event_type": "INTRADAY_REVERSAL_CONFIRMED" if volume_state == "REVERSAL_CONFIRMED" else "RISK_RECOVERY_CONFIRMED",
         "severity": "info",
         "value": round(current, 2),
         "previous_value": round(vwap, 2),
@@ -934,13 +1319,30 @@ def _confirmation_policy(event_type: str) -> tuple[int, int]:
         "SECTOR_FLOW_PEAK_REVERSAL": (10, 2),
         "RISK_RECOVERY_CONFIRMED": (5, 1),
         "PROFIT_DRAWDOWN_WARNING": (15, 2),
+        "HIGH_SELL_WINDOW": (5, 2),
+        "PANIC_SELL_GUARD": (5, 1),
+        "CONTRARIAN_ADD_EVALUATION": (5, 2),
+        "SECTOR_FLOW_TURN_OUT": (10, 1),
+        "SECTOR_FLOW_TURN_IN": (10, 1),
+        "SECTOR_FLOW_WEAKENING": (10, 2),
+        "SECTOR_FLOW_RECOVERY": (10, 2),
+        "SHRINKING_RISE_DIVERGENCE": (5, 2),
+        "SHRINKING_REBOUND_UNCONFIRMED": (5, 2),
+        "SHRINKING_DECLINE_EXHAUSTION_WATCH": (5, 2),
+        "SHRINKING_DECLINE_WEAKNESS": (5, 2),
+        "SHRINKING_PULLBACK_SUPPORT_WATCH": (5, 2),
+        "VOLUME_DOWN_FLOW_ACCELERATION": (3, 2),
+        "FLOW_TURN_OUT_DISTRIBUTION_WARNING": (5, 1),
+        "FLOW_TURN_IN_REBOUND_WATCH": (5, 1),
+        "VOLUME_FLOW_STRENGTH_CONFIRMED": (5, 2),
+        "VOLUME_REBOUND_CONFIRMED": (5, 2),
     }
     return policy.get(event_type, (5, 2))
 
 
 def _dedupe_events(db: Session, events: list[dict[str, Any]], cooldown_minutes: int = 5) -> list[dict[str, Any]]:
     persisted: list[dict[str, Any]] = []
-    now = datetime.now()
+    now = _shanghai_now_naive()
     seen: set[tuple[str, str]] = set()
     for event in events:
         key = (str(event.get("target_code") or ""), str(event.get("event_type") or ""))
@@ -962,9 +1364,17 @@ def _dedupe_events(db: Session, events: list[dict[str, Any]], cooldown_minutes: 
             .first()
         )
         if recent is not None:
-            recent.last_seen_at = now
+            observed_at = event.get("captured_at") or now
+            recent.captured_at = observed_at
+            recent.last_seen_at = observed_at
             recent.occurrence_count = int(recent.occurrence_count or 1) + 1
             recent.confirmed = recent.occurrence_count >= required_occurrences
+            recent.value = float(event.get("value") or 0)
+            recent.previous_value = float(event.get("previous_value") or 0)
+            recent.priority = max(int(recent.priority or 0), int(event.get("priority") or 0))
+            recent.severity = str(event.get("severity") or recent.severity)
+            recent.group_key = str(event.get("group_key") or recent.group_key or "")
+            recent.evidence_json = _json_dumps(event.get("evidence") or [])
             continue
         event["first_seen_at"] = event.get("captured_at")
         event["last_seen_at"] = event.get("captured_at")
@@ -1010,7 +1420,7 @@ def build_position_execution_state(
     persist: bool = True,
 ) -> PositionExecutionStateOut:
     quote = quote or {}
-    now = datetime.now()
+    now = _shanghai_now_naive()
     current = _safe_float(quote.get("price")) or float(holding.current_price or 0)
     high = _safe_float(quote.get("high")) or max(current, float(holding.current_price or 0))
     low = _safe_float(quote.get("low"))
@@ -1153,6 +1563,15 @@ def build_position_execution_state(
     elif volume_state == "REPAIR_CONFIRMED":
         counter_evidence.append("量价状态为VWAP上方强势，暂不按走弱处理。")
         add_positive("volume_price", 1)
+    elif volume_state == "REVERSAL_CONFIRMED":
+        counter_evidence.append("盘中已形成V形修复、重新站回VWAP或低点抬高的反转证据，暂停沿用低点时的卖出结论。")
+        add_positive("intraday_reversal", 3)
+        recovery_conditions.insert(0, "反转确认后继续观察VWAP与抬高后的次低点；再次放量跌破两者才恢复减仓评估。")
+        invalid_conditions.append("反转后的次低点失守且再次跌破真实VWAP，视为V形修复失败。")
+    elif volume_state == "REVERSAL_PENDING":
+        counter_evidence.append("价格已脱离深水/跌停附近低点，但尚未同时站稳VWAP并形成低点抬高，进入反转观察窗口。")
+        add_positive("intraday_reversal", 1)
+        recovery_conditions.insert(0, "等待连续站稳真实VWAP或形成更高低点后，再确认V形反转。")
     elif volume_state == "VWAP_STRONG":
         counter_evidence.append("当前价格位于可靠VWAP上方，量价尚未证实走弱。")
         add_positive("volume_price", 1)
@@ -1239,7 +1658,7 @@ def build_position_execution_state(
         expected_high = _safe_float(getattr(expectation, "expected_open_high", 0))
         actual_open = _safe_float(getattr(expectation, "actual_open_pct", 0))
         state = "EXPECTATION_INVALIDATED"
-        repair_confirmed = vwap_reliable and current >= vwap and volume_state in {"REPAIR_CONFIRMED", "VWAP_STRONG"}
+        repair_confirmed = vwap_reliable and current >= vwap and volume_state in {"REPAIR_CONFIRMED", "VWAP_STRONG", "REVERSAL_CONFIRMED"}
         if now.time() < time(9, 35):
             action, reduce_ratio, level = "减仓25%", max(reduce_ratio, 0.25), "PROTECT"
             recovery_conditions.insert(0, "观察至09:35：若重新站回真实VWAP且量价修复，可保留观察仓；否则继续降仓。")
@@ -1257,6 +1676,33 @@ def build_position_execution_state(
         action = "减仓50%"
         reduce_ratio = max(reduce_ratio, 0.50)
         level = "REDUCE"
+    if volume_state == "REVERSAL_CONFIRMED" and not hard_exit:
+        # A verified intraday reversal is new evidence.  It does not erase the
+        # failed opening expectation and never authorises averaging down, but
+        # it can supersede a stale low-point liquidation instruction.  Opening
+        # invalidation or multiple independent non-price risks still require a
+        # staged reduction into the rebound instead of being erased.
+        persistent_reversal_risks = {
+            family
+            for family in ("expectation", "structure", "sector", "profit_protection")
+            if risk_family_scores.get(family, 0) > 0
+        }
+        reversal_risk_persists = hard_expectation_invalidation or len(persistent_reversal_risks) >= 2
+        if reversal_risk_persists:
+            state = "REVERSAL_CONFIRMED_RISK_REDUCTION"
+            action = "反转确认，利用反抽分批减仓25%"
+            reduce_ratio = 0.25
+            level = "PROTECT"
+            evidence.append(
+                "执行修正：V形修复已通过真实VWAP确认，禁止在低点清仓；但开盘预期证伪或多类风险仍在，"
+                "利用反抽分批降低25%风险，而不是撤销全部风险结论。"
+            )
+        else:
+            state = "REVERSAL_CONFIRMED_HOLD"
+            action = "反转确认，暂缓减仓并禁止追高"
+            reduce_ratio = 0.0
+            level = "WATCH"
+            evidence.append("执行修正：低点后的V形修复已经通过真实VWAP确认；未触发明确硬止损且无多类持续风险时，不在修复途中清仓。")
     if not vwap_reliable and action in {"减仓25%", "减仓50%", "只留观察仓", "全部退出"} and not hard_exit and not hard_expectation_invalidation:
         state = "DEGRADED_DATA_OBSERVATION"
         action = "观察但禁止加仓"
@@ -1274,15 +1720,75 @@ def build_position_execution_state(
     if near_extreme_low and not hard_exit and reduce_ratio > 0:
         original_action = action
         original_ratio = reduce_ratio
-        state = "EXTREME_LOW_WAIT_REBOUND"
-        action = "禁止追卖，等待反抽确认"
-        reduce_ratio = 0.0
-        level = "WATCH"
-        evidence.append(
-            f"执行时机门控：当前价接近日内极端低点，且明确硬止损尚未实际触发；"
-            f"保留风险结论（原建议{original_action}、{original_ratio * 100:.0f}%），但禁止在低位追卖。"
+        decisive_low_risk = bool(
+            hard_expectation_invalidation
+            or risk_family_scores.get("structure", 0) > 0
+            or (
+                risk_family_scores.get("expectation", 0) > 0
+                and risk_family_scores.get("volume_price", 0) > 0
+            )
+            or len({family for family, score in risk_family_scores.items() if score > 0 and family != "profit_protection"}) >= 3
         )
+        if decisive_low_risk:
+            state = "EXTREME_LOW_STAGED_RISK_REDUCTION"
+            action = "禁止低位追卖，首次有效反抽分批减仓25%"
+            reduce_ratio = min(original_ratio, 0.25)
+            level = "PROTECT"
+            stop_status = (
+                f"明确硬止损尚未实际触发（{hard_stop_price:.2f}）；"
+                if hard_stop_price > 0
+                else "盘前未冻结明确硬止损；"
+            )
+            evidence.append(
+                f"执行时机门控：当前价接近日内极端低点，{stop_status}禁止直接按原建议{original_action}追卖；"
+                f"但预期、量价或结构风险已形成独立共振，风险结论不撤销，改为首次有效反抽分批减仓{reduce_ratio * 100:.0f}%。"
+            )
+        else:
+            state = "EXTREME_LOW_WAIT_REBOUND"
+            action = "禁止追卖，等待反抽确认"
+            reduce_ratio = 0.0
+            level = "WATCH"
+            evidence.append(
+                f"执行时机门控：当前价接近日内极端低点，且明确硬止损尚未实际触发；"
+                f"保留风险结论（原建议{original_action}、{original_ratio * 100:.0f}%），但禁止在低位追卖。"
+            )
         recovery_conditions.insert(0, "等待价格脱离日内低点并反抽VWAP/固定结构位后，再按承接强弱执行；若新低持续且固定硬止损被触发则立即退出。")
+    high_sell_signal, panic_sell_guard, contrarian_add_signal = _holding_execution_signals(
+        db,
+        holding,
+        now=now,
+        current=current,
+        high=high,
+        low=low,
+        prev_close=prev_close,
+        vwap=vwap,
+        vwap_reliable=vwap_reliable,
+        volume_state=volume_state,
+        volume_price=volume_price,
+        seesaw=seesaw,
+        market_regime=market_regime,
+        market_expansion_frozen=market_expansion_frozen,
+        market_data_limited=market_data_limited,
+        hard_exit=hard_exit,
+        hard_stop_price=hard_stop_price,
+        structure_stop_price=structure_stop_price,
+        near_extreme_low=near_extreme_low,
+        expectation_result=expectation_result,
+        protection_level=protection_level,
+        profit_drawdown_pct=profit_drawdown_pct,
+    )
+    if (
+        high_sell_signal.status == "ACTIVE"
+        and high_sell_signal.recommended_ratio > reduce_ratio
+        and not hard_exit
+    ):
+        state = "HIGH_SELL_WINDOW"
+        action = high_sell_signal.action
+        reduce_ratio = high_sell_signal.recommended_ratio
+        level = "REDUCE" if reduce_ratio >= 0.50 else "PROTECT"
+        evidence.insert(0, "冲高兑现信号：" + "；".join(high_sell_signal.evidence[:3]))
+        invalid_conditions.insert(0, "冲高兑现必须由计划压力位/早盘高点与至少两类走弱证据共同触发。")
+        recovery_conditions.insert(0, high_sell_signal.recovery_conditions[0])
     evidence.append(
         f"动态决策依据：风险族 {risk_family_scores}，正向反证 {positive_family_scores}，"
         f"去重后风险积分 {negative_score}；预期差 {expectation_gap_score}；"
@@ -1307,7 +1813,8 @@ def build_position_execution_state(
         evidence.append("全市场闸门只冻结新增风险；未出现个股证伪或固定止损时，不在低位机械卖出。")
     t_forbidden = bool(
         hard_exit
-        or state in {"EXIT_REQUIRED", "REDUCE_REQUIRED", "EXPECTATION_VOLUME_BREAKDOWN"}
+        or state in {"EXIT_REQUIRED", "REDUCE_REQUIRED", "EXPECTATION_VOLUME_BREAKDOWN", "REVERSAL_CONFIRMED_HOLD", "REVERSAL_PENDING_HOLD"}
+        or volume_state in {"REVERSAL_CONFIRMED", "REVERSAL_PENDING"}
         or current < structure_stop_price
         or (vwap_reliable and volume_state in {"VWAP_BREAKDOWN", "VOLUME_PRICE_WEAKENING"})
         or expectation_result in WEAK_EXPECTATION_RESULTS
@@ -1347,6 +1854,48 @@ def build_position_execution_state(
         volume_price=volume_price,
         high_drawdown_pct=high_drawdown_pct,
     )
+    if high_sell_signal.status == "ACTIVE":
+        events.append({
+            "captured_at": now,
+            "scope": "stock",
+            "target_code": holding.code,
+            "target_name": holding.name,
+            "event_type": "HIGH_SELL_WINDOW",
+            "severity": "critical" if high_sell_signal.recommended_ratio >= 0.50 else "warning",
+            "value": round(current, 2),
+            "previous_value": round(high, 2),
+            "priority": 94 if high_sell_signal.recommended_ratio >= 0.50 else 82,
+            "group_key": "stock:high-sell-window",
+            "evidence": high_sell_signal.evidence + [high_sell_signal.action],
+        })
+    if panic_sell_guard.status == "ACTIVE":
+        events.append({
+            "captured_at": now,
+            "scope": "stock",
+            "target_code": holding.code,
+            "target_name": holding.name,
+            "event_type": "PANIC_SELL_GUARD",
+            "severity": "info",
+            "value": round(current, 2),
+            "previous_value": round(low, 2),
+            "priority": 78,
+            "group_key": "stock:panic-sell-guard",
+            "evidence": panic_sell_guard.evidence + [panic_sell_guard.action],
+        })
+    if contrarian_add_signal.status == "ELIGIBLE":
+        events.append({
+            "captured_at": now,
+            "scope": "stock",
+            "target_code": holding.code,
+            "target_name": holding.name,
+            "event_type": "CONTRARIAN_ADD_EVALUATION",
+            "severity": "info",
+            "value": round(current, 2),
+            "previous_value": round(vwap, 2),
+            "priority": 45,
+            "group_key": "stock:contrarian-add-evaluation",
+            "evidence": contrarian_add_signal.evidence + [contrarian_add_signal.action],
+        })
     events.extend(_recovery_events(db, holding, volume_price_state, current, vwap))
 
     storage_now = _utc_now_naive()
@@ -1504,7 +2053,14 @@ def build_position_execution_state(
         for row in persisted_events:
             db.refresh(row)
 
-    return _execution_state_out(state_row, snapshot, recommendation, persisted_events or events, db=db)
+    return _execution_state_out(
+        state_row,
+        snapshot,
+        recommendation,
+        persisted_events or events,
+        db=db,
+        execution_signals=(high_sell_signal, panic_sell_guard, contrarian_add_signal),
+    )
 
 
 def _execution_state_out(
@@ -1513,6 +2069,11 @@ def _execution_state_out(
     recommendation: ActionRecommendation,
     events: list[IntradayEvidenceEvent | dict[str, Any]],
     db: Session | None = None,
+    execution_signals: tuple[
+        HoldingExecutionSignalOut,
+        HoldingExecutionSignalOut,
+        HoldingExecutionSignalOut,
+    ] | None = None,
 ) -> PositionExecutionStateOut:
     event_out: list[IntradayEvidenceEventOut] = []
     for event in events:
@@ -1539,6 +2100,7 @@ def _execution_state_out(
                     evidence=_json_list(event.evidence_json),
                 )
             )
+    high_sell_signal, panic_sell_guard, contrarian_add_signal = execution_signals or (None, None, None)
     return PositionExecutionStateOut(
         id=state.id,
         holding_id=state.holding_id,
@@ -1602,6 +2164,9 @@ def _execution_state_out(
             recommended_action=snapshot.recommended_action,
         ),
         state_history=_recent_state_history(db, state.holding_id) if db is not None and state.holding_id else [],
+        high_sell_signal=high_sell_signal,
+        panic_sell_guard=panic_sell_guard,
+        contrarian_add_signal=contrarian_add_signal,
         data_quality=state.data_quality,
         data_time=state.data_time,
         updated_at=state.updated_at,

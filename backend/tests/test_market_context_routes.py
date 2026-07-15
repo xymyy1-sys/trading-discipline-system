@@ -4,6 +4,23 @@ from zoneinfo import ZoneInfo
 from app.models.trading import MarketRegimeSnapshot
 
 
+def test_capital_rotation_uses_shanghai_generated_at(db_session, monkeypatch):
+    from types import SimpleNamespace
+    from app.api.routes import market
+
+    expected = datetime(2026, 7, 16, 10, 30)
+    monkeypatch.setattr(market, "shanghai_now_naive", lambda: expected)
+    monkeypatch.setattr(
+        market,
+        "_market_seesaw_monitor",
+        lambda holdings, force_refresh=False: SimpleNamespace(holding_alerts=[]),
+    )
+
+    result = market.capital_rotation.__wrapped__(request=None, db=db_session)
+
+    assert result.generated_at == expected
+
+
 def test_global_cues_route_preserves_unavailable_quotes(client, monkeypatch):
     from app.api.routes import market
 
@@ -55,6 +72,20 @@ def test_opportunity_radar_route_never_turns_news_into_buy_signal(client, monkey
     now = datetime.now().isoformat()
     monkeypatch.setattr(checks.market_provider, "information_differential", lambda **_kwargs: {"items": []})
     monkeypatch.setattr(checks.market_provider, "sector_flow", lambda **_kwargs: {"inflow": [], "outflow": []})
+    monkeypatch.setattr(checks.market_provider, "sector_opening_breadth", lambda **_kwargs: {
+        "trade_date": datetime.now().date().isoformat(), "data_quality": "missing", "sample_count": 0,
+    })
+    monkeypatch.setattr(checks.market_provider, "limit_up_ladder", lambda *_args, **_kwargs: {"trade_date": datetime.now().date().isoformat(), "groups": []})
+    monkeypatch.setattr(checks.sector_expansion_service, "assess", lambda *_args, **_kwargs: {
+        "updated_at": now,
+        "as_of": now,
+        "window_minutes": 15,
+        "data_quality": "missing",
+        "source": [],
+        "items": [],
+        "counts": {"增量已确认": 0, "增量待确认": 0},
+        "notes": ["无增量证据"],
+    })
     monkeypatch.setattr(checks.opportunity_radar_service, "assess", lambda *_args, **_kwargs: {
         "updated_at": now,
         "as_of": now,
@@ -92,7 +123,115 @@ def test_opportunity_radar_route_never_turns_news_into_buy_signal(client, monkey
     assert item["buy_signal"] is False
     assert "不得单独触发买入" in item["trade_constraint"]
     assert response.json()["data_quality"] == "degraded"
+    assert response.json()["intraday_expansion"]["items"] == []
+    assert response.json()["intraday_expansion"]["counts"]["增量已确认"] == 0
+    assert response.json()["consensus_high_open_fade"]["status"] == "DATA_GAP"
     assert any("同交易日市场环境快照" in note for note in response.json()["notes"])
+
+
+def test_opportunity_radar_route_serializes_confirmed_intraday_expansion(client, monkeypatch):
+    from app.api.routes import checks
+
+    now = datetime.now(ZoneInfo("Asia/Shanghai")).isoformat()
+    monkeypatch.setattr(checks.market_provider, "information_differential", lambda **_kwargs: {"items": []})
+    monkeypatch.setattr(checks.market_provider, "sector_flow", lambda **_kwargs: {"inflow": [], "outflow": []})
+    monkeypatch.setattr(checks.market_provider, "sector_opening_breadth", lambda **_kwargs: {
+        "trade_date": datetime.now().date().isoformat(), "data_quality": "missing", "sample_count": 0,
+    })
+    monkeypatch.setattr(
+        checks.market_provider,
+        "limit_up_ladder",
+        lambda *_args, **_kwargs: {"source": "东方财富涨停池", "trade_date": now[:10], "groups": []},
+    )
+    monkeypatch.setattr(checks.opportunity_radar_service, "assess", lambda *_args, **_kwargs: {
+        "updated_at": now,
+        "as_of": now,
+        "source": [],
+        "data_quality": "missing",
+        "items": [],
+        "counts": {},
+        "discipline": "资讯不得单独触发买入。",
+        "notes": [],
+        "available_sector_evidence": 0,
+    })
+    monkeypatch.setattr(checks.sector_expansion_service, "assess", lambda *_args, **_kwargs: {
+        "updated_at": now,
+        "as_of": now,
+        "window_minutes": 15,
+        "data_quality": "ok",
+        "source": ["东方财富涨停池", "eastmoney"],
+        "items": [{
+            "sector": "半导体",
+            "status": "增量已确认",
+            "confirmation_score": 90,
+            "window_minutes": 15,
+            "total_limit_up_count": 5,
+            "new_limit_up_count": 3,
+            "highest_board": 2,
+            "change_pct": 2.6,
+            "net_inflow": 18.5,
+            "flow_speed": 2.4,
+            "flow_acceleration": 0.35,
+            "flow_turning": "TURN_TO_INFLOW",
+            "leaders": ["芯片一号", "芯片二号"],
+            "evidence": ["最近15个交易分钟新增3只涨停。"],
+            "counter_evidence": [],
+            "missing": [],
+            "risk": ["禁止追后排。"],
+            "action": "仅加入观察，等待回踩确认，禁止追后排。",
+            "invalidation": ["资金重新拐为流出。"],
+            "source": ["eastmoney"],
+            "as_of": now,
+            "buy_signal": False,
+        }],
+        "counts": {"增量已确认": 1, "增量待确认": 0},
+        "notes": ["只生成观察结论。"],
+    })
+
+    response = client.get("/api/intel/opportunity-radar")
+
+    assert response.status_code == 200
+    expansion = response.json()["intraday_expansion"]
+    assert expansion["items"][0]["status"] == "增量已确认"
+    assert expansion["items"][0]["buy_signal"] is False
+    assert expansion["items"][0]["new_limit_up_count"] == 3
+    assert expansion["source"] == ["东方财富涨停池", "eastmoney"]
+
+
+def test_opportunity_radar_route_degrades_cleanly_when_ladder_fails(client, monkeypatch):
+    from app.api.routes import checks
+
+    now = datetime.now(ZoneInfo("Asia/Shanghai")).isoformat()
+    monkeypatch.setattr(checks.market_provider, "information_differential", lambda **_kwargs: {"items": []})
+    monkeypatch.setattr(checks.market_provider, "sector_flow", lambda **_kwargs: {"inflow": [], "outflow": []})
+    monkeypatch.setattr(checks.market_provider, "sector_opening_breadth", lambda **_kwargs: {
+        "trade_date": datetime.now().date().isoformat(), "data_quality": "missing", "sample_count": 0,
+    })
+    monkeypatch.setattr(
+        checks.market_provider,
+        "limit_up_ladder",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("provider unavailable")),
+    )
+    monkeypatch.setattr(checks.opportunity_radar_service, "assess", lambda *_args, **_kwargs: {
+        "updated_at": now,
+        "as_of": now,
+        "source": [],
+        "data_quality": "missing",
+        "items": [],
+        "counts": {},
+        "discipline": "资讯不得单独触发买入。",
+        "notes": [],
+        "available_sector_evidence": 0,
+    })
+
+    response = client.get("/api/intel/opportunity-radar")
+
+    assert response.status_code == 200
+    expansion = response.json()["intraday_expansion"]
+    assert expansion["data_quality"] == "missing"
+    assert expansion["items"] == []
+    assert expansion["window_minutes"] == 0
+    assert "暂不可用" in expansion["notes"][0]
 
 
 def test_opportunity_radar_rejects_cross_day_and_stale_market_snapshots(db_session):

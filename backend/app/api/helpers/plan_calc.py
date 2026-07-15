@@ -1,5 +1,5 @@
 import json
-from datetime import datetime, timezone, timedelta
+from datetime import timedelta
 from typing import Any
 from sqlalchemy.orm import Session
 from app.models.trading import Holding, NextDayPlan
@@ -18,6 +18,7 @@ from app.api.helpers.quotes import (
     _json_list
 )
 from app.api.helpers.holdings_calc import _account_total_asset, _refresh_holding_prices
+from app.core.trading_clock import shanghai_now_naive, shanghai_today
 from app.api.helpers.seesaw import (
     _cached_holding_theme_flow_profile,
     _holding_theme_profile,
@@ -69,7 +70,7 @@ def _estimated_vwap(quote: dict[str, Any]) -> float:
     return round(sum(samples) / len(samples), 2) if samples else 0.0
 
 def _next_trade_date() -> str:
-    d = datetime.now() + timedelta(days=1)
+    d = shanghai_today() + timedelta(days=1)
     while d.weekday() >= 5:
         d += timedelta(days=1)
     return d.strftime("%Y-%m-%d")
@@ -128,17 +129,28 @@ def _default_next_day_plan(
         underperform_action=_underperform_action(category),
         confirm_price=round(max(holding.current_price, holding.cost_price), 2),
         trim_price=round(max(holding.current_price * 1.03, holding.cost_price * 1.04), 2),
-        trim_condition="冲高到压力位或放量不封板时分批高抛",
+        trim_condition=(
+            "到达计划兑现位/早盘有效高点后，只有放量滞涨或跌破VWAP、板块资金走弱、"
+            "高点回撤、利润保护中的至少两类证据共振，才分批兑现25%-50%；重新站稳VWAP并突破高点则取消。"
+        ),
         trim_quantity=trim_quantity,
         allow_buyback=category in {"符合预期", "弱转强"},
         buyback_price=round(holding.current_price * 0.97, 2),
-        buyback_condition="回落到支撑位缩量企稳，重新站回分时均价/VWAP",
+        buyback_condition=(
+            "禁止把不恐慌卖出等同于抄底。仅当全市场扩仓闸门开放、板块资金转强、"
+            "个股V形/低点抬高并站回真实VWAP、到兑现位风险收益比不低于1.5时，才允许评估小仓试错。"
+        ),
         max_buyback_quantity=trim_quantity if category in {"符合预期", "弱转强"} else 0,
         reduce_price=round(holding.cost_price * 0.98, 2),
         final_risk_price=round(holding.cost_price * 0.96, 2),
         stop_loss_4pct=round(holding.cost_price * 0.96, 2),
         auction_plan=json.dumps(dynamic_plan, ensure_ascii=False),
-        forbidden_actions=json.dumps(_FORBIDDEN_BY_CATEGORY.get(category, []), ensure_ascii=False),
+        forbidden_actions=json.dumps(list(dict.fromkeys([
+            *_FORBIDDEN_BY_CATEGORY.get(category, []),
+            "冲高后未出现多证据走弱时不猜顶清仓",
+            "日内极低位且未触发固定硬止损时不恐慌追卖",
+            "不恐慌卖出不等于允许逆势补仓",
+        ])), ensure_ascii=False),
     )
     _refresh_plan_risk(plan)
     return plan
@@ -173,11 +185,16 @@ def _sync_holding_plan(existing: NextDayPlan, fresh: NextDayPlan) -> None:
     ):
         if not str(getattr(existing, field) or "").strip():
             setattr(existing, field, getattr(fresh, field))
+    # Upgrade only known legacy defaults.  User-authored text remains intact.
+    if str(existing.trim_condition or "").strip() == "冲高到压力位或放量不封板时分批高抛":
+        existing.trim_condition = fresh.trim_condition
+    if str(existing.buyback_condition or "").strip() == "回落到支撑位缩量企稳，重新站回分时均价/VWAP":
+        existing.buyback_condition = fresh.buyback_condition
     _refresh_plan_risk(existing)
 
 
 def _current_stage_label() -> str:
-    now = datetime.now().time()
+    now = shanghai_now_naive().time()
     if now.hour < 9 or (now.hour == 9 and now.minute < 25):
         return "盘后/盘前预期"
     if now.hour == 9 and now.minute < 30:
@@ -333,7 +350,7 @@ def refresh_limit_expectation_stage(plan: NextDayPlan, db: Session) -> NextDayPl
             "expectation_match": str(getattr(expectation, "expectation_result", "") or auction.get("expectation_match") or ""),
             "volume_price_status": str(getattr(volume_price, "pattern", "") or auction.get("volume_price_status") or ""),
             "operation_advice": decision,
-            "refreshed_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "refreshed_at": shanghai_now_naive().strftime("%Y-%m-%d %H:%M:%S"),
         }
     )
     plan.auction_plan = json.dumps(auction, ensure_ascii=False)
@@ -884,7 +901,7 @@ def _dynamic_holding_auction_plan(
         "volume_price_status": volume_status,
         "next_day_script": next_day_script,
         "sell_trigger_cards": sell_trigger_cards,
-        "refreshed_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "refreshed_at": shanghai_now_naive().strftime("%Y-%m-%d %H:%M:%S"),
     }
 
 def _dynamic_sell_trigger_cards(holding: Holding, evidence: dict[str, Any], quote: dict[str, Any], current: float) -> list[str]:
@@ -1106,6 +1123,12 @@ def _plan_warnings(plan: NextDayPlan) -> list[str]:
     if plan.plan_type == "limit_up_auction":
         warnings.append("打板预案不是买入指令：9:20后封单和开盘承接不符合条件就撤单。")
         warnings.append("T+1风险：一旦炸板或高开低走，当日无法通过卖出纠错。")
+    elif plan.plan_type == "holding":
+        warnings.extend([
+            "冲高兑现：到达计划区后仍须至少两类走弱证据共振，按25%-50%分批，不按单一浮盈猜顶。",
+            "恐慌保护：极低位且未触发固定硬止损时禁止追卖；开板承接、V形、低点抬高或重回VWAP可撤销旧卖出结论。",
+            "逆势补仓：不恐慌卖出≠允许抄底；市场闸门、板块转强、个股反转、风险收益比四项必须同时通过。",
+        ])
     for item in auction_plan.get("risk_notes") or []:
         if item:
             warnings.append(str(item))

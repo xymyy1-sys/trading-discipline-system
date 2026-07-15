@@ -1,18 +1,18 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime
 from typing import Any
 
 from sqlalchemy.orm import Session
 
 from app.api.helpers.execution import build_position_execution_state
+from app.core.trading_clock import shanghai_today
 from app.models.trading import Holding, TTradePlan
 from app.schemas.trading import TEligibilityOut, TTradePlanIn, TTradePlanOut
 
 
 def _today() -> str:
-    return datetime.now().date().isoformat()
+    return shanghai_today().isoformat()
 
 
 def _json_dumps(value: Any) -> str:

@@ -1,5 +1,6 @@
 import { ChevronRight, TrendingDown, TrendingUp } from 'lucide-react'
 import type { SectorFlowItem } from '../../types'
+import FlowKineticsEvidence from '../FlowKineticsEvidence'
 
 function displayName(item: SectorFlowItem) {
   return item.display_name || item.raw_name || item.name
@@ -61,6 +62,7 @@ export default function SectorRanking({
                 {item.sector_vwap_reliable && ` · 板块${item.sector_below_vwap ? '跌破' : '站上'}分时均价`}
               </span>
             )}
+            <FlowKineticsEvidence fields={item} compact />
             <span className="rank-stats">
               <span className={direction === 'in' ? 'num-up' : 'num-down'}>
                 {item.net_inflow >= 0 ? '+' : ''}{item.net_inflow.toFixed(2)}亿

@@ -1,8 +1,9 @@
 import time
 import threading
 from collections import defaultdict
-from datetime import datetime
 from typing import Any
+
+from app.core.trading_clock import shanghai_now_naive, shanghai_today
 
 _SNAPSHOT_LOCK = threading.Lock()
 _flow_snapshots: dict[str, list[dict[str, Any]]] = defaultdict(list)
@@ -15,7 +16,7 @@ _CACHE_TTL_SECONDS = 300
 
 def _cache_good_flow(key: str, raw_items: list[dict[str, Any]], source: str) -> None:
     with _CACHE_LOCK:
-        _last_good_flow_cache[key] = (raw_items, source, datetime.now().strftime("%Y-%m-%d"))
+        _last_good_flow_cache[key] = (raw_items, source, shanghai_today().isoformat())
 
 def _get_cached_flow(key: str) -> tuple[list[dict[str, Any]], str, str] | None:
     with _CACHE_LOCK:
@@ -39,7 +40,7 @@ def _set_response_cache(key: str, value: Any) -> None:
 
 def _record_snapshot(flow_type: str, raw_items: list[dict[str, Any]]) -> None:
     global _snapshot_seq
-    now = datetime.now()
+    now = shanghai_now_naive()
     with _SNAPSHOT_LOCK:
         key = f"{now.strftime('%Y-%m-%d')}:{flow_type}"
         _snapshot_seq += 1
@@ -50,7 +51,7 @@ def _record_snapshot(flow_type: str, raw_items: list[dict[str, Any]]) -> None:
             _flow_snapshots[key] = _flow_snapshots[key][-120:]
 
 def _get_snapshots(flow_type: str) -> list[dict[str, Any]]:
-    today = datetime.now().strftime("%Y-%m-%d")
+    today = shanghai_today().isoformat()
     key = f"{today}:{flow_type}"
     with _SNAPSHOT_LOCK:
         return list(_flow_snapshots.get(key, []))

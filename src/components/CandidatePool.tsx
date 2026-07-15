@@ -51,7 +51,7 @@ export default function CandidatePool() {
   }
   return <section className="candidate-pool">
     <header className="pos-header"><div><h2>自动观察池</h2><p>从主线题材核心股和涨停梯队中自动发现，不再只给已有持仓打分。</p></div><button className="refresh-btn inline" onClick={load} disabled={loading}><RefreshCcw size={14} />{loading ? '分析中' : '重新分析'}</button></header>
-    <div className="watchlist-editor panel"><input value={manual.code} onChange={e => setManual(value => ({ ...value, code: e.target.value.replace(/\D/g, '').slice(0, 6) }))} placeholder="6位股票代码"/><input value={manual.name} onChange={e => setManual(value => ({ ...value, name: e.target.value }))} placeholder="股票名称（可选）"/><button type="button" className="grade-btn" onClick={addManual}><Plus size={14}/>加入观察池</button><span>每日首次生成最多10只；剔除后当日不递补，手动加入立即生效。</span></div>
+    <div className="watchlist-editor panel"><input value={manual.code} onChange={e => setManual(value => ({ ...value, code: e.target.value.replace(/\D/g, '').slice(0, 6) }))} placeholder="6位股票代码"/><input value={manual.name} onChange={e => setManual(value => ({ ...value, name: e.target.value }))} placeholder="股票名称（可选）"/><button type="button" className="grade-btn" onClick={addManual}><Plus size={14}/>加入观察池</button><span>系统每日盘后按当日数据换届10只；剔除后当日不递补，手动加入永久保留。</span></div>
     {notice && <p className="refresh-note">{notice}</p>}
     {error && <p className="error-msg">{error}；这不是“暂无数据”，请检查网络或行情源。</p>}
     <div className="candidate-grid">{recommendations.map(item => <article className={`candidate-card ${item.tier === '重点观察' ? 'pool-A' : item.tier === '等待确认' ? 'pool-B' : 'pool-D'}`} key={`auto-${item.code}`}>

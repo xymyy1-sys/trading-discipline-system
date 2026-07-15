@@ -1,3 +1,5 @@
+from datetime import datetime
+
 from app.services.market_data import MarketDataProvider, SectorFlowPoint, _sanitize_flow_timeline
 
 
@@ -42,6 +44,10 @@ def test_sector_flow_outflow_is_negative_and_snapshot_only(monkeypatch):
 
 def test_sector_flow_derives_peak_pullback_rank_and_reversal_from_real_curve(monkeypatch):
     provider = MarketDataProvider()
+    monkeypatch.setattr(
+        "app.services.market_data._shanghai_now_naive",
+        lambda: datetime(2026, 7, 15, 14, 0),
+    )
     monkeypatch.setattr(provider, "_fetch_direct_eastmoney_sector_flow_raw", lambda **_kwargs: [{
         "name": "半导体", "board_code": "BK1036", "provider": "eastmoney",
         "net_inflow": 20.0, "main_inflow": 18.0, "change_pct": 1.0,
@@ -75,6 +81,11 @@ def test_sector_flow_derives_peak_pullback_rank_and_reversal_from_real_curve(mon
     assert item.flow_pullback == -80.0
     assert item.flow_pullback_pct == -80.0
     assert item.flow_event == "FLOW_PEAK_REVERSAL"
+    assert item.flow_kinetics_reliable is True
+    assert item.flow_speed is not None and item.flow_speed < 0
+    assert item.flow_turning in {"INFLOW_FADING", "FLOW_WEAKENING"}
+    assert item.flow_signal is not None and "警惕诱多" in item.flow_signal
+    assert item.flow_as_of is not None and item.flow_as_of.endswith("14:00:00")
     assert item.sector_vwap_reliable is True
     assert item.sector_below_vwap is True
     assert item.sector_price == 1195.0

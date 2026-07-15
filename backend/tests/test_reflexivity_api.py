@@ -1,6 +1,11 @@
+import json
 from datetime import datetime, timezone
 
-from app.api.helpers.reflexivity import market_reflexivity_metrics, stock_reflexivity_metrics
+from app.api.helpers.reflexivity import (
+    build_consensus_high_open_fade,
+    market_reflexivity_metrics,
+    stock_reflexivity_metrics,
+)
 from app.api.routes import market as market_routes
 from app.api.routes import stocks as stock_routes
 from app.models.trading import MarketRegimeSnapshot
@@ -140,6 +145,15 @@ def test_market_reflexivity_endpoint_uses_previous_fund_snapshot(
         return _regime()
 
     monkeypatch.setattr(market_routes, "get_market_regime", fake_regime)
+    monkeypatch.setattr(
+        market_routes.market_provider,
+        "sector_opening_breadth",
+        lambda **_kwargs: {
+            "trade_date": "2026-07-14",
+            "data_quality": "missing",
+            "sample_count": 0,
+        },
+    )
     response = client.get("/api/market/reflexivity?force_refresh=true")
 
     assert response.status_code == 200
@@ -149,6 +163,7 @@ def test_market_reflexivity_endpoint_uses_previous_fund_snapshot(
     assert payload["current_scenario"] == "REBOUND_ABSORPTION"
     assert any("较前一快照改善" in item for item in payload["current_evidence"])
     assert payload["market_regime_code"] == "NEUTRAL_ROTATION"
+    assert payload["consensus_high_open_fade"]["status"] == "DATA_GAP"
 
 
 def test_market_reflexivity_ignores_a_stale_previous_fund_snapshot(db_session):
@@ -193,6 +208,101 @@ def test_market_reflexivity_aggregates_three_major_indices_and_reports_consisten
     assert metrics["high_drawdown_pct"] == 0.5333
     assert metrics["index_signal_count"] == 3
     assert metrics["index_signal_consistency_ratio"] == 0.6667
+
+
+def _add_previous_deep_v_snapshot(db_session) -> None:
+    indices = [
+        {
+            "code": "000001", "name": "上证指数", "current": 101.0,
+            "low_price": 98.0, "prev_close": 100.0, "intraday_vwap": 100.0,
+            "data_quality": "realtime", "source": "eastmoney",
+        },
+        {
+            "code": "399001", "name": "深证成指", "current": 202.0,
+            "low_price": 196.0, "prev_close": 200.0, "intraday_vwap": 200.0,
+            "data_quality": "realtime", "source": "eastmoney",
+        },
+    ]
+    db_session.add(MarketRegimeSnapshot(
+        trade_date="2026-07-13",
+        captured_at=datetime(2026, 7, 13, 15, 0, tzinfo=timezone.utc),
+        source="eastmoney-index",
+        data_quality="realtime",
+        indices_json=json.dumps(indices, ensure_ascii=False),
+    ))
+    db_session.commit()
+
+
+def _crowded_fade_regime() -> MarketRegimeOut:
+    return _regime(indices=[
+        {
+            "code": "000001", "name": "上证指数", "current": 100.0,
+            "change_pct": 0.0, "open_price": 101.0, "high_price": 103.0,
+            "low_price": 99.5, "prev_close": 100.0, "intraday_vwap": 101.0,
+            "data_quality": "realtime", "source": "eastmoney",
+        },
+        {
+            "code": "399001", "name": "深证成指", "current": 200.0,
+            "change_pct": 0.0, "open_price": 202.0, "high_price": 206.0,
+            "low_price": 199.0, "prev_close": 200.0, "intraday_vwap": 202.0,
+            "data_quality": "realtime", "source": "eastmoney",
+        },
+    ])
+
+
+def test_consensus_high_open_fade_uses_real_prior_and_current_market_evidence(db_session):
+    _add_previous_deep_v_snapshot(db_session)
+    sector_opening = {
+        "trade_date": "2026-07-14",
+        "updated_at": "2026-07-14T09:31:00+08:00",
+        "source": "eastmoney-sector-open",
+        "data_quality": "ok",
+        "sample_count": 50,
+        "sector_high_open_count": 35,
+        "sector_component_count": 50,
+        "sector_open_breadth_ratio": 0.7,
+    }
+
+    result = build_consensus_high_open_fade(
+        db_session,
+        _crowded_fade_regime(),
+        sector_opening,
+    )
+
+    assert result["status"] == "CONFIRMED"
+    assert result["code"] == "CONSENSUS_HIGH_OPEN_FADE"
+    assert result["triggered"] is True
+    assert result["input_evidence"]["previous_reversal"]["deep_v_index_count"] == 2
+    assert result["input_evidence"]["reliable_vwap_index_count"] == 2
+
+
+def test_consensus_high_open_fade_returns_data_gap_without_real_sector_breadth(db_session):
+    _add_previous_deep_v_snapshot(db_session)
+
+    result = build_consensus_high_open_fade(
+        db_session,
+        _crowded_fade_regime(),
+        {"trade_date": "2026-07-14", "data_quality": "missing", "sample_count": 0},
+    )
+
+    assert result["status"] == "DATA_GAP"
+    assert result["triggered"] is False
+    assert result["missing_fields"]
+
+
+def test_consensus_high_open_fade_returns_data_gap_without_prior_session(db_session):
+    result = build_consensus_high_open_fade(
+        db_session,
+        _crowded_fade_regime(),
+        {
+            "trade_date": "2026-07-14", "data_quality": "ok", "sample_count": 50,
+            "sector_high_open_count": 35, "sector_component_count": 50,
+            "sector_open_breadth_ratio": 0.7,
+        },
+    )
+
+    assert result["status"] == "DATA_GAP"
+    assert result["input_evidence"]["previous_reversal"]["previous_trade_date"] is None
 
 
 def test_stock_reflexivity_endpoint_accepts_force_refresh_without_network(

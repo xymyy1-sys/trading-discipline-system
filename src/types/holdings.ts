@@ -45,6 +45,15 @@ export interface SectorRotationItem {
   net_inflow: number;
   main_inflow: number;
   acceleration: number;
+  flow_direction?: string | null;
+  flow_speed: number | null;
+  flow_acceleration: number | null;
+  flow_turning: string | null;
+  flow_signal: string | null;
+  flow_signal_level?: string | null;
+  flow_as_of: string | null;
+  flow_window_minutes?: number | null;
+  flow_kinetics_reliable?: boolean;
   limit_up_count: number;
   leaders: string[];
   evidence: string;
@@ -81,6 +90,15 @@ export interface HoldingSeesawItem {
   sector_net_inflow: number;
   sector_main_inflow: number;
   sector_acceleration: number;
+  sector_flow_direction?: string | null;
+  sector_flow_speed: number | null;
+  sector_flow_acceleration: number | null;
+  sector_flow_turning: string | null;
+  sector_flow_signal: string | null;
+  sector_flow_signal_level?: string | null;
+  sector_flow_as_of: string | null;
+  sector_flow_window_minutes?: number | null;
+  sector_flow_kinetics_reliable?: boolean;
   risk_level: string;
   signal: string;
   advice: string;
@@ -194,6 +212,19 @@ export interface PositionStateHistory {
   evidence: string[];
 }
 
+export interface HoldingExecutionSignal {
+  code: string;
+  status: 'ACTIVE' | 'WATCH' | 'EXPIRED' | 'ELIGIBLE' | 'BLOCKED' | 'INACTIVE' | string;
+  level: 'HIGH' | 'MEDIUM' | 'PROTECT' | 'OPPORTUNITY' | 'WATCH' | 'NEUTRAL' | string;
+  title: string;
+  action: string;
+  recommended_ratio: number;
+  evidence: string[];
+  missing_conditions: string[];
+  cancel_conditions: string[];
+  recovery_conditions: string[];
+}
+
 export interface PositionExecutionState {
   id: number | null;
   holding_id: number;
@@ -228,6 +259,9 @@ export interface PositionExecutionState {
   recommendation: ActionRecommendation | null;
   profit_snapshot: ProfitProtectionSnapshot | null;
   state_history: PositionStateHistory[];
+  high_sell_signal: HoldingExecutionSignal | null;
+  panic_sell_guard: HoldingExecutionSignal | null;
+  contrarian_add_signal: HoldingExecutionSignal | null;
   data_quality: string;
   data_time: string;
   updated_at: string;

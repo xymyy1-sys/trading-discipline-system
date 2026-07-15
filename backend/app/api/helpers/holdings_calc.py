@@ -2,6 +2,7 @@ from datetime import datetime, time, timezone
 from typing import Any
 from sqlalchemy.orm import Session
 from app.models.trading import AccountState, Holding, HoldingSyncBaseline, TradeLog
+from app.core.trading_clock import shanghai_day_bounds_utc_naive
 from app.schemas.trading import HoldingOut
 from app.services.rules import profit_guard_price
 from app.api.helpers.quotes import (
@@ -269,12 +270,10 @@ def _holding_out(holding: Holding, account_total_asset: float | None = None, pri
 
 def _today_realized_profit(db: Session, now: datetime | None = None) -> float:
     """Include sell/reduce P/L even after a position has been fully closed."""
-    now = now or datetime.now()
-    day_start = datetime.combine(now.date(), time.min)
-    day_end = datetime.combine(now.date(), time.max)
+    day_start, day_end = shanghai_day_bounds_utc_naive(now)
     rows = (
         db.query(TradeLog)
-        .filter(TradeLog.traded_at >= day_start, TradeLog.traded_at <= day_end)
+        .filter(TradeLog.traded_at >= day_start, TradeLog.traded_at < day_end)
         .all()
     )
     return round(sum(

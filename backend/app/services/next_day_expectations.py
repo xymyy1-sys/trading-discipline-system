@@ -6,18 +6,23 @@ from datetime import date, datetime, timedelta
 from sqlalchemy.orm import Session
 
 from app.api.helpers.decision import EXPECTATION_DEFAULTS, _persist_expectation_revision
+from app.core.trading_clock import shanghai_now_naive, shanghai_today
 from app.models.trading import ExpectationSnapshot, Holding, NextDayPlan, VolumePriceSnapshot
 
 
-def next_trading_date(value: date | None = None) -> str:
-    target = (value or date.today()) + timedelta(days=1)
+def next_trading_date(value: date | None = None, *, now: datetime | None = None) -> str:
+    target = (value or shanghai_today(now)) + timedelta(days=1)
     while target.weekday() >= 5:
         target += timedelta(days=1)
     return target.isoformat()
 
 
 def generate_next_day_expectations(db: Session) -> int:
-    """Upsert baselines only for current holdings and the top ten automatic watchlist names."""
+    """Upsert baselines for holdings, plans and every active watchlist name.
+
+    The automatic portion is already capped at ten by the nightly rotation;
+    user-maintained names are deliberately retained in addition to that cap.
+    """
     from app.api.routes.stocks import watchlist_recommendations
 
     targets: dict[str, dict] = {}
@@ -34,10 +39,13 @@ def generate_next_day_expectations(db: Session) -> int:
     except Exception:
         recommendations = []
     holding_codes = set(targets)
-    for item in [row for row in recommendations if row.code not in holding_codes][:10]:
+    for item in [row for row in recommendations if row.code not in holding_codes]:
+        is_manual = item.category == "手动自选"
+        origin = "手动观察池" if is_manual else "自动观察池前10"
         targets[item.code] = {
-            "name": item.name, "hint": "强预期" if item.score >= 75 else "主线前排",
-            "evidence": [f"来源：自动观察池前10；评分{item.score}，{item.theme}，{item.limit_quality}"] + item.reasons[:2],
+            "name": item.name,
+            "hint": "手动观察" if is_manual else ("强预期" if item.score >= 75 else "主线前排"),
+            "evidence": [f"来源：{origin}；评分{item.score}，{item.theme}，{item.limit_quality}"] + item.reasons[:2],
         }
 
     latest_volume: dict[str, VolumePriceSnapshot] = {}
@@ -91,7 +99,7 @@ def generate_next_day_expectations(db: Session) -> int:
         row.evidence_json = json.dumps(evidence, ensure_ascii=False)
         row.counter_evidence_json = "[]"
         row.suggestion = "次日先用集合竞价验证开盘区间：高于区间上沿为超预期/弱转强候选，落在区间内为符合预期，低于下沿则转弱；再用开盘5分钟、VWAP和量价承接持续修正。"
-        row.created_at = datetime.now()
+        row.created_at = shanghai_now_naive()
         db.add(row)
         db.flush()
         _persist_expectation_revision(db, row, trigger="close_baseline")

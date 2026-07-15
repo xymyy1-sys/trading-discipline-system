@@ -19,6 +19,15 @@ def test_market_regime_collection_window_includes_close_snapshot():
     assert collector._is_market_regime_watch_time(datetime(2026, 7, 12, 10, 0)) is False
 
 
+def test_default_market_windows_use_shanghai_clock(monkeypatch):
+    """A UTC-configured host must still collect during the A-share session."""
+    monkeypatch.setattr(collector, "_shanghai_now_naive", lambda: datetime(2026, 7, 15, 10, 30))
+
+    assert collector._is_market_watch_time() is True
+    assert collector._is_market_regime_watch_time() is True
+    assert collector._is_simulation_match_time() is True
+
+
 def test_market_regime_scheduler_skips_recent_persisted_snapshot(monkeypatch, db_session):
     _reset_market_regime_runtime_state()
     now = datetime(2026, 7, 13, 10, 0)

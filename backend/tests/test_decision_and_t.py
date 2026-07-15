@@ -1,8 +1,9 @@
+from datetime import datetime
 from types import SimpleNamespace
 
 from app.api.helpers.decision import build_expectation_snapshot, build_t_eligibility, create_t_plan
 from app.api.helpers.plan_calc import _default_next_day_plan, refresh_limit_expectation_stage
-from app.api.helpers.volume_price import build_volume_price_snapshot
+from app.api.helpers.volume_price import _minute_reversal_signals, build_volume_price_snapshot
 from app.models.trading import ExpectationRule, Holding, TTradePlan
 from app.schemas.trading import TTradePlanUpdate
 from app.services.t_trading_engine import update_t_plan
@@ -273,6 +274,82 @@ def test_volume_price_snapshot_detects_vwap_breakdown(db_session):
     assert snapshot.evidence
 
 
+def test_volume_price_snapshot_detects_underwater_v_reversal(db_session):
+    prices = [9.8, 9.55, 9.4, 9.5, 9.7, 9.9, 10.05, 10.15]
+    snapshot = build_volume_price_snapshot(
+        db_session,
+        "600104",
+        name="水下V形",
+        quote={
+            "price": prices[-1], "change_pct": 1.5, "open": prices[0],
+            "prev_close": 10, "high": 10.15, "low": 9.4,
+            "amount": 8.0, "volume": 8_000_000, "note": "东方财富实时行情",
+            "minute_bars": [
+                {"time": f"09:{31 + index:02d}", "price": price, "low": price, "high": price,
+                 "volume": 1_000_000, "amount": price * 1_000_000}
+                for index, price in enumerate(prices)
+            ],
+        },
+        daily_metrics={},
+    )
+
+    assert snapshot.pattern in {"水下V形反转站回VWAP", "水下V形修复站回VWAP"}
+    assert snapshot.vwap_reliable is True
+    assert snapshot.price > snapshot.vwap
+    assert any("V形回升" in item for item in snapshot.evidence)
+    assert any("重新站回均价线" in item for item in snapshot.evidence)
+
+
+def test_volume_price_snapshot_detects_limit_down_unlock_support(db_session):
+    prices = [9.3, 9.05, 9.0, 9.12, 9.3, 9.5, 9.65, 9.8]
+    snapshot = build_volume_price_snapshot(
+        db_session,
+        "600105",
+        name="跌停开板承接",
+        quote={
+            "price": prices[-1], "change_pct": -2, "open": prices[0], "prev_close": 10,
+            "limit_down_price": 9.0, "high": 9.8, "low": 9.0,
+            "amount": 10.0, "volume": 8_000_000, "note": "东方财富实时行情",
+            "minute_bars": [
+                {"time": f"10:{index:02d}", "price": price, "low": price, "high": price,
+                 "volume": 1_000_000, "amount": price * 1_000_000}
+                for index, price in enumerate(prices)
+            ],
+        },
+        daily_metrics={},
+    )
+
+    assert snapshot.pattern == "跌停开板V形修复"
+    assert any("开板承接成立" in item for item in snapshot.evidence)
+
+
+def test_higher_low_without_reliable_vwap_is_only_pending_reversal():
+    prices = [9.3, 9.0, 9.12, 9.35, 9.55, 9.42, 9.50, 9.62]
+    pattern, evidence = _minute_reversal_signals(
+        {
+            "price": prices[-1],
+            "prev_close": 10,
+            "limit_down_price": 9.0,
+            "minute_bar_trade_date": datetime.now().date().isoformat(),
+            "minute_bars": [
+                {
+                    "time": f"10:{index:02d}",
+                    "price": price,
+                    "low": price,
+                    "high": price,
+                    "volume": 1_000,
+                    "amount": 0,
+                }
+                for index, price in enumerate(prices)
+            ],
+        },
+        0,
+    )
+
+    assert pattern == "深水V形反抽待确认"
+    assert any("尚未同时通过VWAP" in item for item in evidence)
+
+
 def test_volume_price_snapshot_calculates_minute_flow_metrics(db_session):
     snapshot = build_volume_price_snapshot(
         db_session,
@@ -424,6 +501,9 @@ def test_stage_refresh_writes_auction_checks(db_session, monkeypatch):
     assert len(refreshed.auction_plan.stage_checks) == 6
     assert any(item.stage == "五分钟量价确认" for item in refreshed.auction_plan.stage_checks)
     assert refreshed.auction_plan.action_ladder
+    assert "至少两类证据" in refreshed.trim_condition
+    assert "全市场扩仓闸门" in refreshed.buyback_condition
+    assert any("不恐慌卖出≠允许抄底" in item for item in refreshed.risk_warnings)
 
 
 def test_stage_refresh_route(client, monkeypatch):

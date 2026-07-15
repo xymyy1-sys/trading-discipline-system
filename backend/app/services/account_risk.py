@@ -1,7 +1,6 @@
-from datetime import datetime, time
-
 from sqlalchemy.orm import Session
 
+from app.core.trading_clock import shanghai_day_bounds_utc_naive, shanghai_today
 from app.models.trading import AccountDailyRisk, AccountState, PositionExecutionState, TradeLog
 from app.schemas.trading import AccountRiskIn, AccountRiskOut
 
@@ -9,7 +8,8 @@ RISK_STATES = {"REDUCE_REQUIRED", "EXIT_REQUIRED", "STOP_LOSS_WARNING", "EXPECTA
 
 
 def account_risk(db: Session, payload: AccountRiskIn | None = None) -> AccountRiskOut:
-    trade_date = datetime.now().date().isoformat()
+    today = shanghai_today()
+    trade_date = today.isoformat()
     row = db.query(AccountDailyRisk).filter(AccountDailyRisk.trade_date == trade_date).first()
     account = db.get(AccountState, 1)
     current_default = float(account.total_asset if account else 0)
@@ -31,8 +31,11 @@ def account_risk(db: Session, payload: AccountRiskIn | None = None) -> AccountRi
     for state in sorted(states, key=lambda item: (item.updated_at, item.id), reverse=True):
         latest_by_code.setdefault(state.code, state)
     degraded = sum(item.state in RISK_STATES for item in latest_by_code.values())
-    day_start = datetime.combine(datetime.now().date(), time.min)
-    trades = db.query(TradeLog).filter(TradeLog.traded_at >= day_start).all()
+    day_start, day_end = shanghai_day_bounds_utc_naive()
+    trades = db.query(TradeLog).filter(
+        TradeLog.traded_at >= day_start,
+        TradeLog.traded_at < day_end,
+    ).all()
     stop_count = sum("止损" in (item.reason or "") for item in trades)
     complete = row.opening_asset > 0 and row.current_asset > 0
     ratio = (row.current_asset / row.opening_asset - 1) * 100 if complete else 0

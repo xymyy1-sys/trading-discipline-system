@@ -1,6 +1,7 @@
 from fastapi import APIRouter, Depends, Request
 from sqlalchemy.orm import Session
 from app.core.database import get_db
+from app.core.trading_clock import shanghai_now_naive
 from app.models.trading import Holding
 from app.schemas.trading import (
     BoardFlowPanelOut,
@@ -8,6 +9,7 @@ from app.schemas.trading import (
     HotThemesOut,
     SectorFlowOut,
     SectorDetailOut,
+    LimitUpAtmosphereOut,
     LimitUpLadderOut,
     ThemeRadarOut,
     MarketGradeOut,
@@ -112,6 +114,19 @@ def limit_up_ladder(
         force_refresh=force_refresh,
     )
 
+
+@router.get("/market/limit-up-atmosphere", response_model=LimitUpAtmosphereOut)
+@limiter.limit("20/minute")
+def limit_up_atmosphere(
+    request: Request,
+    trade_date: str | None = None,
+    force_refresh: bool = False,
+) -> LimitUpAtmosphereOut:
+    return market_provider.limit_up_atmosphere(
+        trade_date=trade_date,
+        force_refresh=force_refresh,
+    )
+
 @router.get("/market/theme-radar", response_model=ThemeRadarOut)
 @limiter.limit("20/minute")
 def theme_radar(
@@ -141,8 +156,21 @@ def market_reflexivity(
 ) -> ReflexivityAssessmentOut:
     """Return falsifiable market crowding scenarios from persisted evidence."""
     regime = get_market_regime(db, force_refresh=force_refresh)
+    try:
+        sector_opening = market_provider.sector_opening_breadth(
+            trade_date=regime.trade_date,
+            force_refresh=force_refresh,
+        )
+    except Exception as exc:
+        sector_opening = {
+            "trade_date": regime.trade_date,
+            "data_quality": "missing",
+            "source": "",
+            "sample_count": 0,
+            "notes": [f"行业板块真实开盘广度暂不可用：{type(exc).__name__}"],
+        }
     return ReflexivityAssessmentOut.model_validate(
-        build_market_reflexivity(db, regime)
+        build_market_reflexivity(db, regime, sector_opening)
     )
 
 
@@ -187,7 +215,6 @@ def market_seesaw_monitor(
 @router.get("/market/capital-rotation", response_model=CapitalRotationOut)
 @limiter.limit("20/minute")
 def capital_rotation(request: Request, force_refresh: bool = False, db: Session = Depends(get_db)) -> CapitalRotationOut:
-    from datetime import datetime
     from app.api.helpers.execution import _sector_migration_signal
 
     holdings = db.query(Holding).order_by(Holding.updated_at.desc()).all()
@@ -208,4 +235,4 @@ def capital_rotation(request: Request, force_refresh: bool = False, db: Session 
             source_flow_peak=source_peak,
             evidence=evidence,
         ))
-    return CapitalRotationOut(generated_at=datetime.now(), assessments=sorted(assessments, key=lambda row: row.confidence, reverse=True))
+    return CapitalRotationOut(generated_at=shanghai_now_naive(), assessments=sorted(assessments, key=lambda row: row.confidence, reverse=True))

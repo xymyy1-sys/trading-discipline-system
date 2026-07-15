@@ -1,10 +1,11 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import { CalendarClock, Flame, NotebookPen, RefreshCcw, Search, Trophy } from 'lucide-react'
+import { Activity, CalendarClock, Flame, NotebookPen, RefreshCcw, Search, ShieldAlert, Trophy } from 'lucide-react'
 import { API_BASE } from '../api'
 import { cachedJson } from '../apiCache'
 
 import type {
   LimitUpStock,
+  LimitUpAtmosphere,
   LimitUpLadder as LimitUpLadderData,
 } from '../types'
 
@@ -12,6 +13,8 @@ export default function LimitUpLadder() {
   const [data, setData] = useState<LimitUpLadderData | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
+  const [atmosphere, setAtmosphere] = useState<LimitUpAtmosphere | null>(null)
+  const [atmosphereError, setAtmosphereError] = useState('')
   const [creatingCode, setCreatingCode] = useState<string | null>(null)
   const [activeConcept, setActiveConcept] = useState<string | null>(null)
   const [query, setQuery] = useState('')
@@ -19,13 +22,25 @@ export default function LimitUpLadder() {
   const loadData = useCallback((force = false) => {
     setLoading(true)
     setError('')
-    cachedJson<LimitUpLadderData>(
-      'limit-up-ladder',
-      `${API_BASE}/api/market/limit-up-ladder${force ? '?force_refresh=true' : ''}`,
-      force,
-    )
-      .then(({ data }) => setData(data))
-      .catch(() => setError('涨停天梯暂不可用，请确认后端服务和行情源'))
+    setAtmosphereError('')
+    Promise.allSettled([
+      cachedJson<LimitUpLadderData>(
+        'limit-up-ladder',
+        `${API_BASE}/api/market/limit-up-ladder${force ? '?force_refresh=true' : ''}`,
+        force,
+      ),
+      cachedJson<LimitUpAtmosphere>(
+        'limit-up-atmosphere',
+        `${API_BASE}/api/market/limit-up-atmosphere${force ? '?force_refresh=true' : ''}`,
+        force,
+      ),
+    ])
+      .then(([ladderResult, atmosphereResult]) => {
+        if (ladderResult.status === 'fulfilled') setData(ladderResult.value.data)
+        else setError('涨停天梯暂不可用，请确认后端服务和行情源')
+        if (atmosphereResult.status === 'fulfilled') setAtmosphere(atmosphereResult.value.data)
+        else setAtmosphereError('打板氛围暂不可用；数据恢复前不生成打板许可')
+      })
       .finally(() => setLoading(false))
   }, [])
 
@@ -83,6 +98,8 @@ export default function LimitUpLadder() {
           </span>
         </div>
       </div>
+
+      <AtmospherePanel data={atmosphere} loading={loading} error={atmosphereError} onSelectTheme={setActiveConcept} />
 
       <div className="ladder-summary">
         <SummaryCard label="涨停家数" value={`${total}只`} icon={<Flame size={17} />} />
@@ -212,4 +229,126 @@ function sourceLabel(source: string) {
   if (source.includes('akshare')) return '东方财富涨停池'
   if (source.includes('eastmoney')) return '东方财富涨停池'
   return source
+}
+
+function AtmospherePanel({
+  data,
+  loading,
+  error,
+  onSelectTheme,
+}: {
+  data: LimitUpAtmosphere | null
+  loading: boolean
+  error: string
+  onSelectTheme: (theme: string) => void
+}) {
+  if (!data) {
+    return (
+      <section className="limit-atmosphere panel is-missing">
+        <div className="atmosphere-head">
+          <div><span className="eyebrow">打板风险闸门</span><h3>打板氛围与次日溢价</h3></div>
+          <strong className="atmosphere-decision data-gap"><ShieldAlert size={16} />数据不足，禁止打板</strong>
+        </div>
+        <p className="plain-text">{loading ? '正在同步真实涨停、炸板、跌停及昨日涨停次日表现。' : error || '尚未取得真实统计，不用单只涨停股代替全市场氛围。'}</p>
+      </section>
+    )
+  }
+
+  const metric = data.metrics
+  const formatPct = (value: number | null, signed = false) => value == null ? '--' : `${signed && value > 0 ? '+' : ''}${value.toFixed(1)}%`
+  return (
+    <section className={`limit-atmosphere panel decision-${data.decision.toLowerCase()}`}>
+      <div className="atmosphere-head">
+        <div>
+          <span className="eyebrow">打板风险闸门</span>
+          <h3><Activity size={18} />打板氛围与次日溢价</h3>
+          <p>用真实涨停/炸板、晋级和昨日涨停次日回报判断接力容错，不把“允许”当作无条件买入。</p>
+        </div>
+        <strong className={`atmosphere-decision ${data.decision.toLowerCase()}`}>
+          <ShieldAlert size={16} />{data.decision_label}
+          <small>证据分 {data.score > 0 ? '+' : ''}{data.score} · {data.data_quality}</small>
+        </strong>
+      </div>
+
+      <div className="atmosphere-metrics">
+        <AtmosphereMetric label="涨停 / 跌停" value={`${metric.limit_up_count} / ${metric.limit_down_count ?? '--'}`} />
+        <AtmosphereMetric label="封板率 / 炸板率" value={`${formatPct(metric.seal_rate)} / ${formatPct(metric.break_rate)}`} />
+        <AtmosphereMetric label="昨日涨停晋级率" value={formatPct(metric.promotion_rate)} detail={metric.promoted_count == null ? '样本缺失' : `${metric.promoted_count}/${metric.previous_limit_up_count}只`} />
+        <AtmosphereMetric label="最高连板" value={metric.highest_board ? `${metric.highest_board}板` : '--'} />
+        <AtmosphereMetric label="昨日涨停次日平均开盘" value={formatPct(metric.next_day_average_open_pct, true)} detail={`${metric.next_day_open_sample_count}只样本`} />
+        <AtmosphereMetric label="昨日涨停低开比例" value={formatPct(metric.next_day_low_open_ratio)} detail={`${metric.next_day_open_sample_count}只样本`} />
+        <AtmosphereMetric label="昨日涨停当前/收盘溢价" value={formatPct(metric.next_day_average_premium_pct, true)} detail={`${metric.next_day_premium_sample_count}只样本`} />
+        <AtmosphereMetric label="题材集中度" value={formatPct(metric.theme_concentration_pct)} detail={metric.top_theme ? `${metric.top_theme} · ${metric.top_theme_count}只` : '题材聚类缺失'} />
+      </div>
+
+      <div className="atmosphere-evidence-grid">
+        <div>
+          <h4>支持与事实</h4>
+          <ul>{data.evidence.map(item => <li key={item}>{item}</li>)}</ul>
+        </div>
+        <div className="atmosphere-risks">
+          <h4>次日被套风险</h4>
+          <ul>{(data.risks.length ? data.risks : ['当前未触发全市场禁止项；个股仍需竞价、前排地位与封单确认。']).map(item => <li key={item}>{item}</li>)}</ul>
+        </div>
+      </div>
+
+      <section className="theme-ladder-intelligence">
+        <div className="theme-ladder-heading">
+          <div>
+            <span className="eyebrow">题材接力结构</span>
+            <h4>梯队完整度与个股身份竞争</h4>
+          </div>
+          <small>{data.role_disclaimer}</small>
+        </div>
+        {data.theme_ladders.length ? (
+          <div className="theme-ladder-grid">
+            {data.theme_ladders.slice(0, 6).map(theme => (
+              <article className="theme-ladder-card" key={theme.name}>
+                <div className="theme-ladder-card-head">
+                  <button type="button" onClick={() => onSelectTheme(theme.name)}>{theme.name}</button>
+                  <strong>{theme.completeness_score}分</strong>
+                </div>
+                <p className="theme-ladder-label">{theme.completeness_label}</p>
+                <div className="theme-layer-stats">
+                  <span>涨停 <b>{theme.limit_up_count}</b></span>
+                  <span>首板 <b>{theme.first_board_count}</b></span>
+                  <span>二板 <b>{theme.second_board_count}</b></span>
+                  <span>高标 <b>{theme.high_board_count}</b></span>
+                  <span>最高 <b>{theme.highest_level}板</b></span>
+                  <span>封板率 <b>{theme.seal_rate == null ? '--' : `${theme.seal_rate.toFixed(1)}%`}</b></span>
+                </div>
+                <strong className={`theme-action ${theme.action.startsWith('禁止') ? 'forbid' : theme.action.startsWith('允许') ? 'allow' : 'caution'}`}>
+                  {theme.action}
+                </strong>
+                <p className="theme-continuation"><b>次日延续：</b>{theme.continuation_expectation}</p>
+                <div className="identity-list">
+                  {theme.identity_roles.slice(0, 5).map(stock => (
+                    <div className="identity-row" key={stock.code || stock.name} title={stock.reason}>
+                      <span><b>{stock.name}</b><small>{stock.code} · {stock.level}板 · 角色分{stock.role_score}</small></span>
+                      <em>{stock.roles.join(' / ')}</em>
+                    </div>
+                  ))}
+                </div>
+                <details className="theme-invalidation">
+                  <summary>查看次日失效条件</summary>
+                  <ul>{theme.invalidation_conditions.map(item => <li key={item}>{item}</li>)}</ul>
+                </details>
+              </article>
+            ))}
+          </div>
+        ) : (
+          <p className="plain-text">真实涨停题材聚类不足，暂不生成梯队完整度和身份标签。</p>
+        )}
+      </section>
+      <footer className="atmosphere-source">
+        <span>统计日 {data.trade_date}{data.previous_trade_date ? ` · 对照日 ${data.previous_trade_date}` : ''}</span>
+        <span>{data.missing_data.length ? `缺失：${data.missing_data.join('、')}` : '关键统计已齐全'}</span>
+        <span>来源：{sourceLabel(data.source)}</span>
+      </footer>
+    </section>
+  )
+}
+
+function AtmosphereMetric({ label, value, detail }: { label: string; value: string; detail?: string }) {
+  return <div><span>{label}</span><strong>{value}</strong>{detail && <small>{detail}</small>}</div>
 }

@@ -48,6 +48,45 @@ def test_expectation_chain_is_append_only_and_has_scenarios(client, monkeypatch)
     assert len(data["revisions"][-1]["scenarios"]) == 5
 
 
+def test_expectation_chain_ignores_refresh_noise_but_keeps_reversal_transition(db_session):
+    from app.api.helpers.decision import build_expectation_snapshot
+    from app.models.trading import ExpectationRevision, VolumePriceSnapshot
+
+    first = build_expectation_snapshot(
+        db_session, "600103", name="版本去重", stage="五分钟确认", base_hint="强预期",
+        quote={"price": 10.2, "prev_close": 10, "open": 10.2, "change_pct": 2, "note": "实时行情"},
+    )
+    second = build_expectation_snapshot(
+        db_session, "600103", name="版本去重", stage="五分钟确认", base_hint="强预期",
+        quote={"price": 10.4, "prev_close": 10, "open": 10.2, "change_pct": 4, "note": "实时行情"},
+    )
+    assert first.actual_open_pct == second.actual_open_pct == 2
+    assert db_session.query(ExpectationRevision).filter(ExpectationRevision.code == "600103").count() == 1
+
+    db_session.add(VolumePriceSnapshot(
+        trade_date=second.trade_date, code="600103", name="版本去重", stage="五分钟确认",
+        price=10.5, change_pct=5, prev_close=10, vwap=9.8, vwap_source="minute",
+        minute_bar_count=8, vwap_reliable=True, price_vs_vwap=7.14,
+        pattern="水下V形反转站回VWAP", data_quality="realtime",
+    ))
+    db_session.commit()
+    third = build_expectation_snapshot(
+        db_session, "600103", name="版本去重", stage="五分钟确认", base_hint="强预期",
+        quote={"price": 10.5, "prev_close": 10, "open": 10.2, "change_pct": 5, "note": "实时行情"},
+    )
+    assert third.actual_open_pct == 2
+    assert db_session.query(ExpectationRevision).filter(ExpectationRevision.code == "600103").count() == 2
+
+    # A transient empty provider response must not overwrite the verified open
+    # with 0% or append another revision.
+    degraded = build_expectation_snapshot(
+        db_session, "600103", name="版本去重", stage="五分钟确认", base_hint="强预期", quote={},
+    )
+    assert degraded.actual_open_pct == 2
+    assert degraded.actual_change_pct == 5
+    assert db_session.query(ExpectationRevision).filter(ExpectationRevision.code == "600103").count() == 2
+
+
 def test_close_baseline_enters_expectation_revision_chain(db_session, monkeypatch):
     from app.api.routes import stocks
     from app.models.trading import ExpectationRevision, ExpectationScenario, Holding, VolumePriceSnapshot

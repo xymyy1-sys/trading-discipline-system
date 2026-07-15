@@ -12,6 +12,7 @@ from app.api.helpers.decision import build_expectation_snapshot, current_expecta
 from app.api.helpers.execution import build_position_execution_state
 from app.api.helpers.quotes import _safe_float
 from app.api.helpers.volume_price import build_volume_price_snapshot
+from app.core.trading_clock import shanghai_now_naive, shanghai_today
 from app.models.trading import DataCaptureSnapshot, ExpectationSnapshot, Holding, IntradayEvidenceEvent
 from app.schemas.trading import PositionExecutionStateOut, VolumePriceSnapshotOut
 
@@ -41,11 +42,11 @@ def _json_dumps(value: Any) -> str:
 
 
 def _trade_date(now: datetime | None = None) -> str:
-    return (now or datetime.now()).date().isoformat()
+    return shanghai_today(now).isoformat()
 
 
 def nearest_sample_label(now: datetime | None = None) -> str:
-    now = now or datetime.now()
+    now = shanghai_now_naive(now)
     current = now.time()
     nearest = min(
         SCHEDULED_SAMPLE_TIMES,
@@ -81,7 +82,7 @@ def save_intraday_sample_event(
     state: PositionExecutionStateOut,
     now: datetime | None = None,
 ) -> IntradayEvidenceEvent:
-    now = now or datetime.now()
+    now = shanghai_now_naive(now)
     sample_label = nearest_sample_label(now)
     row = IntradayEvidenceEvent(
         trade_date=_trade_date(now),
@@ -113,8 +114,9 @@ def collect_holding_evidence(
     holding: Holding,
     stage: str | None = None,
     now: datetime | None = None,
+    seesaw: Any | None = None,
 ) -> tuple[VolumePriceSnapshotOut, PositionExecutionStateOut, IntradayEvidenceEvent]:
-    now = now or datetime.now()
+    now = shanghai_now_naive(now)
     fetch_started = time_module.perf_counter()
     quote = quote_for_code(holding.code)
     latency_ms = int((time_module.perf_counter() - fetch_started) * 1000)
@@ -135,7 +137,14 @@ def collect_holding_evidence(
         db, holding.code, name=holding.name, stage=stage, quote=quote,
         base_hint=baseline.base_expectation if baseline else (holding.position_type or ""),
     )
-    state = build_position_execution_state(db, holding, quote=quote, expectation=expectation, volume_price=volume)
+    state = build_position_execution_state(
+        db,
+        holding,
+        quote=quote,
+        seesaw=seesaw,
+        expectation=expectation,
+        volume_price=volume,
+    )
     raw_json = json.dumps(quote, ensure_ascii=False, sort_keys=True, default=str)
     normalized_json = json.dumps({"price": volume.price, "vwap": volume.vwap, "pattern": volume.pattern, "data_quality": volume.data_quality}, ensure_ascii=False, sort_keys=True)
     minute_status = str(quote.get("minute_bar_status") or "missing")
@@ -163,7 +172,7 @@ def collect_tracked_stock_evidence(
     now: datetime | None = None,
 ) -> IntradayEvidenceEvent:
     """Persist expectation/volume/evidence for a watchlist or active limit-up plan."""
-    now = now or datetime.now()
+    now = shanghai_now_naive(now)
     fetch_started = time_module.perf_counter()
     quote = quote_for_code(code)
     latency_ms = int((time_module.perf_counter() - fetch_started) * 1000)

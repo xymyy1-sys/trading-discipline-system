@@ -5,21 +5,27 @@ import json
 import sys
 import threading
 import time as clock
-from datetime import datetime, time
+from datetime import datetime, time, timedelta
 
 from app.api.helpers.decision import current_expectation_stage
+from app.api.helpers.quotes import _normalize_code
+from app.api.helpers.seesaw import _market_seesaw_monitor
 from app.core.database import SessionLocal
+from app.core.trading_clock import shanghai_now_naive
 from app.models.trading import (
     Holding,
     IntradayCollectionRun,
     IntradayEvidenceEvent,
     MarketRegimeSnapshot,
     NextDayPlan,
+    SimulationAccount,
+    SimulationOrder,
     WatchlistEntry,
 )
 from app.schemas.trading import MarketRegimeOut
 from app.services.intraday_evidence_engine import collect_holding_evidence, collect_tracked_stock_evidence
 from app.services.market_regime import get_market_regime
+from app.services.simulation import process_open_orders
 
 COLLECTOR_INTERVAL_SECONDS = 60
 MARKET_REGIME_INTERVAL_SECONDS = 300
@@ -32,11 +38,19 @@ _market_regime_running = False
 _market_regime_guard = threading.Lock()
 _market_regime_last_success_at: datetime | None = None
 _market_regime_last_error = ""
+_simulation_match_running = False
+_simulation_match_last_success_at: datetime | None = None
+_simulation_match_last_error = ""
 _close_expectation_date: str | None = None
 _notified_recommendations: set[int] = set()
 _failure_counts: dict[str, int] = {}
 _circuit_until: dict[str, float] = {}
 _queue_depth = 0
+
+
+def _shanghai_now_naive() -> datetime:
+    """Return China Standard Time independently from the host timezone."""
+    return shanghai_now_naive()
 
 
 def _run_with_resilience(key: str, callback, notes: list[str], *, on_error=None):
@@ -87,16 +101,90 @@ def _json_list(raw: str | None) -> list[str]:
 
 
 def _is_market_watch_time(now: datetime | None = None) -> bool:
-    now = now or datetime.now()
+    now = shanghai_now_naive(now) if now is not None else _shanghai_now_naive()
     current = now.time()
-    return now.weekday() < 5 and time(9, 15) <= current <= time(15, 0)
+    return now.weekday() < 5 and (
+        time(9, 15) <= current <= time(11, 30)
+        or time(13, 0) <= current <= time(15, 0)
+    )
 
 
 def _is_market_regime_watch_time(now: datetime | None = None) -> bool:
     """Collect from the end of auction through a final post-close snapshot."""
-    now = now or datetime.now()
+    now = shanghai_now_naive(now) if now is not None else _shanghai_now_naive()
     current = now.time()
     return now.weekday() < 5 and time(9, 25) <= current <= time(15, 5)
+
+
+def _is_simulation_match_time(now: datetime | None = None) -> bool:
+    """Simulation fills are only evaluated during the continuous auction."""
+    now = shanghai_now_naive(now) if now is not None else _shanghai_now_naive()
+    if now.weekday() >= 5:
+        return False
+    current = now.time()
+    return time(9, 30) <= current <= time(11, 30) or time(13, 0) <= current <= time(15, 0)
+
+
+def run_simulation_matching_once(*, now: datetime | None = None) -> dict[str, object]:
+    """Match every active simulation account without touching live collection.
+
+    Each account owns a fresh transaction/session.  One corrupt order or one
+    provider failure is rolled back and recorded without preventing other
+    accounts, holdings evidence, or market-regime collection from running.
+    """
+    global _simulation_match_running, _simulation_match_last_success_at, _simulation_match_last_error
+    evaluated_at = shanghai_now_naive(now) if now is not None else _shanghai_now_naive()
+    result: dict[str, object] = {"account_count": 0, "processed_count": 0, "errors": []}
+    if not _is_simulation_match_time(evaluated_at):
+        result["skipped"] = "outside_continuous_auction"
+        return result
+    _simulation_match_running = True
+    discovery_db = SessionLocal()
+    try:
+        account_ids = [
+            row[0]
+            for row in (
+                discovery_db.query(SimulationAccount.id)
+                .join(SimulationOrder, SimulationOrder.account_id == SimulationAccount.id)
+                .filter(
+                    SimulationAccount.status == "active",
+                    SimulationOrder.status.in_(("OPEN", "PENDING")),
+                )
+                .distinct()
+                .all()
+            )
+        ]
+    except Exception as exc:
+        discovery_db.rollback()
+        _simulation_match_last_error = f"{exc.__class__.__name__}: {exc}"
+        result["errors"] = [_simulation_match_last_error]
+        _simulation_match_running = False
+        return result
+    finally:
+        discovery_db.close()
+
+    result["account_count"] = len(account_ids)
+    for account_id in account_ids:
+        db = SessionLocal()
+        try:
+            account = db.get(SimulationAccount, account_id)
+            if account is None or account.status != "active":
+                continue
+            rows = process_open_orders(db, account, now=evaluated_at)
+            result["processed_count"] = int(result["processed_count"]) + len(rows)
+        except Exception as exc:
+            db.rollback()
+            errors = list(result["errors"])
+            errors.append(f"account:{account_id}:{exc.__class__.__name__}")
+            result["errors"] = errors
+        finally:
+            db.close()
+    errors = list(result["errors"])
+    _simulation_match_last_error = "; ".join(errors)
+    if not errors:
+        _simulation_match_last_success_at = _shanghai_now_naive()
+    _simulation_match_running = False
+    return result
 
 
 def _recent_market_regime_exists(db, now: datetime) -> bool:
@@ -131,7 +219,7 @@ def run_market_regime_collection_once(
         return None
     _market_regime_running = True
     db = None
-    collected_at = now or datetime.now()
+    collected_at = shanghai_now_naive(now) if now is not None else _shanghai_now_naive()
     key = "市场环境"
     try:
         db = SessionLocal()
@@ -143,7 +231,7 @@ def run_market_regime_collection_once(
         _failure_counts.pop(key, None)
         _circuit_until.pop(key, None)
         _market_regime_last_error = ""
-        _market_regime_last_success_at = datetime.now()
+        _market_regime_last_success_at = _shanghai_now_naive()
         return result
     except Exception as exc:
         if db is not None:
@@ -164,7 +252,7 @@ def run_market_regime_collection_once(
 def run_intraday_collection_once(trigger: str = "manual") -> IntradayCollectionRun:
     global _queue_depth
     db = SessionLocal()
-    started = datetime.now()
+    started = _shanghai_now_naive()
     run = IntradayCollectionRun(started_at=started, trigger=trigger, status="running")
     db.add(run)
     db.commit()
@@ -177,11 +265,23 @@ def run_intraday_collection_once(trigger: str = "manual") -> IntradayCollectionR
         holdings = db.query(Holding).order_by(Holding.updated_at.desc()).all()
         holding_codes = {row.code for row in holdings}
         tracked: dict[str, tuple[str, str]] = {}
-        for row in db.query(WatchlistEntry).filter(WatchlistEntry.status == "active").order_by(
-            WatchlistEntry.snapshot_rank.asc(), WatchlistEntry.updated_at.desc()
-        ).limit(10).all():
+        latest_auto = max(
+            (
+                row.snapshot_date for row in db.query(WatchlistEntry).filter(
+                    WatchlistEntry.status == "active",
+                    WatchlistEntry.source == "auto",
+                ).all() if row.snapshot_date
+            ),
+            default="",
+        )
+        tracked_entries = db.query(WatchlistEntry).filter(
+            WatchlistEntry.status == "active",
+        ).order_by(WatchlistEntry.snapshot_rank.asc(), WatchlistEntry.updated_at.desc()).all()
+        for row in tracked_entries:
+            if row.source != "manual" and row.snapshot_date != latest_auto:
+                continue
             if row.code not in holding_codes:
-                tracked[row.code] = (row.name, "自动观察池")
+                tracked[row.code] = (row.name, "手动观察池" if row.source == "manual" else "自动观察池")
         for row in db.query(NextDayPlan).filter(
             NextDayPlan.plan_date == started.date().isoformat(),
             NextDayPlan.plan_type == "limit_up_auction",
@@ -197,10 +297,29 @@ def run_intraday_collection_once(trigger: str = "manual") -> IntradayCollectionR
             tracked = {}
         elif not holdings:
             notes.append("暂无持仓，后台采集跳过。")
+        seesaw_by_code: dict[str, object] = {}
+        if holdings:
+            monitor = _run_with_resilience(
+                "板块资金拐点",
+                lambda: _market_seesaw_monitor(holdings, force_refresh=True),
+                notes,
+                on_error=db.rollback,
+            )
+            if monitor is not None:
+                seesaw_by_code = {
+                    _normalize_code(item.code): item
+                    for item in monitor.holding_alerts
+                }
         for holding in holdings:
             result = _run_with_resilience(
                 f"持仓:{holding.code}",
-                lambda holding=holding: collect_holding_evidence(db, holding, stage=stage, now=started),
+                lambda holding=holding: collect_holding_evidence(
+                    db,
+                    holding,
+                    stage=stage,
+                    now=started,
+                    seesaw=seesaw_by_code.get(_normalize_code(holding.code)),
+                ),
                 notes,
                 on_error=db.rollback,
             )
@@ -250,7 +369,7 @@ def run_intraday_collection_once(trigger: str = "manual") -> IntradayCollectionR
         run.snapshot_count = snapshot_count
         run.event_count = max(0, event_after - event_before)
         run.notes_json = _json_dumps(notes)
-        run.finished_at = datetime.now()
+        run.finished_at = _shanghai_now_naive()
         db.add(run)
         db.commit()
         db.refresh(run)
@@ -259,13 +378,20 @@ def run_intraday_collection_once(trigger: str = "manual") -> IntradayCollectionR
 
 
 async def _collector_loop() -> None:
-    global _collector_running, _close_expectation_date
+    global _collector_running, _close_expectation_date, _simulation_match_last_error
     while True:
         if COLLECTOR_ENABLED and _is_market_watch_time():
             _collector_running = True
             await asyncio.to_thread(run_intraday_collection_once, "scheduler")
             _collector_running = False
-        now = datetime.now()
+        if COLLECTOR_ENABLED and _is_simulation_match_time():
+            # Deliberately separate from holding collection: simulation/provider
+            # failures must never interrupt the real evidence sampling path.
+            try:
+                await asyncio.to_thread(run_simulation_matching_once)
+            except Exception as exc:
+                _simulation_match_last_error = f"{exc.__class__.__name__}: {exc}"
+        now = _shanghai_now_naive()
         if COLLECTOR_ENABLED and now.weekday() < 5 and now.time() > time(15, 0) and _close_expectation_date != now.date().isoformat():
             from app.services.next_day_expectations import generate_next_day_expectations
             db = SessionLocal()
@@ -330,6 +456,9 @@ def collector_status() -> dict[str, object]:
         "market_regime_interval_seconds": MARKET_REGIME_INTERVAL_SECONDS,
         "market_regime_last_success_at": _market_regime_last_success_at,
         "market_regime_last_error": _market_regime_last_error,
+        "simulation_match_running": _simulation_match_running,
+        "simulation_match_last_success_at": _simulation_match_last_success_at,
+        "simulation_match_last_error": _simulation_match_last_error,
         "queue_depth": _queue_depth,
         "open_circuits": [key for key, until in _circuit_until.items() if until > clock.time()],
         "failure_counts": dict(_failure_counts),

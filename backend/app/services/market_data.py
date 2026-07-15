@@ -3,8 +3,9 @@ import re
 import uuid
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from app.schemas.trading import (
     BoardFlowPanelOut,
@@ -16,8 +17,12 @@ from app.schemas.trading import (
     InformationItem,
     LimitUpClusterOut,
     LimitUpGroupOut,
+    LimitUpAtmosphereMetrics,
+    LimitUpAtmosphereOut,
+    LimitUpIdentityRoleOut,
     LimitUpLadderOut,
     LimitUpStockOut,
+    LimitUpThemeLadderOut,
     SectorConstituentOut,
     SectorDetailOut,
     SectorFlowItem,
@@ -46,22 +51,71 @@ from app.services.mainline_classifier import (
     _SECTOR_TAXONOMY,
     _classify_sector_taxonomy,
 )
+from app.services.flow_kinetics import analyze_flow_kinetics
+
+
+def _shanghai_now_naive() -> datetime:
+    """Return the A-share market clock without depending on host timezone."""
+    return datetime.now(timezone(timedelta(hours=8))).replace(tzinfo=None)
+
 
 def _last_trading_day() -> str:
-    d = datetime.now()
+    d = _shanghai_now_naive()
     while d.weekday() >= 5:
         d -= timedelta(days=1)
     return d.strftime("%Y-%m-%d")
 
+
+def _limit_up_default_candidate_dates(
+    now: datetime | None = None,
+    lookback: int = 10,
+) -> list[str]:
+    """Return the dates that may back the default limit-up view.
+
+    Before the continuous auction starts, today's pool is necessarily
+    incomplete, so the search begins with the preceding weekday.  From 09:30
+    onward today may be used, but only after the provider has returned a
+    non-empty, correctly dated pool (validated by
+    :func:`_is_valid_limit_up_ladder`).  Looking back across multiple weekdays
+    also covers exchange holidays without pretending that a weekday was a
+    trading day.
+    """
+    current = now or _shanghai_now_naive()
+    cursor = current.date()
+    minutes = current.hour * 60 + current.minute
+    if cursor.weekday() >= 5 or minutes < 570:
+        cursor -= timedelta(days=1)
+
+    candidates: list[str] = []
+    while len(candidates) < max(1, lookback):
+        if cursor.weekday() < 5:
+            candidates.append(cursor.isoformat())
+        cursor -= timedelta(days=1)
+    return candidates
+
+
+def _is_valid_limit_up_ladder(value: LimitUpLadderOut | None) -> bool:
+    """Only a real, non-empty dated pool can advance trading-day state."""
+    if value is None or not str(value.trade_date or "").strip():
+        return False
+    source = str(value.source or "").strip().lower()
+    if not source or "unavailable" in source or "不可用" in source:
+        return False
+    return any(
+        str(stock.code or "").strip() and str(stock.name or "").strip()
+        for group in value.groups
+        for stock in group.stocks
+    )
+
 def _is_trading_day() -> bool:
-    return datetime.now().weekday() < 5
+    return _shanghai_now_naive().weekday() < 5
 
 def _is_trading_time() -> bool:
-    now = datetime.now()
+    now = _shanghai_now_naive()
     if now.weekday() >= 5:
         return False
     t = now.hour * 60 + now.minute
-    return 555 <= t <= 905
+    return 555 <= t <= 690 or 780 <= t <= 900
 
 def _safe_float(value: Any, default: float = 0.0) -> float:
     if value is None or value == "":
@@ -704,7 +758,8 @@ class MarketDataProvider:
             if cached is not None:
                 return cached
 
-        now = datetime.utcnow()
+        now = _shanghai_now_naive()
+        observed_at = now
         raw_items: list[dict[str, Any]] = []
         source = "eastmoney"
         cache_key = f"{flow_type}|{period}"
@@ -847,6 +902,19 @@ class MarketDataProvider:
                 elif peak_point.time == timeline[-1].time and net > 0:
                     flow_event = "FLOW_NEW_HIGH"
 
+            kinetics_available = bool(
+                period == "今日"
+                and _is_trading_day()
+                and source != "unavailable"
+                and "cached" not in source
+            )
+            kinetics = analyze_flow_kinetics(
+                timeline if kinetics_available else [],
+                current_value=net if kinetics_available else None,
+                change_pct=round(float(raw.get("change_pct") or 0), 2),
+                as_of=observed_at,
+            )
+
             old_rank = previous_rank.get(name)
             index_timeline = index_curves.get(board_code, [])
             latest_index = index_timeline[-1] if index_timeline else None
@@ -879,6 +947,15 @@ class MarketDataProvider:
                     flow_pullback=flow_pullback,
                     flow_pullback_pct=flow_pullback_pct,
                     flow_event=flow_event,
+                    flow_direction=kinetics.direction,
+                    flow_speed=kinetics.speed,
+                    flow_acceleration=kinetics.acceleration,
+                    flow_turning=kinetics.turning,
+                    flow_signal=kinetics.signal,
+                    flow_signal_level=kinetics.severity,
+                    flow_as_of=kinetics.as_of,
+                    flow_window_minutes=kinetics.window_minutes,
+                    flow_kinetics_reliable=kinetics.reliable,
                     index_timeline=index_timeline,
                     sector_price=sector_price,
                     sector_vwap=sector_vwap,
@@ -1085,6 +1162,90 @@ class MarketDataProvider:
         _set_response_cache(cache_key, result)
         return result
 
+    def sector_opening_breadth(
+        self,
+        trade_date: str | None = None,
+        force_refresh: bool = False,
+    ) -> dict[str, Any]:
+        """Return real, same-day industry-board opening breadth.
+
+        Eastmoney's current board list exposes open and previous-close fields
+        as ``f17`` and ``f18``.  Historical requests, missing provider dates,
+        and thin samples stay ``missing``; they are never backfilled or
+        simulated.
+        """
+
+        shanghai_tz = ZoneInfo("Asia/Shanghai")
+        now = datetime.now(shanghai_tz)
+        target_trade_date = trade_date or now.date().isoformat()
+        cache_key = f"sector-opening-breadth|{target_trade_date}"
+        if not force_refresh:
+            cached = _get_response_cache(cache_key)
+            if cached is not None:
+                return cached
+
+        result: dict[str, Any] = {
+            "trade_date": target_trade_date,
+            "updated_at": now.isoformat(),
+            "source": "东方财富行业板块开盘价(f17/f18)",
+            "data_quality": "missing",
+            "threshold_pct": 0.5,
+            "sample_count": 0,
+            "sector_high_open_count": None,
+            "sector_component_count": None,
+            "sector_open_breadth_ratio": None,
+            "notes": [],
+        }
+        if target_trade_date != now.date().isoformat():
+            result["notes"] = ["东方财富板块列表仅提供当前交易日开盘字段，历史日期不回填、不模拟。"]
+            _set_response_cache(cache_key, result)
+            return result
+
+        try:
+            rows = self._fetch_direct_eastmoney_sector_flow_raw(
+                flow_type="行业资金流",
+                period="今日",
+            )
+        except Exception as exc:
+            result["notes"] = [f"东方财富行业板块开盘数据暂不可用：{type(exc).__name__}"]
+            _set_response_cache(cache_key, result)
+            return result
+
+        samples: list[float] = []
+        timestamps: list[str] = []
+        for row in rows:
+            if str(row.get("provider_trade_date") or "") != target_trade_date:
+                continue
+            open_price = _safe_float(row.get("open_price"))
+            prev_close = _safe_float(row.get("prev_close"))
+            if open_price <= 0 or prev_close <= 0:
+                continue
+            samples.append((open_price - prev_close) / prev_close * 100)
+            observed_at = str(row.get("provider_updated_at") or "").strip()
+            if observed_at:
+                timestamps.append(observed_at)
+
+        sample_count = len(samples)
+        result["sample_count"] = sample_count
+        if sample_count < 10:
+            result["notes"] = [
+                f"同交易日且含真实开盘/昨收的行业板块仅{sample_count}个，低于10个的最低覆盖要求。"
+            ]
+            _set_response_cache(cache_key, result)
+            return result
+
+        high_open_count = sum(value >= float(result["threshold_pct"]) for value in samples)
+        result.update({
+            "updated_at": max(timestamps) if timestamps else now.isoformat(),
+            "data_quality": "ok",
+            "sector_high_open_count": high_open_count,
+            "sector_component_count": sample_count,
+            "sector_open_breadth_ratio": round(high_open_count / sample_count, 4),
+            "notes": ["仅统计具有同交易日提供方时间戳、真实开盘价和昨收价的行业板块。"],
+        })
+        _set_response_cache(cache_key, result)
+        return result
+
     def sector_detail(
         self,
         name: str,
@@ -1188,17 +1349,46 @@ class MarketDataProvider:
         return result
 
     def limit_up_ladder(self, trade_date: str | None = None, force_refresh: bool = False) -> LimitUpLadderOut:
-        target_date = trade_date or _last_trading_day()
+        """Return a dated real limit-up pool.
+
+        An explicit date is never silently changed.  The default view searches
+        from the most recent eligible date backwards and only advances to the
+        current session when a non-empty, correctly sourced pool is available.
+        This keeps pre-market, holiday and transient-empty responses anchored
+        to the last valid trading session.
+        """
+        if trade_date:
+            return self._limit_up_ladder_for_date(trade_date, force_refresh=force_refresh)
+
+        first_unavailable: LimitUpLadderOut | None = None
+        for candidate in _limit_up_default_candidate_dates():
+            result = self._limit_up_ladder_for_date(candidate, force_refresh=force_refresh)
+            if first_unavailable is None:
+                first_unavailable = result
+            if _is_valid_limit_up_ladder(result):
+                return result
+        # Preserve an explicit data-gap payload when no valid pool exists.  It
+        # is deliberately not cached, so a newly published current pool can be
+        # adopted on the next refresh.
+        assert first_unavailable is not None
+        return first_unavailable
+
+    def _limit_up_ladder_for_date(
+        self,
+        target_date: str,
+        *,
+        force_refresh: bool = False,
+    ) -> LimitUpLadderOut:
         cache_key = f"limit-up-ladder|{target_date}"
         if not force_refresh:
             cached = _get_response_cache(cache_key)
-            if cached is not None:
+            if _is_valid_limit_up_ladder(cached):
                 return cached
 
         notes: list[str] = []
         source = "东方财富涨停池"
         raw_items: list[dict[str, Any]] = []
-        if not _is_trading_day() and trade_date is None:
+        if not _is_trading_day():
             notes.append(f"非交易日，展示最近交易日 {target_date} 的涨停池")
         try:
             raw_items = self._fetch_limit_up_pool_raw(target_date)
@@ -1234,7 +1424,11 @@ class MarketDataProvider:
             summary=summary,
             notes=notes or ["涨停天梯已按连板高度和题材聚类"],
         )
-        _set_response_cache(cache_key, result)
+        # Never cache an unavailable/empty pool.  During the session the real
+        # current-day pool can appear minutes later and must then be eligible
+        # to replace the prior completed session immediately.
+        if _is_valid_limit_up_ladder(result):
+            _set_response_cache(cache_key, result)
         return result
 
     def _match_sector_raw(
@@ -1304,7 +1498,13 @@ class MarketDataProvider:
             timeout=6,
         )
         resp.raise_for_status()
-        pool = (resp.json().get("data") or {}).get("pool") or []
+        data = resp.json().get("data")
+        if not isinstance(data, dict):
+            raise ValueError("broken-limit pool returned no dated payload")
+        query_date = str(data.get("qdate") or "")
+        if query_date and query_date != date_text:
+            raise ValueError(f"broken-limit pool returned mismatched date {query_date}")
+        pool = data.get("pool") or []
         results: list[dict[str, Any]] = []
         for row in pool:
             if not isinstance(row, dict):
@@ -1320,6 +1520,100 @@ class MarketDataProvider:
                 "连板数": max(1, int(stats.get("ct") or 1)), "所属行业": str(row.get("hybk") or ""),
             })
         return results
+
+    def _fetch_dated_pool_total(self, endpoint: str, date_text: str) -> int:
+        resp = requests.get(
+            f"https://push2ex.eastmoney.com/{endpoint}",
+            params={
+                "ut": "7eea3edcaed734bea9cbfc24409ed989",
+                "dpt": "wz.ztzt",
+                "Pageindex": 0,
+                "pagesize": 100,
+                "sort": "fbt:asc",
+                "date": date_text,
+            },
+            headers={
+                "User-Agent": "Mozilla/5.0",
+                "Referer": "https://quote.eastmoney.com/ztb/detail",
+            },
+            timeout=6,
+        )
+        resp.raise_for_status()
+        data = resp.json().get("data")
+        if not isinstance(data, dict):
+            raise ValueError(f"{endpoint} returned no dated payload")
+        query_date = str(data.get("qdate") or "")
+        if query_date and query_date != date_text:
+            raise ValueError(f"{endpoint} returned mismatched date {query_date}")
+        total = data.get("tc")
+        if total is None:
+            raise ValueError(f"{endpoint} returned no total")
+        return max(0, int(float(total)))
+
+    def _find_previous_limit_up_pool(self, target_date: str) -> tuple[str, list[dict[str, Any]]]:
+        candidate = datetime.strptime(target_date, "%Y-%m-%d") - timedelta(days=1)
+        checked = 0
+        last_error: Exception | None = None
+        while checked < 10:
+            if candidate.weekday() < 5:
+                checked += 1
+                candidate_text = candidate.strftime("%Y-%m-%d")
+                try:
+                    rows = self._fetch_limit_up_pool_raw(candidate_text)
+                    if rows:
+                        return candidate_text, rows
+                except Exception as exc:
+                    last_error = exc
+            candidate -= timedelta(days=1)
+        if last_error is not None:
+            raise last_error
+        raise ValueError("previous limit-up pool unavailable")
+
+    def _fetch_current_stock_quotes(
+        self,
+        codes: list[str],
+    ) -> tuple[dict[str, dict[str, Any]], str]:
+        unique_codes = list(dict.fromkeys(code for code in codes if code))
+        if not unique_codes:
+            return {}, "eastmoney-stock-quotes"
+        rows: dict[str, dict[str, Any]] = {}
+        hosts: list[str] = []
+        for offset in range(0, len(unique_codes), 80):
+            batch = unique_codes[offset:offset + 80]
+            secids = ",".join(
+                f"{'1' if code.startswith(('5', '6', '9')) else '0'}.{code}"
+                for code in batch
+            )
+            payload, host = _get_json_from_hosts(
+                "/api/qt/ulist.np/get",
+                {
+                    "fltt": "2",
+                    "invt": "2",
+                    "fields": "f12,f14,f2,f3,f17,f18,f124",
+                    "secids": secids,
+                },
+                timeout=8,
+            )
+            hosts.append(host.split("//")[-1])
+            for raw in list((payload.get("data") or {}).get("diff") or []):
+                code = str(raw.get("f12") or "")
+                stamp = _safe_int(raw.get("f124"))
+                quote_date = (
+                    (datetime.utcfromtimestamp(stamp) + timedelta(hours=8)).strftime("%Y%m%d")
+                    if stamp > 0
+                    else ""
+                )
+                rows[code] = {
+                    "trade_date": quote_date,
+                    "open": _safe_float(raw.get("f17")),
+                    "prev_close": _safe_float(raw.get("f18")),
+                    "change_pct": (
+                        _safe_float(raw.get("f3"))
+                        if raw.get("f3") not in (None, "", "-", "--")
+                        else None
+                    ),
+                }
+        return rows, f"eastmoney-stock-quotes@{','.join(dict.fromkeys(hosts))}"
 
     def _fetch_direct_limit_up_pool_raw(self, date_text: str) -> list[dict[str, Any]]:
         resp = requests.get(
@@ -1341,7 +1635,13 @@ class MarketDataProvider:
         )
         resp.raise_for_status()
         payload = resp.json()
-        pool = (payload.get("data") or {}).get("pool") or []
+        data = payload.get("data")
+        if not isinstance(data, dict):
+            raise ValueError("limit-up pool returned no dated payload")
+        query_date = str(data.get("qdate") or "")
+        if query_date and query_date != date_text:
+            raise ValueError(f"limit-up pool returned mismatched date {query_date}")
+        pool = data.get("pool") or []
         if not pool:
             raise ValueError("empty direct limit-up pool")
 
@@ -1726,7 +2026,7 @@ class MarketDataProvider:
         sector_type_map = {"行业资金流": "m:90 s:4", "概念资金流": "m:90 t:3", "地域资金流": "m:90 t:1"}
         indicator_map = {
             "今日": ("f62", "1", "f62", "f66", "f204", "f3",
-                     "f12,f14,f2,f3,f62,f184,f66,f69,f72,f75,f78,f81,f84,f87,f100,f102,f104,f204,f205,f124,f1,f13"),
+                     "f12,f14,f2,f3,f15,f17,f18,f62,f184,f66,f69,f72,f75,f78,f81,f84,f87,f100,f102,f104,f204,f205,f124,f1,f13"),
             "5日": ("f164", "5", "f164", "f166", "f257", "f109",
                      "f12,f14,f2,f100,f102,f104,f109,f164,f165,f166,f167,f168,f169,f170,f171,f172,f173,f257,f258,f124,f1,f13"),
             "10日": ("f174", "10", "f174", "f176", "f260", "f160",
@@ -1785,11 +2085,32 @@ class MarketDataProvider:
             raise last_exc
         if not rows:
             raise ValueError("empty eastmoney sector flow")
-        return [
-            {
+        result: list[dict[str, Any]] = []
+        for row in rows:
+            provider_timestamp = _safe_int(row.get("f124"))
+            provider_updated_at = None
+            provider_trade_date = None
+            if provider_timestamp > 0:
+                try:
+                    provider_dt = datetime.fromtimestamp(
+                        provider_timestamp,
+                        ZoneInfo("Asia/Shanghai"),
+                    )
+                    provider_updated_at = provider_dt.isoformat()
+                    provider_trade_date = provider_dt.date().isoformat()
+                except (OverflowError, OSError, ValueError):
+                    provider_timestamp = 0
+            result.append({
                 "name": str(row.get("f14", "未知板块")),
                 "board_code": str(row.get("f12") or ""),
                 "provider": "eastmoney",
+                "provider_timestamp": provider_timestamp or None,
+                "provider_updated_at": provider_updated_at,
+                "provider_trade_date": provider_trade_date,
+                "latest": _safe_float(row.get("f2")),
+                "high_price": _safe_float(row.get("f15")),
+                "open_price": _safe_float(row.get("f17")),
+                "prev_close": _safe_float(row.get("f18")),
                 "change_pct": _safe_float(row.get("f3")),
                 "net_inflow": round(_safe_float(row.get(net_key)) / 1e8, 2),
                 "main_inflow": round(_safe_float(row.get(main_key)) / 1e8, 2),
@@ -1824,9 +2145,8 @@ class MarketDataProvider:
                 "limit_up_count": _safe_int(row.get("f100")),
                 "stock_count": _safe_int(row.get("f104")),
                 "avg_change": _safe_float(row.get("f102")),
-            }
-            for row in rows
-        ]
+            })
+        return result
 
     def _fetch_eastmoney_board_intraday_flow(self, board_code: str) -> list[SectorFlowPoint]:
         if not board_code:
@@ -1939,7 +2259,7 @@ class MarketDataProvider:
         if date:
             target_date = date
         elif _is_trading_day():
-            target_date = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
+            target_date = (_shanghai_now_naive() - timedelta(days=1)).strftime("%Y-%m-%d")
         else:
             target_date = _last_trading_day()
         related_stocks = related_stocks or {}
@@ -1994,6 +2314,505 @@ class MarketDataProvider:
         _set_response_cache(cache_key, result)
         return result
 
+    def limit_up_atmosphere(
+        self,
+        trade_date: str | None = None,
+        force_refresh: bool = False,
+    ) -> LimitUpAtmosphereOut:
+        """Measure board-trading breadth and next-session payoff with real dated pools.
+
+        A missing historical pool or quote sample is never filled with a synthetic
+        value.  In that case the decision is capped at ``CAUTION`` (or
+        ``DATA_GAP`` when even the current limit-up pool is unavailable).
+        """
+        ladder = self.limit_up_ladder(
+            trade_date=trade_date,
+            force_refresh=force_refresh,
+        )
+        # The ladder resolves the default date through the real-pool validity
+        # gate.  Reuse that exact date for every atmosphere component so a
+        # holiday/current empty shell cannot mix with the prior session.
+        target_date = ladder.trade_date
+        cache_key = f"limit-up-atmosphere|{target_date}"
+        if not force_refresh:
+            cached = _get_response_cache(cache_key)
+            if cached is not None:
+                return cached
+        current_stocks = [stock for group in ladder.groups for stock in group.stocks]
+        metrics = LimitUpAtmosphereMetrics(
+            limit_up_count=len(current_stocks),
+            highest_board=max((stock.consecutive_limit_days for stock in current_stocks), default=0),
+        )
+        sources = [ladder.source]
+        missing: list[str] = []
+        notes = list(ladder.notes)
+        broken_stocks: list[LimitUpStockOut] | None = None
+
+        if not _is_valid_limit_up_ladder(ladder):
+            result = LimitUpAtmosphereOut(
+                source=ladder.source,
+                trade_date=target_date,
+                updated_at=datetime.utcnow(),
+                decision="DATA_GAP",
+                decision_label="数据不足，禁止打板",
+                score=0,
+                data_quality="缺失",
+                metrics=metrics,
+                evidence=[],
+                risks=["当日真实涨停池不可用，无法判断封板率、晋级率和次日溢价。"],
+                missing_data=["当日真实涨停池"],
+                notes=notes + ["不使用模拟涨停家数，不生成打板许可。"],
+            )
+            _set_response_cache(cache_key, result)
+            return result
+
+        try:
+            broken_rows = self._fetch_broken_limit_pool_raw(target_date.replace("-", ""))
+            broken_stocks = [self._build_limit_up_stock(row) for row in broken_rows]
+            metrics.broken_count = len(broken_rows)
+            attempted = metrics.limit_up_count + metrics.broken_count
+            if attempted > 0:
+                metrics.seal_rate = round(metrics.limit_up_count / attempted * 100, 1)
+                metrics.break_rate = round(metrics.broken_count / attempted * 100, 1)
+            sources.append("eastmoney-broken-limit-pool")
+        except Exception as exc:
+            missing.append("炸板池")
+            notes.append(f"东方财富炸板池不可用：{exc.__class__.__name__}。")
+
+        try:
+            metrics.limit_down_count = self._fetch_dated_pool_total(
+                "getTopicDTPool", target_date.replace("-", "")
+            )
+            sources.append("eastmoney-limit-down-pool")
+        except Exception as exc:
+            missing.append("跌停池")
+            notes.append(f"东方财富跌停池不可用：{exc.__class__.__name__}。")
+
+        top_cluster = max(ladder.clusters, key=lambda row: row.count, default=None)
+        if top_cluster is not None:
+            metrics.top_theme = top_cluster.name
+            metrics.top_theme_count = top_cluster.count
+            metrics.theme_concentration_pct = round(
+                top_cluster.count / max(1, metrics.limit_up_count) * 100, 1
+            )
+        else:
+            missing.append("题材聚类")
+
+        previous_date: str | None = None
+        previous_stocks: list[LimitUpStockOut] = []
+        try:
+            previous_date, previous_rows = self._find_previous_limit_up_pool(target_date)
+            previous_stocks = [self._build_limit_up_stock(row) for row in previous_rows]
+            metrics.previous_limit_up_count = len(previous_stocks)
+            current_by_code = {stock.code: stock for stock in current_stocks if stock.code}
+            promoted = sum(
+                1
+                for stock in previous_stocks
+                if stock.code in current_by_code
+                and current_by_code[stock.code].consecutive_limit_days > stock.consecutive_limit_days
+            )
+            metrics.promoted_count = promoted
+            metrics.promotion_rate = round(
+                promoted / max(1, len(previous_stocks)) * 100, 1
+            )
+            sources.append("eastmoney-previous-limit-up-pool")
+        except Exception as exc:
+            missing.append("前一交易日涨停池/晋级率")
+            notes.append(f"前一交易日涨停池不可用：{exc.__class__.__name__}。")
+
+        if previous_stocks:
+            try:
+                quotes, quote_source = self._fetch_current_stock_quotes(
+                    [stock.code for stock in previous_stocks if stock.code]
+                )
+                target_compact = target_date.replace("-", "")
+                open_premiums: list[float] = []
+                current_premiums: list[float] = []
+                for stock in previous_stocks:
+                    quote = quotes.get(stock.code)
+                    if not quote or quote.get("trade_date") != target_compact:
+                        continue
+                    prev_close = _safe_float(quote.get("prev_close"))
+                    open_price = _safe_float(quote.get("open"))
+                    change_pct = quote.get("change_pct")
+                    if prev_close > 0 and open_price > 0:
+                        open_premiums.append((open_price - prev_close) / prev_close * 100)
+                    if change_pct is not None:
+                        current_premiums.append(float(change_pct))
+                metrics.next_day_open_sample_count = len(open_premiums)
+                metrics.next_day_premium_sample_count = len(current_premiums)
+                if open_premiums:
+                    metrics.next_day_average_open_pct = round(
+                        sum(open_premiums) / len(open_premiums), 2
+                    )
+                    metrics.next_day_low_open_ratio = round(
+                        sum(value < 0 for value in open_premiums) / len(open_premiums) * 100,
+                        1,
+                    )
+                else:
+                    missing.append("昨日涨停次日开盘样本")
+                if current_premiums:
+                    metrics.next_day_average_premium_pct = round(
+                        sum(current_premiums) / len(current_premiums), 2
+                    )
+                else:
+                    missing.append("昨日涨停次日溢价样本")
+                sources.append(quote_source)
+            except Exception as exc:
+                missing.append("昨日涨停次日开盘/溢价行情")
+                notes.append(f"昨日涨停次日行情不可用：{exc.__class__.__name__}。")
+
+        score, decision, decision_label, evidence, risks = self._score_limit_up_atmosphere(
+            metrics, missing
+        )
+        theme_ladders = self._build_limit_up_theme_ladders(
+            ladder=ladder,
+            stocks=current_stocks,
+            broken_stocks=broken_stocks,
+            atmosphere_decision=decision,
+        )
+        data_quality = "完整" if not missing else "部分"
+        result = LimitUpAtmosphereOut(
+            source="+".join(dict.fromkeys(sources)),
+            trade_date=target_date,
+            previous_trade_date=previous_date,
+            updated_at=datetime.utcnow(),
+            decision=decision,
+            decision_label=decision_label,
+            score=score,
+            data_quality=data_quality,
+            metrics=metrics,
+            evidence=evidence,
+            risks=risks,
+            missing_data=list(dict.fromkeys(missing)),
+            theme_ladders=theme_ladders,
+            notes=notes,
+        )
+        _set_response_cache(cache_key, result)
+        return result
+
+    def _score_limit_up_atmosphere(
+        self,
+        metrics: LimitUpAtmosphereMetrics,
+        missing: list[str],
+    ) -> tuple[int, str, str, list[str], list[str]]:
+        score = 0
+        evidence: list[str] = []
+        risks: list[str] = []
+
+        if metrics.seal_rate is not None:
+            evidence.append(
+                f"封板率 {metrics.seal_rate:.1f}%（涨停{metrics.limit_up_count}只、炸板{metrics.broken_count or 0}只）。"
+            )
+            if metrics.seal_rate >= 75:
+                score += 2
+            elif metrics.seal_rate >= 60:
+                score += 1
+            elif metrics.seal_rate < 45:
+                score -= 2
+                risks.append("炸板占比过高，追板后当日无法卖出的风险显著。")
+            else:
+                score -= 1
+
+        if metrics.limit_down_count is not None:
+            evidence.append(
+                f"涨停/跌停为 {metrics.limit_up_count}/{metrics.limit_down_count}。"
+            )
+            if metrics.limit_down_count >= max(10, metrics.limit_up_count):
+                score -= 2
+                risks.append("跌停家数不低于涨停家数，亏钱效应压制打板容错。")
+            elif metrics.limit_up_count >= max(10, metrics.limit_down_count * 2):
+                score += 1
+
+        evidence.append(f"最高连板 {metrics.highest_board} 板。")
+        if metrics.highest_board >= 4:
+            score += 1
+        elif metrics.highest_board <= 2:
+            score -= 1
+            risks.append("连板高度未打开，首板次日晋级需要更严格确认。")
+
+        if metrics.promotion_rate is not None:
+            evidence.append(
+                f"昨日涨停晋级 {metrics.promoted_count or 0}/{metrics.previous_limit_up_count or 0}，晋级率 {metrics.promotion_rate:.1f}%。"
+            )
+            if metrics.promotion_rate >= 30:
+                score += 2
+            elif metrics.promotion_rate >= 18:
+                score += 1
+            elif metrics.promotion_rate < 10:
+                score -= 2
+                risks.append("昨日涨停晋级率低，接力资金兑现意愿偏强。")
+            else:
+                score -= 1
+
+        if metrics.next_day_average_open_pct is not None:
+            evidence.append(
+                f"昨日涨停次日平均开盘 {metrics.next_day_average_open_pct:+.2f}%，低开比例 {metrics.next_day_low_open_ratio or 0:.1f}%（{metrics.next_day_open_sample_count}只）。"
+            )
+            if (
+                metrics.next_day_average_open_pct >= 1
+                and metrics.next_day_low_open_ratio is not None
+                and metrics.next_day_low_open_ratio <= 35
+            ):
+                score += 2
+            elif (
+                metrics.next_day_average_open_pct < 0
+                or (metrics.next_day_low_open_ratio or 0) >= 60
+            ):
+                score -= 2
+                risks.append("昨日涨停多数低开或平均开盘无溢价，次日被套风险偏高。")
+
+        if metrics.next_day_average_premium_pct is not None:
+            evidence.append(
+                f"昨日涨停次日当前/收盘平均溢价 {metrics.next_day_average_premium_pct:+.2f}%（{metrics.next_day_premium_sample_count}只）。"
+            )
+            if metrics.next_day_average_premium_pct >= 2:
+                score += 1
+            elif metrics.next_day_average_premium_pct < 0:
+                score -= 1
+                risks.append("昨日涨停次日平均溢价为负，板上接力的正反馈不足。")
+
+        if metrics.theme_concentration_pct is not None:
+            evidence.append(
+                f"最大题材“{metrics.top_theme}”占涨停池 {metrics.theme_concentration_pct:.1f}%（{metrics.top_theme_count}只）。"
+            )
+            if 15 <= metrics.theme_concentration_pct <= 45:
+                score += 1
+            elif metrics.theme_concentration_pct > 55:
+                risks.append("涨停过度集中于单一题材，后排跟风股分化风险较高。")
+            elif metrics.theme_concentration_pct < 8:
+                score -= 1
+
+        score = max(-10, min(10, score))
+        historical_complete = (
+            metrics.promotion_rate is not None
+            and metrics.next_day_average_open_pct is not None
+            and metrics.seal_rate is not None
+            and metrics.limit_down_count is not None
+        )
+        if score <= -3:
+            return score, "FORBID", "禁止打板", evidence, risks
+        if score >= 4 and historical_complete and not missing:
+            return score, "ALLOW", "允许评估打板（仅限前排确认）", evidence, risks
+        if missing:
+            risks.append("关键数据存在缺口，结论已降级；缺失项恢复前不开放无条件打板。")
+        return score, "CAUTION", "谨慎打板", evidence, risks
+
+    def _build_limit_up_theme_ladders(
+        self,
+        *,
+        ladder: LimitUpLadderOut,
+        stocks: list[LimitUpStockOut],
+        broken_stocks: list[LimitUpStockOut] | None,
+        atmosphere_decision: str,
+    ) -> list[LimitUpThemeLadderOut]:
+        """Build rule-based theme ladders and identity competition from real pools.
+
+        These are observable role labels, not claims about a participant's intent.
+        A theme must already be present in the real limit-up clustering; this helper
+        never invents a theme or fills missing failed-limit rows.
+        """
+        global_highest = max((stock.consecutive_limit_days for stock in stocks), default=0)
+        results: list[LimitUpThemeLadderOut] = []
+        for cluster in ladder.clusters:
+            members = list({
+                stock.code or stock.name: stock
+                for stock in stocks
+                if cluster.name == stock.industry or cluster.name in stock.concepts
+            }.values())
+            if not members:
+                continue
+            members.sort(
+                key=lambda stock: (
+                    stock.consecutive_limit_days,
+                    self._limit_up_role_score(stock),
+                    stock.amount,
+                ),
+                reverse=True,
+            )
+            first_count = sum(stock.consecutive_limit_days == 1 for stock in members)
+            second_count = sum(stock.consecutive_limit_days == 2 for stock in members)
+            high_count = sum(stock.consecutive_limit_days >= 3 for stock in members)
+            highest = max(stock.consecutive_limit_days for stock in members)
+            layer_count = len({stock.consecutive_limit_days for stock in members})
+
+            theme_broken: list[LimitUpStockOut] | None = None
+            if broken_stocks is not None:
+                theme_broken = [
+                    stock for stock in broken_stocks
+                    if cluster.name == stock.industry or cluster.name in stock.concepts
+                ]
+            broken_count = None if theme_broken is None else len(theme_broken)
+            attempted = len(members) + (broken_count or 0)
+            seal_rate = (
+                round(len(members) / attempted * 100, 1)
+                if broken_count is not None and attempted > 0
+                else None
+            )
+
+            completeness_score = min(25, len(members) * 5)
+            completeness_score += min(15, first_count * 5)
+            completeness_score += 20 if second_count else 0
+            completeness_score += 25 if high_count else 0
+            completeness_score += min(15, layer_count * 5)
+            completeness_score = max(0, min(100, completeness_score))
+            if first_count >= 2 and second_count >= 1 and high_count >= 1:
+                completeness_label = "高标、二板、首板梯队完整"
+            elif layer_count >= 3:
+                completeness_label = "多层梯队已成形"
+            elif second_count and first_count:
+                completeness_label = "中低位梯队有承接"
+            elif high_count and not (first_count or second_count):
+                completeness_label = "高标孤军，低位助攻缺失"
+            elif first_count == len(members):
+                completeness_label = "首板扩散，尚未形成晋级梯队"
+            else:
+                completeness_label = "梯队存在断层"
+
+            if atmosphere_decision in {"FORBID", "DATA_GAP"}:
+                action = "禁止打板"
+            elif atmosphere_decision == "ALLOW" and completeness_score >= 70:
+                action = "允许观察前排，竞价与封单确认后才可执行"
+            elif completeness_score >= 60:
+                action = "谨慎接力，只看前排确认"
+            else:
+                action = "谨慎观望，不追后排跟风"
+
+            if atmosphere_decision in {"FORBID", "DATA_GAP"}:
+                continuation = "全市场接力闸门未通过，题材即使有高度也按分化/退潮预期处理。"
+            elif completeness_score >= 75 and first_count >= 2 and second_count and high_count:
+                continuation = "梯队较完整，次日有延续基础；仍需最高标、二板与首板扩散同时正反馈。"
+            elif high_count and first_count == 0:
+                continuation = "高标缺少低位助攻，次日更偏向分歧，不能把高标强势外推给后排。"
+            elif first_count == len(members):
+                continuation = "只有首板扩散，次日先验证一进二，尚不能定义为持续主线。"
+            else:
+                continuation = "梯队有局部承接但存在断层，次日先看前排卡位结果和后排是否补齐。"
+
+            invalidation = [
+                f"题材涨停家数由 {len(members)} 只明显收缩，或炸板率快速上升。",
+                f"最高 {highest} 板竞价/开盘弱于同梯队，且开盘后不能回封。",
+            ]
+            if second_count:
+                invalidation.append("二板晋级失败且首板没有新增助攻，梯队承接证伪。")
+            else:
+                invalidation.append("首板未出现一进二，梯队断层继续扩大。")
+
+            roles = self._build_limit_up_identity_roles(
+                members,
+                theme_highest=highest,
+                global_highest=global_highest,
+            )
+            results.append(LimitUpThemeLadderOut(
+                name=cluster.name,
+                limit_up_count=len(members),
+                broken_count=broken_count,
+                seal_rate=seal_rate,
+                first_board_count=first_count,
+                second_board_count=second_count,
+                high_board_count=high_count,
+                highest_level=highest,
+                layer_count=layer_count,
+                completeness_score=completeness_score,
+                completeness_label=completeness_label,
+                action=action,
+                continuation_expectation=continuation,
+                invalidation_conditions=invalidation,
+                identity_roles=roles,
+            ))
+        return sorted(
+            results,
+            key=lambda item: (
+                item.completeness_score,
+                item.highest_level,
+                item.limit_up_count,
+            ),
+            reverse=True,
+        )[:12]
+
+    def _build_limit_up_identity_roles(
+        self,
+        stocks: list[LimitUpStockOut],
+        *,
+        theme_highest: int,
+        global_highest: int,
+    ) -> list[LimitUpIdentityRoleOut]:
+        ranked = sorted(
+            stocks,
+            key=lambda stock: (self._limit_up_role_score(stock), stock.amount),
+            reverse=True,
+        )
+        if not ranked:
+            return []
+        capacity = max(ranked, key=lambda stock: stock.amount)
+        top_score = self._limit_up_role_score(ranked[0])
+        same_height = [stock for stock in ranked if stock.consecutive_limit_days == theme_highest]
+        capacity_enabled = len(ranked) >= 3 and capacity.amount > 0
+        roles: list[LimitUpIdentityRoleOut] = []
+        for index, stock in enumerate(ranked):
+            score = self._limit_up_role_score(stock)
+            tags: list[str] = []
+            if stock.consecutive_limit_days == global_highest and global_highest >= 2:
+                tags.append("全场最高标")
+            elif stock.consecutive_limit_days == theme_highest and theme_highest >= 2:
+                tags.append("题材最高标")
+            if index == 0:
+                tags.append("龙头候选")
+            if (
+                len(same_height) >= 2
+                and stock in same_height
+                and top_score - score <= 12
+            ):
+                tags.append("同身位卡位竞争")
+            if capacity_enabled and stock.code == capacity.code:
+                tags.append("容量中军")
+            if stock.consecutive_limit_days == 1 and theme_highest >= 2:
+                tags.append("补涨候选")
+            if not tags:
+                tags.append("助攻" if stock.first_limit_time and stock.break_count == 0 else "跟风")
+            facts = [
+                f"{stock.consecutive_limit_days}板",
+                f"成交{stock.amount:.2f}亿",
+                f"封单{stock.sealed_amount:.2f}亿",
+                f"炸板{stock.break_count}次",
+            ]
+            if stock.first_limit_time:
+                facts.append(f"{stock.first_limit_time}首封")
+            roles.append(LimitUpIdentityRoleOut(
+                code=stock.code,
+                name=stock.name,
+                level=stock.consecutive_limit_days,
+                roles=list(dict.fromkeys(tags)),
+                role_score=score,
+                amount=stock.amount,
+                sealed_amount=stock.sealed_amount,
+                break_count=stock.break_count,
+                reason="、".join(facts) + "；角色由梯队身位、封单/成交、首封时间和炸板次数规则计算。",
+            ))
+        return roles[:8]
+
+    @staticmethod
+    def _limit_up_role_score(stock: LimitUpStockOut) -> int:
+        score = min(55, max(1, stock.consecutive_limit_days) * 14)
+        if stock.amount > 0 and stock.sealed_amount >= 0:
+            score += min(20, int(stock.sealed_amount / stock.amount * 100))
+        if stock.first_limit_time:
+            match = re.match(r"(\d{2}):(\d{2})", stock.first_limit_time)
+            if match:
+                minutes = int(match.group(1)) * 60 + int(match.group(2))
+                if minutes <= 570:
+                    score += 15
+                elif minutes <= 630:
+                    score += 10
+                elif minutes <= 810:
+                    score += 5
+        if stock.amount >= 20:
+            score += 8
+        elif stock.amount >= 8:
+            score += 4
+        score -= min(24, stock.break_count * 6)
+        return max(0, min(100, score))
+
     @staticmethod
     def _has_real_dark_trade_values(rows: list[dict[str, Any]]) -> bool:
         """Reject the pre-market placeholder board rows returned with all amounts zero."""
@@ -2024,6 +2843,8 @@ class MarketDataProvider:
                 "published_at": str(row.get("display_time") or row.get("notice_date") or ""),
                 "url": f"https://data.eastmoney.com/notices/detail/{primary}/{art_code}.html" if primary and art_code else None,
                 "related_stocks": stock_codes,
+                "verification_level": "FORMAL_ANNOUNCEMENT",
+                "attribution": "上市公司公告原文",
             })
         return items
 
@@ -2073,6 +2894,8 @@ class MarketDataProvider:
                 "published_at": str(row.get("showTime") or ""),
                 "url": url,
                 "related_stocks": list(dict.fromkeys(related_stocks)),
+                "verification_level": "MEDIA_ATTRIBUTION",
+                "attribution": url or "东方财富快讯原文",
             })
         return items
 
@@ -2101,6 +2924,8 @@ class MarketDataProvider:
                 "published_at": target_date,
                 "url": url,
                 "related_stocks": [],
+                "verification_level": "MEDIA_ATTRIBUTION",
+                "attribution": url or "央视新闻联播原文",
             })
         if not items:
             raise ValueError("empty cctv news")
@@ -2197,5 +3022,7 @@ class MarketDataProvider:
             url=str(item.get("url")) if item.get("url") else None,
             sentiment=sentiment, sentiment_reason=sentiment_reason,
             related_holdings=related_holding_names[:6],
+            verification_level=str(item.get("verification_level") or "RUMOR"),
+            attribution=str(item.get("attribution") or ""),
         )
 

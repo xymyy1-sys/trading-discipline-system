@@ -14,6 +14,7 @@ from typing import Any
 import requests
 from sqlalchemy.orm import Session
 
+from app.core.trading_clock import shanghai_from_timestamp, shanghai_now_naive
 from app.models.trading import MarketRegimeSnapshot
 from app.schemas.trading import (
     MarketIndexStateOut,
@@ -114,7 +115,7 @@ def summarize_all_a_rows(
     now: datetime | None = None,
 ) -> tuple[dict[str, Any], list[str]]:
     """Aggregate real full-market quote rows without filling absent values."""
-    now = now or datetime.now()
+    now = shanghai_now_naive(now)
     active: list[tuple[dict[str, Any], float]] = []
     source_timestamps: list[int] = []
     for row in rows:
@@ -165,7 +166,7 @@ def summarize_all_a_rows(
     if main_net_yi is None:
         notes.append(f"主力净流字段覆盖{len(main_flow_values)}/{len(active)}，不足90%，不输出全市场主力净流。")
 
-    source_time = datetime.fromtimestamp(max(source_timestamps)) if source_timestamps else None
+    source_time = shanghai_from_timestamp(max(source_timestamps)) if source_timestamps else None
     # Before the next session opens, quote endpoints still expose the previous
     # completed trading day. Treat that dated snapshot as a full session rather
     # than suppressing the volume ratio merely because wall-clock time is early.
@@ -947,7 +948,7 @@ def classify_market_regime(
 
 
 def collect_market_regime_inputs(force_refresh: bool = False, now: datetime | None = None) -> MarketRegimeCollection:
-    now = now or datetime.now()
+    now = shanghai_now_naive(now)
     notes: list[str] = []
     sources: list[str] = []
     all_a: dict[str, Any] = {}
@@ -1075,7 +1076,7 @@ def get_market_regime(db: Session, force_refresh: bool = False) -> MarketRegimeO
             cached = _REGIME_CACHE
         if cached and cached[0] > now_clock:
             captured = cached[1].captured_at
-            freshness = max(0, int((datetime.now() - captured).total_seconds()))
+            freshness = max(0, int((shanghai_now_naive() - captured).total_seconds()))
             return cached[1].model_copy(update={"freshness_seconds": freshness})
 
     collection = collect_market_regime_inputs(force_refresh=force_refresh)

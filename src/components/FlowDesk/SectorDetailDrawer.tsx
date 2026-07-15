@@ -3,6 +3,7 @@ import { X } from 'lucide-react'
 import type { SectorFlowItem, SectorDetail } from '../../types'
 import { API_BASE } from '../../api'
 import { cachedJson } from '../../apiCache'
+import FlowKineticsEvidence from '../FlowKineticsEvidence'
 
 function MiniStat({ label, value, tone }: { label: string; value: string; tone?: 'up' | 'down' }) {
   return (
@@ -72,6 +73,8 @@ export default function SectorDetailDrawer({
           <MiniStat label="板块指数" value={item.sector_price?.toFixed(2) ?? '--'} tone={item.sector_vwap_reliable ? (item.sector_below_vwap ? 'down' : 'up') : undefined} />
           <MiniStat label="板块分时均价" value={item.sector_vwap?.toFixed(2) ?? '--'} />
         </div>
+
+        <FlowKineticsEvidence fields={item} label="板块资金拐点" />
 
         <p className="plain-text">
           {item.sector_vwap_reliable

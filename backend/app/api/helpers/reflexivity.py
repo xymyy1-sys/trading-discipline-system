@@ -1,13 +1,18 @@
 from __future__ import annotations
 
+import json
 from datetime import timedelta
-from typing import Any
+from typing import Any, Mapping
 
 from sqlalchemy.orm import Session
 
 from app.models.trading import MarketRegimeSnapshot
 from app.schemas.trading import MarketRegimeOut, StockDecisionCardOut
-from app.services.reflexivity import analyze_market_reflexivity, analyze_stock_reflexivity
+from app.services.reflexivity import (
+    analyze_consensus_high_open_fade,
+    analyze_market_reflexivity,
+    analyze_stock_reflexivity,
+)
 
 
 _NON_ACTIONABLE_STOP_SOURCES = {"", "cost_reference", "fallback_candidate"}
@@ -33,6 +38,218 @@ def _core_indices(regime: MarketRegimeOut) -> list[Any]:
         if item.code in _CORE_INDEX_IDENTITIES or item.name in _CORE_INDEX_IDENTITIES
     ]
     return core or valid
+
+
+def _record_value(item: Any, key: str, default: Any = None) -> Any:
+    if isinstance(item, Mapping):
+        return item.get(key, default)
+    return getattr(item, key, default)
+
+
+def _valid_number(value: Any) -> float | None:
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number
+
+
+def _indices_from_regime(regime: MarketRegimeOut | MarketRegimeSnapshot | None) -> list[Any]:
+    if regime is None:
+        return []
+    indices = getattr(regime, "indices", None)
+    if isinstance(indices, list):
+        return indices
+    raw = getattr(regime, "indices_json", "[]") or "[]"
+    try:
+        parsed = json.loads(raw)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return []
+    return parsed if isinstance(parsed, list) else []
+
+
+def _core_index_records(records: list[Any]) -> list[Any]:
+    valid = [
+        item for item in records
+        if (_valid_number(_record_value(item, "current")) or 0) > 0
+    ]
+    core = [
+        item for item in valid
+        if str(_record_value(item, "code") or "") in _CORE_INDEX_IDENTITIES
+        or str(_record_value(item, "name") or "") in _CORE_INDEX_IDENTITIES
+    ]
+    return core or valid
+
+
+def _real_index_record(item: Any, *, require_realtime: bool = False) -> bool:
+    quality = str(_record_value(item, "data_quality") or "").strip().lower()
+    source = str(_record_value(item, "source") or "").strip().lower()
+    accepted = {"realtime"} if require_realtime else {"realtime", "partial"}
+    return (
+        quality in accepted
+        and "simulat" not in source
+        and "manual" not in source
+        and "mock" not in source
+    )
+
+
+def _latest_previous_trade_snapshot(
+    db: Session,
+    trade_date: str,
+) -> MarketRegimeSnapshot | None:
+    return (
+        db.query(MarketRegimeSnapshot)
+        .filter(MarketRegimeSnapshot.trade_date < trade_date)
+        .order_by(
+            MarketRegimeSnapshot.trade_date.desc(),
+            MarketRegimeSnapshot.captured_at.desc(),
+            MarketRegimeSnapshot.id.desc(),
+        )
+        .first()
+    )
+
+
+def _previous_reversal_state(
+    db: Session,
+    trade_date: str,
+) -> tuple[bool | None, dict[str, Any]]:
+    previous = _latest_previous_trade_snapshot(db, trade_date)
+    if previous is None:
+        return None, {"previous_trade_date": None, "valid_index_count": 0}
+    captured_at = previous.captured_at
+    close_ready = bool(
+        captured_at is not None
+        and captured_at.hour * 60 + captured_at.minute >= 14 * 60 + 55
+    )
+    if str(previous.data_quality or "").lower() in {"", "missing"} or not close_ready:
+        return None, {
+            "previous_trade_date": previous.trade_date,
+            "snapshot_at": captured_at.isoformat() if captured_at is not None else None,
+            "session_close_ready": close_ready,
+            "valid_index_count": 0,
+        }
+    records = _core_index_records(_indices_from_regime(previous))
+    complete: list[dict[str, float]] = []
+    for item in records:
+        if not _real_index_record(item):
+            continue
+        current = _valid_number(_record_value(item, "current"))
+        low = _valid_number(_record_value(item, "low_price"))
+        previous_close = _valid_number(_record_value(item, "prev_close"))
+        vwap = _valid_number(_record_value(item, "intraday_vwap"))
+        if not current or not low or not previous_close or not vwap:
+            continue
+        complete.append({
+            "low_change_pct": (low - previous_close) / previous_close * 100,
+            "low_rebound_pct": (current - low) / low * 100,
+            "vwap_deviation_pct": (current - vwap) / vwap * 100,
+        })
+    details = {
+        "previous_trade_date": previous.trade_date,
+        "snapshot_at": captured_at.isoformat() if captured_at is not None else None,
+        "session_close_ready": close_ready,
+        "valid_index_count": len(complete),
+        "deep_v_index_count": 0,
+    }
+    if len(complete) < 2:
+        return None, details
+    confirmed = sum(
+        item["low_change_pct"] <= -1.0
+        and item["low_rebound_pct"] >= 1.0
+        and item["vwap_deviation_pct"] >= 0
+        for item in complete
+    )
+    details["deep_v_index_count"] = confirmed
+    return confirmed >= 2, details
+
+
+def build_consensus_high_open_fade(
+    db: Session,
+    regime: MarketRegimeOut | MarketRegimeSnapshot | None,
+    sector_opening: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Aggregate only traceable market evidence for the crowded-open rule."""
+
+    trade_date = str(getattr(regime, "trade_date", "") or "")
+    records = _core_index_records(_indices_from_regime(regime))
+    previous_reversal, previous_details = (
+        _previous_reversal_state(db, trade_date)
+        if trade_date
+        else (None, {"previous_trade_date": None, "valid_index_count": 0})
+    )
+
+    opening_values: list[float] = []
+    drawdowns: list[float] = []
+    vwap_deviations: list[float] = []
+    for item in records:
+        current = _valid_number(_record_value(item, "current"))
+        open_price = _valid_number(_record_value(item, "open_price"))
+        previous_close = _valid_number(_record_value(item, "prev_close"))
+        high = _valid_number(_record_value(item, "high_price"))
+        if _real_index_record(item) and open_price and previous_close:
+            opening_values.append((open_price - previous_close) / previous_close * 100)
+        if _real_index_record(item) and current and high and high > 0:
+            drawdowns.append((high - current) / high * 100)
+        vwap = _valid_number(_record_value(item, "intraday_vwap"))
+        if _real_index_record(item, require_realtime=True) and current and vwap and vwap > 0:
+            vwap_deviations.append((current - vwap) / vwap * 100)
+
+    metrics: dict[str, Any] = {
+        "previous_reversal_confirmed": previous_reversal,
+        "opening_data_real": True if len(opening_values) >= 2 else None,
+        "actual_open_pct": _average(opening_values) if len(opening_values) >= 2 else None,
+        "post_open_drawdown_pct": _average(drawdowns) if len(drawdowns) >= 2 else None,
+        "vwap_reliable": True if len(vwap_deviations) >= 2 else None,
+        "vwap_deviation_pct": _average(vwap_deviations) if len(vwap_deviations) >= 2 else None,
+    }
+
+    opening = dict(sector_opening or {})
+    opening_trade_date = str(opening.get("trade_date") or "")
+    opening_quality = str(opening.get("data_quality") or "").lower()
+    opening_sample = int(_valid_number(opening.get("sample_count")) or 0)
+    if (
+        trade_date
+        and opening_trade_date == trade_date
+        and opening_quality in {"ok", "realtime"}
+        and opening_sample >= 10
+    ):
+        metrics.update({
+            # This provider sample is the whole industry-board universe, not a
+            # small constituent basket.  Feed the breadth ratio only so the
+            # generic rule's "three components" shortcut cannot turn 3/80
+            # high opens into a false consensus signal.
+            "sector_open_breadth_ratio": opening.get("sector_open_breadth_ratio"),
+        })
+
+    result = analyze_consensus_high_open_fade(metrics)
+    captured_at = getattr(regime, "captured_at", None)
+    result.update({
+        "as_of": captured_at,
+        "trade_date": trade_date,
+        "source": [
+            source for source in (
+                str(getattr(regime, "source", "") or ""),
+                str(opening.get("source") or ""),
+            ) if source
+        ],
+        "input_evidence": {
+            "previous_reversal": previous_details,
+            "current_index_count": len(records),
+            "real_open_index_count": len(opening_values),
+            "real_drawdown_index_count": len(drawdowns),
+            "reliable_vwap_index_count": len(vwap_deviations),
+            "sector_opening": {
+                "trade_date": opening_trade_date or None,
+                "data_quality": opening_quality or "missing",
+                "sample_count": opening_sample,
+                "high_open_count": opening.get("sector_high_open_count"),
+                "breadth_ratio": opening.get("sector_open_breadth_ratio"),
+            },
+        },
+    })
+    return result
 
 
 def _average(values: list[float | None]) -> float | None:
@@ -122,12 +339,18 @@ def market_reflexivity_metrics(
 def build_market_reflexivity(
     db: Session,
     regime: MarketRegimeOut,
+    sector_opening: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     result = analyze_market_reflexivity(market_reflexivity_metrics(db, regime))
     result["as_of"] = regime.captured_at
     result["data_quality"] = regime.data_quality
     result["market_regime_code"] = regime.regime_code
     result["market_regime_name"] = regime.regime_name
+    result["consensus_high_open_fade"] = build_consensus_high_open_fade(
+        db,
+        regime,
+        sector_opening,
+    )
     return result
 
 
