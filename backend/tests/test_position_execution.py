@@ -1,7 +1,12 @@
 from types import SimpleNamespace
 from datetime import datetime, timedelta, timezone
 
-from app.api.helpers.execution import _confirmation_deadline, _confirmation_policy, build_position_execution_state
+from app.api.helpers.execution import (
+    _confirmation_deadline,
+    _confirmation_policy,
+    build_position_execution_state,
+    global_market_execution_gate,
+)
 from app.models.trading import (
     ExpectationSnapshot,
     ActionRecommendation,
@@ -1727,6 +1732,111 @@ def test_contrarian_add_is_only_eligible_after_all_four_gates(db_session):
     assert state.contrarian_add_signal.status == "ELIGIBLE"
     assert any("风险收益比" in item for item in state.contrarian_add_signal.evidence)
     assert any(event.event_type == "CONTRARIAN_ADD_EVALUATION" for event in state.events)
+
+
+def _global_snapshot(now: datetime, change_pct: float) -> dict:
+    as_of = (now - timedelta(hours=12)).isoformat()
+    return {
+        "data_quality": "ok",
+        "us_indices": [
+            {"symbol": "SPX", "name": "标普500", "status": "ok", "change_pct": change_pct, "as_of": as_of, "source": "eastmoney"},
+            {"symbol": "NDX", "name": "纳斯达克100", "status": "ok", "change_pct": change_pct, "as_of": as_of, "source": "eastmoney"},
+            {"symbol": "DJIA", "name": "道琼斯", "status": "ok", "change_pct": change_pct, "as_of": as_of, "source": "eastmoney"},
+        ],
+        "korea_indices": [],
+        "korea_equities": [],
+        "us_sector_rank": [],
+    }
+
+
+def test_fresh_broad_global_weakness_freezes_only_new_exposure():
+    now = datetime.now()
+    gate = global_market_execution_gate(_global_snapshot(now, -2.0), now=now)
+
+    assert gate["score"] == -2
+    assert gate["freeze_expansion"] is True
+    assert any("冻结新增风险" in item for item in gate["evidence"])
+
+
+def test_stale_global_quotes_are_ignored_instead_of_becoming_a_risk_score():
+    now = datetime.now()
+    snapshot = _global_snapshot(now, -3.0)
+    stale = (now - timedelta(days=6)).isoformat()
+    for item in snapshot["us_indices"]:
+        item["as_of"] = stale
+
+    gate = global_market_execution_gate(snapshot, now=now)
+
+    assert gate["score"] == 0
+    assert gate["freeze_expansion"] is False
+    assert gate["valid_quote_count"] == 0
+
+
+def test_missing_global_change_is_not_coerced_to_a_flat_quote():
+    now = datetime.now()
+    as_of = (now - timedelta(hours=12)).isoformat()
+    gate = global_market_execution_gate({
+        "data_quality": "degraded",
+        "us_indices": [
+            {"symbol": "SPX", "name": "标普500", "status": "ok", "change_pct": None, "as_of": as_of, "source": "eastmoney"},
+            {"symbol": "NDX", "name": "纳斯达克100", "status": "ok", "change_pct": "bad", "as_of": as_of, "source": "eastmoney"},
+        ],
+    }, now=now)
+
+    assert gate["valid_quote_count"] == 0
+    assert gate["score"] == 0
+    assert gate["freeze_expansion"] is False
+
+
+def test_global_risk_never_becomes_a_standalone_sell_instruction(db_session):
+    holding = Holding(
+        code="600314", name="外围门控测试", quantity=1000, cost_price=10,
+        current_price=10.5, total_asset=100000, position_type="趋势仓",
+        next_discipline="外围弱势只冻结扩仓",
+    )
+    db_session.add(holding)
+    db_session.flush()
+    db_session.add(MarketRegimeSnapshot(
+        trade_date=datetime.now().date().isoformat(), captured_at=datetime.now(),
+        source="测试全市场", data_quality="complete", coverage_ratio=1,
+        confidence=0.95, regime_code="BROAD_REPAIR", regime_name="放量修复",
+        risk_level="低", missing_fields_json="[]",
+    ))
+    db_session.commit()
+    volume = VolumePriceSnapshot(
+        trade_date=datetime.now().date().isoformat(), code=holding.code, name=holding.name,
+        price=10.5, prev_close=10, high_price=10.6, low_price=10.1,
+        vwap=10.4, vwap_source="minute", minute_bar_count=12, vwap_reliable=True,
+        pattern="VWAP上方强势", data_quality="realtime",
+    )
+    expectation = ExpectationSnapshot(
+        trade_date=datetime.now().date().isoformat(), code=holding.code, name=holding.name,
+        stage="盘中确认", expectation_gap_score=0, expectation_result="MATCHED",
+    )
+    now = datetime.now()
+
+    state = build_position_execution_state(
+        db_session,
+        holding,
+        quote={
+            "price": 10.5, "prev_close": 10, "high": 10.6, "low": 10.1,
+            "open": 10.2, "vwap": 10.4,
+            "minute_bars": [
+                {"price": 10.3, "volume": 1000, "amount": 10300},
+                {"price": 10.4, "volume": 1000, "amount": 10400},
+                {"price": 10.5, "volume": 1000, "amount": 10500},
+            ],
+            "note": "实时行情",
+        },
+        expectation=expectation,
+        volume_price=volume,
+        global_cues=_global_snapshot(now, -2.0),
+    )
+
+    assert state.recommended_reduce_ratio == 0
+    assert "禁止加仓" in state.recommended_action
+    assert not any(item in state.recommended_action for item in ("减仓", "退出", "清仓"))
+    assert any("绝不单独触发减仓或清仓" in item for item in state.evidence)
 
 
 def test_intraday_evidence_engine_saves_sample_event(monkeypatch, db_session):

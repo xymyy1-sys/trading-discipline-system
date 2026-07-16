@@ -6,6 +6,7 @@ import re
 from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
+from sqlalchemy import and_, or_
 from sqlalchemy.orm import Session
 from app.core.database import DemoSessionLocal, SessionLocal, get_db
 from app.core.config import get_settings
@@ -28,6 +29,7 @@ from app.schemas.trading import (
     PositionStateHistoryOut,
     RecommendationFeedbackIn,
     RecommendationFeedbackOut,
+    IntradayEvidenceEventOut,
     IntradayCollectorStatusOut,
     CollectionRunOut,
     ProfitProtectionSnapshotOut,
@@ -53,7 +55,13 @@ from app.api.helpers.holdings_calc import (
 from app.api.helpers.execution import build_execution_states, build_position_execution_state
 from app.api.helpers.seesaw import _holding_theme_profile, _sector_family
 from app.api.helpers.quotes import _latest_a_share_quotes, _quote_lookup_code
-from app.api.helpers.decision import build_t_eligibility, build_volume_price_snapshot, create_t_plan, update_t_plan
+from app.api.helpers.decision import (
+    _event_in_trade_session,
+    build_t_eligibility,
+    build_volume_price_snapshot,
+    create_t_plan,
+    update_t_plan,
+)
 from app.models.trading import (
     ActionRecommendation,
     ActionRecommendationRevision,
@@ -72,6 +80,7 @@ from app.services.intraday_collector import (
     collector_status,
     run_intraday_collection_once,
 )
+from app.core.trading_clock import shanghai_today
 
 router = APIRouter()
 
@@ -547,9 +556,19 @@ def get_intraday_collector_status() -> IntradayCollectorStatusOut:
         enabled=bool(status["enabled"]),
         interval_seconds=int(status["interval_seconds"]),
         running=bool(status["running"]),
+        last_success_at=status.get("last_success_at"),
+        last_error=str(status.get("last_error") or ""),
         queue_depth=int(status.get("queue_depth") or 0),
         open_circuits=list(status.get("open_circuits") or []),
         failure_counts=dict(status.get("failure_counts") or {}),
+        opportunity_radar_running=bool(status.get("opportunity_radar_running")),
+        opportunity_radar_last_success_at=status.get("opportunity_radar_last_success_at"),
+        opportunity_radar_last_error=str(status.get("opportunity_radar_last_error") or ""),
+        simulation_shadow_running=bool(status.get("simulation_shadow_running")),
+        simulation_shadow_last_success_at=status.get("simulation_shadow_last_success_at"),
+        simulation_shadow_last_error=str(status.get("simulation_shadow_last_error") or ""),
+        simulation_shadow_equity_last_success_at=status.get("simulation_shadow_equity_last_success_at"),
+        simulation_shadow_equity_last_error=str(status.get("simulation_shadow_equity_last_error") or ""),
         last_run=_collection_run_out(status["last_run"]),
     )
 
@@ -596,12 +615,113 @@ def update_time_stop_rule(
     return row
 
 
+def _safe_json_list(raw: str | None) -> list[str]:
+    try:
+        value = json.loads(raw or "[]")
+    except (TypeError, ValueError):
+        return []
+    return [str(item) for item in value] if isinstance(value, list) else []
+
+
+def _safe_json_dict(raw: str | None) -> dict:
+    try:
+        value = json.loads(raw or "{}")
+    except (TypeError, ValueError):
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def _intraday_event_out(row: IntradayEvidenceEvent) -> IntradayEvidenceEventOut:
+    return IntradayEvidenceEventOut(
+        id=row.id,
+        captured_at=row.captured_at,
+        scope=row.scope,
+        target_code=row.target_code,
+        target_name=row.target_name,
+        event_type=row.event_type,
+        severity=row.severity,
+        value=row.value,
+        previous_value=row.previous_value,
+        priority=row.priority,
+        group_key=row.group_key,
+        state_key=getattr(row, "state_key", None),
+        first_seen_at=row.first_seen_at,
+        last_seen_at=row.last_seen_at,
+        occurrence_count=row.occurrence_count,
+        confirmed=row.confirmed,
+        evidence=_safe_json_list(row.evidence_json),
+        counter_evidence=_safe_json_list(getattr(row, "counter_evidence_json", "[]")),
+        source=getattr(row, "source", "") or "",
+        source_url=getattr(row, "source_url", None),
+        source_published_at=getattr(row, "source_published_at", None),
+        metadata=_safe_json_dict(getattr(row, "metadata_json", "{}")),
+    )
+
+
+@router.get("/intraday-events/recent", response_model=list[IntradayEvidenceEventOut])
+def recent_intraday_events(limit: int = 40, db: Session = Depends(get_db)) -> list[IntradayEvidenceEventOut]:
+    """Hydrate the cockpit without leaking watchlist-only stock events."""
+
+    holding_codes = [str(row[0]) for row in db.query(Holding.code).all()]
+    stock_scope = and_(
+        IntradayEvidenceEvent.scope == "stock",
+        IntradayEvidenceEvent.target_code.in_(holding_codes),
+    ) if holding_codes else False
+    rows = (
+        db.query(IntradayEvidenceEvent)
+        .filter(
+            IntradayEvidenceEvent.trade_date == shanghai_today().isoformat(),
+            or_(IntradayEvidenceEvent.scope.in_(("sector", "market")), stock_scope),
+        )
+        .order_by(
+            IntradayEvidenceEvent.priority.desc(),
+            IntradayEvidenceEvent.captured_at.desc(),
+            IntradayEvidenceEvent.id.desc(),
+        )
+        .limit(min(100, max(1, int(limit))))
+        .all()
+    )
+    today = shanghai_today().isoformat()
+    rows = [
+        row for row in rows
+        if "NEWS_" not in str(row.event_type or "") or _event_in_trade_session(row, today)
+    ]
+    return [_intraday_event_out(row) for row in rows]
+
+
+def _stream_cursor(request: Request, *, replay: bool, last_event_id: int | None) -> int | None:
+    """Resolve an SSE cursor, giving an explicit query parameter precedence."""
+
+    if last_event_id is not None:
+        return max(0, int(last_event_id))
+    header = str(request.headers.get("last-event-id") or "").strip()
+    if header:
+        try:
+            return max(0, int(header))
+        except ValueError:
+            pass
+    return 0 if replay else None
+
+
+def _sse_event_frame(row: IntradayEvidenceEvent) -> str:
+    payload = _intraday_event_out(row).model_dump(mode="json")
+    return (
+        f"id: {int(row.id or 0)}\n"
+        "event: intraday-risk\n"
+        f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+    )
+
+
 @router.get("/intraday-events/stream")
-async def stream_intraday_events(request: Request, replay: bool = False) -> StreamingResponse:
+async def stream_intraday_events(
+    request: Request,
+    replay: bool = False,
+    last_event_id: int | None = None,
+) -> StreamingResponse:
     settings = get_settings()
     session_factory = DemoSessionLocal if getattr(request.state, "auth_user", "") == settings.demo_username and settings.demo_password else SessionLocal
     async def event_generator():
-        last_id: int | None = 0 if replay else None
+        last_id = _stream_cursor(request, replay=replay, last_event_id=last_event_id)
         heartbeat = 0
         while True:
             db = session_factory()
@@ -619,19 +739,12 @@ async def stream_intraday_events(request: Request, replay: bool = False) -> Stre
                 )
                 for row in rows:
                     last_id = max(last_id, int(row.id or 0))
-                    payload = {
-                        "id": row.id,
-                        "captured_at": row.captured_at.isoformat(),
-                        "target_code": row.target_code,
-                        "target_name": row.target_name,
-                        "event_type": row.event_type,
-                        "severity": row.severity,
-                        "priority": row.priority,
-                        "confirmed": row.confirmed,
-                        "occurrence_count": row.occurrence_count,
-                        "evidence": json.loads(row.evidence_json or "[]"),
-                    }
-                    yield f"event: intraday-risk\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
+                    if (
+                        "NEWS_" in str(row.event_type or "")
+                        and not _event_in_trade_session(row, shanghai_today().isoformat())
+                    ):
+                        continue
+                    yield _sse_event_frame(row)
                 heartbeat += 1
                 if heartbeat % 3 == 0:
                     yield f": heartbeat {datetime.now().isoformat()}\n\n"

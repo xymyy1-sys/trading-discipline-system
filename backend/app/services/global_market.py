@@ -786,6 +786,12 @@ def _sector_etf_quotes(rows: list[dict[str, Any]]) -> list[GlobalQuote]:
     return sorted(output, key=lambda item: item.change_pct if item.change_pct is not None else -math.inf, reverse=True)
 
 
+# One process-wide cache is shared by the public route, holding execution and
+# AI context builder.  This prevents three independent external refreshes for
+# the same five-minute evidence window.
+global_market_service = GlobalMarketService(cache_ttl_seconds=300)
+
+
 __all__ = [
     "GlobalMarketService",
     "GlobalMarketSnapshot",
@@ -793,4 +799,5 @@ __all__ = [
     "KISConfiguration",
     "KOREA_EQUITIES",
     "US_SECTOR_ETFS",
+    "global_market_service",
 ]

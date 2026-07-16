@@ -23,6 +23,7 @@ import {
 import { API_BASE } from '../api'
 import type {
   SimulationAccount,
+  SimulationCalibrationProposal,
   SimulationDailyEquity,
   SimulationEvidence,
   SimulationFill,
@@ -32,6 +33,7 @@ import type {
   SimulationPerformance,
   SimulationPerformanceSlice,
   SimulationPosition,
+  SimulationShadowDecision,
   SimulationStrategyType,
 } from '../types'
 
@@ -44,6 +46,7 @@ const STRATEGY_LABELS: Record<SimulationStrategyType, string> = {
 const STATUS_LABELS: Record<string, string> = {
   ACTIVE: '运行中', OPEN: '等待模拟撮合', PENDING: '待撮合', PARTIAL: '部分模拟成交',
   FILLED: '已模拟成交', CANCELLED: '已撤销', CANCELED: '已撤销', REJECTED: '已拒绝', EXPIRED: '已失效',
+  ORDER_CREATED: '已生成影子委托', ORDER_REJECTED: '影子委托被拒绝', SKIPPED: '证据闸门跳过',
 }
 const REGIME_LABELS: Record<string, string> = {
   STRONG_EXPANSION: '强势扩张', REBOUND: '修复反弹', ROTATION: '轮动分歧',
@@ -149,7 +152,7 @@ function SimulationNotice({ dataAsOf }: { dataAsOf?: string }) {
   return <div className="simulation-notice" role="note"><FlaskConical size={20} /><div><strong>模拟盘 · 不连接券商 · 不会真实下单</strong><span>模拟撮合只用于验证策略和执行纪律；每笔委托都保留行情时点、证据快照和未成交/拒绝原因。</span></div><small>数据时点：{displayTime(dataAsOf)}</small></div>
 }
 function AccountPicker({ accounts, activeId, onSelect }: { accounts: SimulationAccount[]; activeId: number | null; onSelect: (id: number) => void }) {
-  return <div className="simulation-account-picker"><label>当前模拟账户<select value={activeId ?? ''} onChange={event => onSelect(Number(event.target.value))} disabled={!accounts.length}><option value="">{accounts.length ? '选择账户' : '请先创建模拟账户'}</option>{accounts.map(account => <option key={account.id} value={account.id}>{account.name}（#{account.id}）</option>)}</select></label><small>账户切换只影响模拟账本。</small></div>
+  return <div className="simulation-account-picker"><label>当前模拟账户<select value={activeId ?? ''} onChange={event => onSelect(Number(event.target.value))} disabled={!accounts.length}><option value="">{accounts.length ? '选择账户' : '请先创建模拟账户'}</option>{accounts.map(account => <option key={account.id} value={account.id}>{account.account_type === 'shadow' ? '自动影子验证｜' : ''}{account.name}（#{account.id}）</option>)}</select></label><small>账户切换只影响模拟账本；自动影子账户每分钟按真实证据前向验证。</small></div>
 }
 function ModuleState({ loading, error, empty, onRefresh }: { loading: boolean; error: string; empty?: string; onRefresh: () => void }) {
   if (loading) return <div className="simulation-state"><RefreshCcw className="spin" size={18} /><span>正在读取模拟账本，不会刷新真实持仓。</span></div>
@@ -298,35 +301,60 @@ export function SimulationEvidenceLedger() {
   const [orders, setOrders] = useState<SimulationOrder[]>([])
   const [fills, setFills] = useState<SimulationFill[]>([])
   const [evidence, setEvidence] = useState<SimulationEvidence[]>([])
+  const [shadowDecisions, setShadowDecisions] = useState<SimulationShadowDecision[]>([])
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
   const load = useCallback(() => {
-    if (!activeId) { setOrders([]); setFills([]); setEvidence([]); return }
+    if (!activeId) { setOrders([]); setFills([]); setEvidence([]); setShadowDecisions([]); return }
     setLoading(true); setError('')
-    Promise.all([simulationRequest<SimulationOrder[]>(`/api/simulation/accounts/${activeId}/orders?limit=200`), simulationRequest<SimulationFill[]>(`/api/simulation/accounts/${activeId}/fills?limit=500`), simulationRequest<SimulationEvidence[]>(`/api/simulation/accounts/${activeId}/evidence?limit=200`)]).then(([orderRows, fillRows, evidenceRows]) => { setOrders(orderRows); setFills(fillRows); setEvidence(evidenceRows) }).catch(value => setError(value instanceof Error ? value.message : '模拟成交证据读取失败')).finally(() => setLoading(false))
+    Promise.all([simulationRequest<SimulationOrder[]>(`/api/simulation/accounts/${activeId}/orders?limit=200`), simulationRequest<SimulationFill[]>(`/api/simulation/accounts/${activeId}/fills?limit=500`), simulationRequest<SimulationEvidence[]>(`/api/simulation/accounts/${activeId}/evidence?limit=200`), simulationRequest<SimulationShadowDecision[]>(`/api/simulation/accounts/${activeId}/shadow-decisions?limit=200`)]).then(([orderRows, fillRows, evidenceRows, shadowRows]) => { setOrders(orderRows); setFills(fillRows); setEvidence(evidenceRows); setShadowDecisions(shadowRows) }).catch(value => setError(value instanceof Error ? value.message : '模拟成交证据读取失败')).finally(() => setLoading(false))
   }, [activeId])
   useEffect(() => load(), [load])
   const fillsByOrder = useMemo(() => new Map(fills.map(item => [item.order_id, item])), [fills])
   const evidenceById = useMemo(() => new Map(evidence.map(item => [item.id, item])), [evidence])
+  const selectedAccount = accounts.find(item => item.id === activeId)
   return <section className="simulation-page"><SimulationNotice dataAsOf={evidence[0]?.captured_at} /><ModuleHeading title="成交与决策证据" subtitle="每次模拟成交或拒绝都可追溯到委托前冻结的行情、市场、预期和量价快照。" loading={loading || loadingAccounts} onRefresh={load} /><AccountPicker accounts={accounts} activeId={activeId} onSelect={selectAccount} />
-    {error || accountError ? <ModuleState loading={loading || loadingAccounts} error={error || accountError} onRefresh={load} /> : <div className="simulation-evidence-list">{orders.map(order => { const fill = fillsByOrder.get(order.id); const decisionSnapshot = evidenceById.get(order.decision_evidence_snapshot_id); const fillSnapshot = fill ? evidenceById.get(fill.fill_evidence_snapshot_id) : undefined; const sourceVersions = decisionSnapshot ? parseJsonRecord(decisionSnapshot.source_versions_json) : {}; return <article className="panel" key={order.id}><header><div><b>{order.name || order.code}</b><span>{order.code} · {order.side === 'BUY' ? '模拟买入' : '模拟卖出'} · 委托 #{order.id}</span></div><strong className={`simulation-status tone-${statusTone(order.status)}`}>{statusLabel(order.status)}</strong></header><div className="simulation-evidence-summary"><span>策略：<b>{strategyLabel(order.strategy_source)}</b></span><span>委托/成交：<b>{order.order_type === 'LIMIT' ? numberValue(order.limit_price) : '模拟市价'} / {fill ? numberValue(fill.price) : '--'}</b></span><span>成交数量：<b>{fill?.quantity ?? 0} / {order.quantity}股</b></span><span>决策/撮合行情：<b>{displayTime(decisionSnapshot?.quote_time)} / {displayTime(fillSnapshot?.quote_time)}</b></span></div>{order.reject_reason && <p className="simulation-unfilled"><XCircle size={15} />未成交：{order.reject_reason}</p>}<div className="simulation-evidence-tags"><span>决策数据质量：{decisionSnapshot?.data_quality || '证据缺失'}</span><span>市场：{REGIME_LABELS[decisionSnapshot?.market_regime || 'UNKNOWN'] || decisionSnapshot?.market_regime}</span><span>预期差：{decisionSnapshot ? `${GAP_LABELS[decisionSnapshot.expectation_gap_band] || decisionSnapshot.expectation_gap_band}（${decisionSnapshot.expectation_gap_score}）` : '--'}</span><span>量价：{decisionSnapshot?.volume_price_state || '--'}</span><span>板块：{decisionSnapshot?.sector_state || '--'}</span></div><details><summary>查看决策与成交冻结证据</summary>{decisionSnapshot ? <div className="simulation-evidence-ref"><b>决策证据 #{decisionSnapshot.id} · V{decisionSnapshot.version}</b><span>内容指纹 {decisionSnapshot.content_hash.slice(0, 16)}…</span><small>{Object.entries(sourceVersions).map(([key, value]) => `${key}=${String(value ?? '--')}`).join('；') || '来源版本缺失'}</small></div> : <p>决策证据快照缺失，不能把本笔模拟结果用于绩效归因。</p>}{fillSnapshot ? <div className="simulation-evidence-ref"><b>成交证据 #{fillSnapshot.id} · V{fillSnapshot.version}</b><span>内容指纹 {fillSnapshot.content_hash.slice(0, 16)}…</span><small>仅用于复核模拟成交，不参与策略绩效归因。</small></div> : <p>尚无成交证据快照。</p>}</details></article> })}{!orders.length && <ModuleState loading={loading || loadingAccounts} error="" onRefresh={load} empty="暂无模拟委托，因此没有成交与决策证据。" />}</div>}
+    {error || accountError ? <ModuleState loading={loading || loadingAccounts} error={error || accountError} onRefresh={load} /> : <><ShadowDecisionAudit rows={shadowDecisions} visible={selectedAccount?.account_type === 'shadow' || shadowDecisions.length > 0} /><div className="simulation-evidence-list">{orders.map(order => { const fill = fillsByOrder.get(order.id); const decisionSnapshot = evidenceById.get(order.decision_evidence_snapshot_id); const fillSnapshot = fill ? evidenceById.get(fill.fill_evidence_snapshot_id) : undefined; const sourceVersions = decisionSnapshot ? parseJsonRecord(decisionSnapshot.source_versions_json) : {}; return <article className="panel" key={order.id}><header><div><b>{order.name || order.code}</b><span>{order.code} · {order.side === 'BUY' ? '模拟买入' : '模拟卖出'} · 委托 #{order.id}</span></div><strong className={`simulation-status tone-${statusTone(order.status)}`}>{statusLabel(order.status)}</strong></header><div className="simulation-evidence-summary"><span>策略：<b>{strategyLabel(order.strategy_source)}</b></span><span>委托/成交：<b>{order.order_type === 'LIMIT' ? numberValue(order.limit_price) : '模拟市价'} / {fill ? numberValue(fill.price) : '--'}</b></span><span>成交数量：<b>{fill?.quantity ?? 0} / {order.quantity}股</b></span><span>决策/撮合行情：<b>{displayTime(decisionSnapshot?.quote_time)} / {displayTime(fillSnapshot?.quote_time)}</b></span></div>{order.reject_reason && <p className="simulation-unfilled"><XCircle size={15} />未成交：{order.reject_reason}</p>}<div className="simulation-evidence-tags"><span>决策数据质量：{decisionSnapshot?.data_quality || '证据缺失'}</span><span>市场：{REGIME_LABELS[decisionSnapshot?.market_regime || 'UNKNOWN'] || decisionSnapshot?.market_regime}</span><span>预期差：{decisionSnapshot ? `${GAP_LABELS[decisionSnapshot.expectation_gap_band] || decisionSnapshot.expectation_gap_band}（${decisionSnapshot.expectation_gap_score}）` : '--'}</span><span>量价：{decisionSnapshot?.volume_price_state || '--'}</span><span>板块：{decisionSnapshot?.sector_state || '--'}</span></div><details><summary>查看决策与成交冻结证据</summary>{decisionSnapshot ? <div className="simulation-evidence-ref"><b>决策证据 #{decisionSnapshot.id} · V{decisionSnapshot.version}</b><span>内容指纹 {decisionSnapshot.content_hash.slice(0, 16)}…</span><small>{Object.entries(sourceVersions).map(([key, value]) => `${key}=${String(value ?? '--')}`).join('；') || '来源版本缺失'}</small></div> : <p>决策证据快照缺失，不能把本笔模拟结果用于绩效归因。</p>}{fillSnapshot ? <div className="simulation-evidence-ref"><b>成交证据 #{fillSnapshot.id} · V{fillSnapshot.version}</b><span>内容指纹 {fillSnapshot.content_hash.slice(0, 16)}…</span><small>仅用于复核模拟成交，不参与策略绩效归因。</small></div> : <p>尚无成交证据快照。</p>}</details></article> })}{!orders.length && <ModuleState loading={loading || loadingAccounts} error="" onRefresh={load} empty="暂无模拟委托，因此没有成交与决策证据。" />}</div></>}
   </section>
+}
+
+function parseJsonList(raw: string) {
+  try { const value = JSON.parse(raw) as unknown; return Array.isArray(value) ? value.map(String) : [] } catch { return [] }
+}
+function ShadowDecisionAudit({ rows, visible }: { rows: SimulationShadowDecision[]; visible: boolean }) {
+  if (!visible) return null
+  return <section className="simulation-shadow-audit panel"><header><div><h4><History size={17} />自动影子信号审计</h4><p>每分钟只消费当日、新鲜且已确认的预期×量价、打板或持仓信号；本分钟生成，最早下一分钟模拟撮合。</p></div><span>{rows.length}条</span></header>{rows.length ? <div>{rows.slice(0, 30).map(row => <article key={row.id}><div><b>{row.name || row.code}</b><small>{row.code} · {strategyLabel(row.strategy_source)} · {displayTime(row.evaluated_at)}</small></div><strong className={`simulation-status tone-${statusTone(row.status)}`}>{statusLabel(row.status)}</strong><p>{row.reason}</p><small>{parseJsonList(row.evidence_json).slice(0, 3).join('；') || '本条仅记录闸门跳过原因。'} · 规则 {row.rule_version} · 证据版本 {row.source_version || '--'}</small></article>)}</div> : <p className="plain-text">影子账户已启用，等待交易时段出现可验证的明确策略信号。</p>}<footer>这里只写入模拟账本；不会连接券商、不会修改真实持仓，也不会自动把校准候选应用到实盘规则。</footer></section>
 }
 
 export function SimulationPerformanceDesk() {
   const { accounts, activeId, selectAccount, loadingAccounts, accountError } = useSimulationAccounts()
   const [data, setData] = useState<SimulationPerformance | null>(null)
+  const [calibration, setCalibration] = useState<SimulationCalibrationProposal | null>(null)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
   const load = useCallback(() => {
-    if (!activeId) { setData(null); return }
+    if (!activeId) { setData(null); setCalibration(null); return }
     setLoading(true); setError('')
-    simulationRequest<SimulationPerformance>(`/api/simulation/accounts/${activeId}/performance`).then(setData).catch(value => setError(value instanceof Error ? value.message : '模拟绩效读取失败')).finally(() => setLoading(false))
+    Promise.all([
+      simulationRequest<SimulationPerformance>(`/api/simulation/accounts/${activeId}/performance`),
+      simulationRequest<SimulationCalibrationProposal>(`/api/simulation/accounts/${activeId}/calibration-proposal`),
+    ]).then(([performance, proposal]) => { setData(performance); setCalibration(proposal) }).catch(value => setError(value instanceof Error ? value.message : '模拟绩效读取失败')).finally(() => setLoading(false))
   }, [activeId])
   useEffect(() => load(), [load])
   const accountAsOf = accounts.find(item => item.id === activeId)?.updated_at
   return <section className="simulation-page"><SimulationNotice dataAsOf={accountAsOf} /><ModuleHeading title="绩效统计" subtitle="只统计已完成的模拟卖出，并按策略、市场环境和预期差分层；比例字段均按百分数显示。" loading={loading || loadingAccounts} onRefresh={load} /><AccountPicker accounts={accounts} activeId={activeId} onSelect={selectAccount} />
-    {!data ? <ModuleState loading={loading || loadingAccounts} error={error || accountError} onRefresh={load} empty="没有已完成闭环交易，暂不计算胜率、盈亏比与回撤。" /> : <><div className="simulation-kpi-grid"><SimulationMetric label="已实现模拟盈亏" value={money(data.total_realized_pnl)} tone={data.total_realized_pnl >= 0 ? 'up' : 'down'} /><SimulationMetric label="闭环胜率" value={percent(data.win_rate)} detail={`${data.win_count}胜 / ${data.loss_count}负 / ${data.closed_trade_count}笔完整交易`} /><SimulationMetric label="盈亏比" value={numberValue(data.profit_loss_ratio)} /><SimulationMetric label="最大回撤" value={percent(data.maximum_drawdown_pct)} tone="down" /></div>{data.closed_trade_count < 20 && <p className="simulation-sample-warning"><AlertTriangle size={16} />当前仅 {data.closed_trade_count} 笔完整开平仓交易，分批卖出不会重复计数；样本仍不稳定，不能据此放大模拟仓位或外推真实收益。</p>}<div className="simulation-breakdown-grid"><PerformanceBreakdown title="按入场策略分层" items={data.by_strategy} label={strategyLabel} /><PerformanceBreakdown title="按入场市场环境分层" items={data.by_market_regime} label={key => REGIME_LABELS[key] || key} /><PerformanceBreakdown title="按入场预期差分层" items={data.by_expectation_gap} label={key => GAP_LABELS[key] || key} /></div></>}
+    {!data ? <ModuleState loading={loading || loadingAccounts} error={error || accountError} onRefresh={load} empty="没有已完成闭环交易，暂不计算胜率、盈亏比与回撤。" /> : <><div className="simulation-kpi-grid"><SimulationMetric label="已实现模拟盈亏" value={money(data.total_realized_pnl)} tone={data.total_realized_pnl >= 0 ? 'up' : 'down'} /><SimulationMetric label="闭环胜率" value={percent(data.win_rate)} detail={`${data.win_count}胜 / ${data.loss_count}负 / ${data.closed_trade_count}笔完整交易`} /><SimulationMetric label="盈亏比" value={numberValue(data.profit_loss_ratio)} /><SimulationMetric label="最大回撤" value={percent(data.maximum_drawdown_pct)} tone="down" /></div>{data.closed_trade_count < 20 && <p className="simulation-sample-warning"><AlertTriangle size={16} />当前仅 {data.closed_trade_count} 笔完整开平仓交易，分批卖出不会重复计数；样本仍不稳定，不能据此放大模拟仓位或外推真实收益。</p>}<CalibrationCandidates proposal={calibration} /><div className="simulation-breakdown-grid"><PerformanceBreakdown title="按入场策略分层" items={data.by_strategy} label={strategyLabel} /><PerformanceBreakdown title="按入场市场环境分层" items={data.by_market_regime} label={key => REGIME_LABELS[key] || key} /><PerformanceBreakdown title="按入场预期差分层" items={data.by_expectation_gap} label={key => GAP_LABELS[key] || key} /></div></>}
+  </section>
+}
+
+function CalibrationCandidates({ proposal }: { proposal: SimulationCalibrationProposal | null }) {
+  if (!proposal) return null
+  const ready = proposal.status === 'READY_FOR_REVIEW'
+  return <section className={`simulation-calibration panel ${ready ? 'is-ready' : ''}`}>
+    <header><div><h4><ShieldAlert size={17} />样本门槛校准候选</h4><p>{proposal.summary}</p></div><span>{proposal.statistics_only ? `${proposal.statistical_sample_count} 个手工统计样本` : `${proposal.usable_sample_count}/${proposal.minimum_samples} 个自动影子样本`}</span></header>
+    {proposal.excluded_sample_count > 0 && <p className="simulation-sample-warning">已排除 {proposal.excluded_sample_count} 笔不符合自动校准证据契约的样本。{proposal.exclusion_reasons?.length ? ` ${proposal.exclusion_reasons.join('；')}` : ''}</p>}
+    {proposal.candidates.length > 0 ? <div className="simulation-calibration-list">{proposal.candidates.map(item => <article key={`${item.target}-${item.field}`}><div><strong>{item.target}</strong><span>{item.direction === 'tighten' ? '建议收紧' : item.direction === 'loosen' ? '建议放宽' : '保持规则'}</span></div><p>{item.suggestion}</p><small>{item.reason} · {item.support_metric} · 样本 {item.sample_count}</small></article>)}</div> : <p className="plain-text">尚未形成可执行的调参候选；系统会继续前向采样，不会因少量偶然盈亏自行改规则。</p>}
+    <footer>候选只进入人工审核和新旧规则并行影子验证；不会自动修改真实规则，也不会触发真实交易。</footer>
   </section>
 }
 

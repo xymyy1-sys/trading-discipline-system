@@ -11,6 +11,7 @@ export interface SimulationAccount {
   minimum_commission: number
   stamp_tax_rate: number
   transfer_fee_rate: number
+  account_type: 'manual' | 'shadow' | string
   status: string
   created_at: string
   updated_at: string
@@ -89,6 +90,29 @@ export interface SimulationDailyEquity {
   captured_at: string
 }
 
+export interface SimulationShadowDecision {
+  id: number
+  account_id: number
+  signal_key: string
+  strategy_source: SimulationStrategyType
+  source_kind: string
+  source_id: number | null
+  rule_version: string
+  source_version: string
+  trade_date: string
+  source_at: string | null
+  evaluated_at: string
+  code: string
+  name: string
+  intent: string
+  side: SimulationOrderSide | ''
+  quantity: number
+  status: string
+  reason: string
+  order_id: number | null
+  evidence_json: string
+}
+
 export interface SimulationEvidence {
   id: number
   account_id: number
@@ -140,4 +164,49 @@ export interface SimulationPerformance {
   by_strategy: SimulationPerformanceSlice[]
   by_market_regime: SimulationPerformanceSlice[]
   by_expectation_gap: SimulationPerformanceSlice[]
+}
+
+export interface SimulationCalibrationMetric {
+  key: string
+  sample_count: number
+  win_rate: number
+  average_return_pct: number
+  median_return_pct: number
+  profit_loss_ratio: number
+  total_realized_pnl: number
+}
+
+export interface SimulationCalibrationCandidate {
+  target: string
+  field: string
+  direction: 'tighten' | 'loosen' | 'hold'
+  suggestion: string
+  reason: string
+  sample_count: number
+  support_metric: string
+}
+
+export interface SimulationCalibrationProposal {
+  account_id: number
+  generated_at: string
+  status: string
+  eligible: boolean
+  candidate_generation_allowed: boolean
+  statistics_only: boolean
+  minimum_samples: number
+  statistical_sample_count: number
+  usable_sample_count: number
+  excluded_sample_count: number
+  exclusion_reasons: string[]
+  summary: string
+  overall: SimulationCalibrationMetric
+  by_strategy: SimulationCalibrationMetric[]
+  by_market_regime: SimulationCalibrationMetric[]
+  by_expectation_gap: SimulationCalibrationMetric[]
+  maximum_drawdown_pct: number
+  candidates: SimulationCalibrationCandidate[]
+  evidence: string[]
+  limitations: string[]
+  requires_manual_confirmation: boolean
+  auto_apply_allowed: false
 }

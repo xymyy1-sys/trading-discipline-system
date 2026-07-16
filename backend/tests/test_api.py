@@ -6,13 +6,14 @@ def test_health_check(client):
 
 
 def test_holding_summary_includes_today_closed_position_profit(client, db_session):
-    from datetime import datetime
+    from datetime import datetime, timezone
     from app.models.trading import AccountState, Holding, TradeLog
 
     db_session.add(AccountState(id=1, total_asset=100000))
     db_session.add(Holding(code="600001", name="仍持仓", quantity=100, cost_price=10, current_price=11, total_asset=100000))
     db_session.add(TradeLog(
-        code="600002", name="今日清仓", traded_at=datetime.now(), side="卖出",
+        code="600002", name="今日清仓",
+        traded_at=datetime.now(timezone.utc).replace(tzinfo=None), side="卖出",
         price=12, quantity=100, amount=1200, total_asset=100000,
         position_ratio=0.012, cost_price=10, stop_loss_price=9.6,
         reason="按计划清仓", mode="标准短线模式", compliant=True, human_tags="",
@@ -171,6 +172,11 @@ def test_intraday_collector_status(client):
     assert data["enabled"] is True
     assert data["interval_seconds"] >= 1
     assert "running" in data
+    assert "last_success_at" in data
+    assert "last_error" in data
+    assert "opportunity_radar_running" in data
+    assert "opportunity_radar_last_success_at" in data
+    assert "opportunity_radar_last_error" in data
 
 
 def test_time_stop_rules_can_be_listed_and_updated(client):

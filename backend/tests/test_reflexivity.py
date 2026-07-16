@@ -236,3 +236,25 @@ def test_stock_unknown_or_shrink_rotation_market_keeps_expansion_gate_closed():
         )
         assert result["market_gate"]["risk_off"] is True
         assert result["market_gate"]["new_position_allowed"] is False
+
+
+def test_stock_reflexivity_uses_reliable_sector_flow_turning_as_dynamic_evidence():
+    result = analyze_stock_reflexivity(_stock(
+        expectation_gap_score=-5,
+        vwap_deviation_pct=-1.0,
+        change_pct=-3.0,
+        low_rebound_pct=3.0,
+        high_drawdown_pct=6.0,
+        volume_ratio=1.4,
+        sector_relative_strength_pct=-1.5,
+        sector_net_inflow_yi=-20,
+        sector_flow_speed_yi_per_minute=-0.5,
+        sector_flow_acceleration=-0.08,
+        sector_flow_turning="TURN_TO_OUTFLOW",
+        sector_flow_kinetics_reliable=True,
+        support_distance_pct=0.5,
+    ))
+
+    failed_rebound = _scenario(result, "REBOUND_FAILURE_SUPPLY")
+    assert any("板块资金仍在边际转弱" in item for item in failed_rebound["evidence"])
+    assert result["crowding"]["side"] == "SELL_PRESSURE"

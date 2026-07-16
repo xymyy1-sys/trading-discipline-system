@@ -139,11 +139,17 @@ export interface IntradayEvidenceEvent {
   previous_value: number;
   priority: number;
   group_key: string;
+  state_key?: string | null;
   first_seen_at: string | null;
   last_seen_at: string | null;
   occurrence_count: number;
   confirmed: boolean;
   evidence: string[];
+  counter_evidence?: string[];
+  source?: string;
+  source_url?: string | null;
+  source_published_at?: string | null;
+  metadata?: Record<string, unknown>;
 }
 
 export interface ActionRecommendation {

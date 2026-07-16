@@ -337,6 +337,9 @@ class ProfitProtectionSnapshot(Base):
 
 class IntradayEvidenceEvent(Base):
     __tablename__ = "intraday_evidence_events"
+    __table_args__ = (
+        UniqueConstraint("trade_date", "state_key", name="uq_intraday_event_trade_state_key"),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
     trade_date: Mapped[str] = mapped_column(String(16), index=True)
@@ -350,11 +353,20 @@ class IntradayEvidenceEvent(Base):
     previous_value: Mapped[float] = mapped_column(Float, default=0)
     priority: Mapped[int] = mapped_column(Integer, default=0)
     group_key: Mapped[str] = mapped_column(String(64), default="")
+    # Only unified events populate this key.  NULL deliberately keeps legacy
+    # collector rows outside the uniqueness contract while allowing the
+    # unified stream to be idempotent across concurrent radar requests.
+    state_key: Mapped[str | None] = mapped_column(String(40), nullable=True, index=True)
     first_seen_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     last_seen_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     occurrence_count: Mapped[int] = mapped_column(Integer, default=1)
     confirmed: Mapped[bool] = mapped_column(Boolean, default=False)
     evidence_json: Mapped[str] = mapped_column(Text, default="[]")
+    counter_evidence_json: Mapped[str] = mapped_column(Text, default="[]")
+    source: Mapped[str] = mapped_column(String(128), default="")
+    source_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    source_published_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    metadata_json: Mapped[str] = mapped_column(Text, default="{}")
     recommendation_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
 
 
@@ -724,6 +736,10 @@ class SimulationAccount(Base):
     minimum_commission: Mapped[float] = mapped_column(Float, default=5)
     stamp_tax_rate: Mapped[float] = mapped_column(Float, default=0.0005)
     transfer_fee_rate: Mapped[float] = mapped_column(Float, default=0.00001)
+    account_type: Mapped[str] = mapped_column(String(24), default="manual", index=True)
+    automation_key: Mapped[str | None] = mapped_column(
+        String(64), nullable=True, unique=True, index=True
+    )
     status: Mapped[str] = mapped_column(String(24), default="active", index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc))
     updated_at: Mapped[datetime] = mapped_column(
@@ -912,3 +928,38 @@ class SimulationDailyEquity(Base):
     return_pct: Mapped[float] = mapped_column(Float, default=0)
     drawdown_pct: Mapped[float] = mapped_column(Float, default=0)
     captured_at: Mapped[datetime] = mapped_column(DateTime, index=True)
+
+
+class SimulationShadowDecision(Base):
+    """Auditable, idempotent bridge from a real signal to a paper order.
+
+    A row is written for both accepted and skipped signals.  The unique key is
+    deliberately independent from order/fill ids so retrying a collector can
+    never duplicate an experiment or manufacture a historical fill.
+    """
+
+    __tablename__ = "simulation_shadow_decisions"
+    __table_args__ = (
+        UniqueConstraint("account_id", "signal_key", name="uq_sim_shadow_account_signal"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    account_id: Mapped[int] = mapped_column(Integer, index=True)
+    signal_key: Mapped[str] = mapped_column(String(160), index=True)
+    strategy_source: Mapped[str] = mapped_column(String(32), index=True)
+    source_kind: Mapped[str] = mapped_column(String(48), index=True)
+    source_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
+    rule_version: Mapped[str] = mapped_column(String(32), default="shadow-v1", index=True)
+    source_version: Mapped[str] = mapped_column(String(80), default="")
+    trade_date: Mapped[str] = mapped_column(String(16), index=True)
+    source_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, index=True)
+    evaluated_at: Mapped[datetime] = mapped_column(DateTime, index=True)
+    code: Mapped[str] = mapped_column(String(16), index=True)
+    name: Mapped[str] = mapped_column(String(64), default="")
+    intent: Mapped[str] = mapped_column(String(16), index=True)
+    side: Mapped[str] = mapped_column(String(8), default="")
+    quantity: Mapped[int] = mapped_column(Integer, default=0)
+    status: Mapped[str] = mapped_column(String(24), index=True)
+    reason: Mapped[str] = mapped_column(Text, default="")
+    order_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
+    evidence_json: Mapped[str] = mapped_column(Text, default="[]")

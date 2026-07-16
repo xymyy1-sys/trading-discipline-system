@@ -32,4 +32,11 @@ describe('盘中资金与量价事件语义', () => {
     expect(intradayEventSemantics('PANIC_SELL_GUARD', 'warning').toneClass).toBe('opportunity-watch')
     expect(isActionableIntradayEvent('SHRINKING_DECLINE_EXHAUSTION_WATCH', 'info')).toBe(true)
   })
+
+  test('统一板块与持仓新闻事件按验证后的业务语义着色', () => {
+    expect(intradayEventSemantics('SECTOR_INCREMENT_CONFIRMED', 'info').kind).toBe('opportunity')
+    expect(intradayEventSemantics('HOLDING_NEWS_NEGATIVE_IMPACT_CONFIRMED', 'warning').kind).toBe('risk')
+    expect(intradayEventSemantics('HOLDING_NEWS_PENDING_VALIDATION', 'info').kind).toBe('watch')
+    expect(isActionableIntradayEvent('HOLDING_NEWS_PENDING_VALIDATION', 'info')).toBe(true)
+  })
 })

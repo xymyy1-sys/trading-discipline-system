@@ -143,11 +143,17 @@ class IntradayEvidenceEventOut(BaseModel):
     previous_value: float = 0
     priority: int = 0
     group_key: str = ""
+    state_key: str | None = None
     first_seen_at: datetime | None = None
     last_seen_at: datetime | None = None
     occurrence_count: int = 1
     confirmed: bool = False
     evidence: list[str] = Field(default_factory=list)
+    counter_evidence: list[str] = Field(default_factory=list)
+    source: str = ""
+    source_url: str | None = None
+    source_published_at: datetime | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
 
     class Config:
         from_attributes = True
@@ -787,9 +793,19 @@ class IntradayCollectorStatusOut(BaseModel):
     enabled: bool
     interval_seconds: int
     running: bool
+    last_success_at: datetime | None = None
+    last_error: str = ""
     queue_depth: int = 0
     open_circuits: list[str] = Field(default_factory=list)
     failure_counts: dict[str, int] = Field(default_factory=dict)
+    opportunity_radar_running: bool = False
+    opportunity_radar_last_success_at: datetime | None = None
+    opportunity_radar_last_error: str = ""
+    simulation_shadow_running: bool = False
+    simulation_shadow_last_success_at: datetime | None = None
+    simulation_shadow_last_error: str = ""
+    simulation_shadow_equity_last_success_at: datetime | None = None
+    simulation_shadow_equity_last_error: str = ""
     last_run: CollectionRunOut | None = None
 
 

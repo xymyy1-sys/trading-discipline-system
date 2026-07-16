@@ -23,7 +23,7 @@ from app.api.helpers.reflexivity import build_market_reflexivity, build_stock_re
 from app.api.helpers.seesaw import _cached_holding_theme_flow_profile, _holding_theme_profile
 from app.core.config import get_settings
 from app.models.trading import AiAnalysisCache, ExpectationRevision, Holding
-from app.services.global_market import GlobalMarketService
+from app.services.global_market import global_market_service
 from app.services.market_data import MarketDataProvider
 from app.services.market_regime import get_market_regime
 
@@ -37,7 +37,7 @@ MAX_TIMELINE_EVENTS = 20
 MAX_RELATED_NEWS = 8
 
 _market_provider = MarketDataProvider()
-_global_market_service = GlobalMarketService(cache_ttl_seconds=300)
+_global_market_service = global_market_service
 
 SYSTEM_INSTRUCTIONS = """你是A股持仓决策的证据审查助手，不是下单代理。
 只能使用用户问题后附带的“结构化证据包”，禁止补写不存在的行情、新闻、主力意图或概率。
@@ -267,7 +267,6 @@ def build_position_context(db: Session, code: str) -> dict[str, Any]:
     card = decision_card(db, holding.code)
     regime = get_market_regime(db, force_refresh=False)
     market_reflexivity = build_market_reflexivity(db, regime)
-    stock_reflexivity = build_stock_reflexivity(card, market_reflexivity, regime)
     theme = _holding_theme_profile(holding)
     missing: list[str] = []
 
@@ -276,6 +275,12 @@ def build_position_context(db: Session, code: str) -> dict[str, Any]:
     except Exception as exc:
         sector_flow = {}
         missing.append(f"sector_funds:{exc.__class__.__name__}")
+    stock_reflexivity = build_stock_reflexivity(
+        card,
+        market_reflexivity,
+        regime,
+        sector_flow or None,
+    )
 
     try:
         global_snapshot = _global_market_service.snapshot(force_refresh=False)

@@ -56,6 +56,32 @@ def _json_list(raw: str | None) -> list[str]:
     return [str(item) for item in value] if isinstance(value, list) else []
 
 
+def _json_dict(raw: str | None) -> dict[str, Any]:
+    try:
+        value = json.loads(raw or "{}")
+    except Exception:
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def _event_in_trade_session(row: IntradayEvidenceEvent, trade_date: str) -> bool:
+    """Use publication time for news and capture time for market evidence.
+
+    This keeps an intraday announcement collected after close in the correct
+    decision session, while preventing an old headline captured today from
+    leaking into today's stock card.
+    """
+
+    event_type = str(getattr(row, "event_type", "") or "")
+    is_news = "NEWS_" in event_type
+    value = getattr(row, "source_published_at", None) if is_news else getattr(row, "captured_at", None)
+    if not isinstance(value, datetime):
+        return False
+    if value.tzinfo is not None:
+        value = shanghai_now_naive(value)
+    return value.date().isoformat() == trade_date and time(9, 15) <= value.time() <= time(15, 0)
+
+
 def minute_evidence_timeline(code: str, name: str, quote: dict[str, Any]) -> list[IntradayEvidenceEventOut]:
     """Build a read-only evidence chain from the actual minute at which a condition occurred."""
     rows = [row for row in (quote.get("minute_bars") or []) if isinstance(row, dict)]
@@ -707,13 +733,22 @@ def decision_card(db: Session, code: str) -> StockDecisionCardOut:
     events: list[IntradayEvidenceEventOut] = minute_evidence_timeline(code, name, quote)
     rows = (
         db.query(IntradayEvidenceEvent)
-        .filter(IntradayEvidenceEvent.target_code.in_([code, code.lstrip("0")]))
+        .filter(
+            IntradayEvidenceEvent.trade_date == _today(),
+            IntradayEvidenceEvent.target_code.in_([code, code.lstrip("0")]),
+        )
         .order_by(IntradayEvidenceEvent.captured_at.desc())
         .limit(100)
         .all()
     )
-    rows = [row for row in rows if time(9, 15) <= row.captured_at.time() <= time(15, 0)][:20]
-    for row in ([] if events else rows):
+    rows = [row for row in rows if _event_in_trade_session(row, _today())][:20]
+    for row in rows:
+        # Generated minute-price events remain the primary timeline.  Unified
+        # holding-news transitions are appended because they carry a separate
+        # causal clock (publication -> subsequent market validation) and must
+        # not disappear merely because minute bars are available.
+        if events and not str(row.event_type or "").startswith("HOLDING_NEWS_"):
+            continue
         events.append(
             IntradayEvidenceEventOut(
                 id=row.id,
@@ -725,7 +760,19 @@ def decision_card(db: Session, code: str) -> StockDecisionCardOut:
                 severity=row.severity,
                 value=row.value,
                 previous_value=row.previous_value,
+                priority=getattr(row, "priority", 0),
+                group_key=getattr(row, "group_key", ""),
+                state_key=getattr(row, "state_key", None),
+                first_seen_at=getattr(row, "first_seen_at", None),
+                last_seen_at=getattr(row, "last_seen_at", None),
+                occurrence_count=getattr(row, "occurrence_count", 1),
+                confirmed=bool(getattr(row, "confirmed", False)),
                 evidence=_json_list(row.evidence_json),
+                counter_evidence=_json_list(getattr(row, "counter_evidence_json", "[]")),
+                source=getattr(row, "source", "") or "",
+                source_url=getattr(row, "source_url", None),
+                source_published_at=getattr(row, "source_published_at", None),
+                metadata=_json_dict(getattr(row, "metadata_json", "{}")),
             )
         )
     allowed = ["按计划持有观察"] if not execution else [execution.recommended_action]

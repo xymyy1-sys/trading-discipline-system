@@ -128,6 +128,17 @@ def test_opportunity_radar_route_never_turns_news_into_buy_signal(client, monkey
     assert response.json()["consensus_high_open_fade"]["status"] == "DATA_GAP"
     assert any("同交易日市场环境快照" in note for note in response.json()["notes"])
 
+    persisted: list[object] = []
+    monkeypatch.setattr(
+        checks,
+        "persist_unified_market_events",
+        lambda *_args, **_kwargs: persisted.append(object()),
+    )
+    historical = client.get("/api/intel/opportunity-radar?date=2000-01-04")
+    assert historical.status_code == 200
+    assert persisted == []
+    assert "历史日期雷达仅供回看，不写入今日盘中事件流。" in historical.json()["notes"]
+
 
 def test_opportunity_radar_route_serializes_confirmed_intraday_expansion(client, monkeypatch):
     from app.api.routes import checks

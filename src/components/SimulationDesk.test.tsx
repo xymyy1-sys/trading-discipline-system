@@ -96,9 +96,18 @@ describe('模拟盘前端', () => {
       by_market_regime: [{ ...slice, key: 'ROTATION' }],
       by_expectation_gap: [{ ...slice, key: 'positive' }],
     }
+    const calibration = {
+      account_id: 7, generated_at: '2026-07-15T15:05:00+08:00', status: 'SAMPLE_INSUFFICIENT', eligible: false,
+      minimum_samples: 30, usable_sample_count: 8, excluded_sample_count: 0,
+      summary: '可追溯前向闭环样本 8/30，继续采样，禁止调参。',
+      overall: { key: 'overall', sample_count: 8, win_rate: 62.5, average_return_pct: 1, median_return_pct: 1, profit_loss_ratio: 1.5, total_realized_pnl: 18000 },
+      by_strategy: [], by_market_regime: [], by_expectation_gap: [], maximum_drawdown_pct: 12.5,
+      candidates: [], evidence: [], limitations: [], requires_manual_confirmation: true, auto_apply_allowed: false,
+    }
     vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input)
       if (url.endsWith('/api/simulation/accounts')) return jsonResponse([account])
+      if (url.endsWith('/calibration-proposal')) return jsonResponse(calibration)
       if (url.endsWith('/performance')) return jsonResponse(performance)
       throw new Error(`unexpected request: ${url}`)
     }))
@@ -110,6 +119,7 @@ describe('模拟盘前端', () => {
     expect(screen.getByText('按入场策略分层')).toBeInTheDocument()
     expect(screen.getByText('按入场市场环境分层')).toBeInTheDocument()
     expect(screen.getByText('按入场预期差分层')).toBeInTheDocument()
+    expect(screen.getByText('样本门槛校准候选')).toBeInTheDocument()
   })
 
   test('兼容后端 CANCELED 撤单状态拼写', async () => {

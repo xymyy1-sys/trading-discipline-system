@@ -797,13 +797,52 @@ def _cached_holding_theme_flow_profile(holding: Holding) -> dict[str, Any]:
         ranked_concept,
         concept_rank_map
     )
+    primary_flow = profile.get("primary_flow")
+    # Expose the *matched* board observation rather than asking downstream
+    # callers to infer a sector move from the fund-flow amount.  A zero change
+    # or zero net flow is a valid observation; only a missing matched board is
+    # treated as a data gap.
+    profile.update({
+        "matched": primary_flow is not None,
+        "sector_change_pct": (
+            float(getattr(primary_flow, "change_pct"))
+            if primary_flow is not None and getattr(primary_flow, "change_pct", None) is not None
+            else None
+        ),
+        "flow_speed": (
+            float(getattr(primary_flow, "flow_speed"))
+            if primary_flow is not None and getattr(primary_flow, "flow_speed", None) is not None
+            else None
+        ),
+        "flow_acceleration": (
+            float(getattr(primary_flow, "flow_acceleration"))
+            if primary_flow is not None and getattr(primary_flow, "flow_acceleration", None) is not None
+            else None
+        ),
+        "flow_direction": str(getattr(primary_flow, "flow_direction", "") or "") or None,
+        "flow_turning": str(getattr(primary_flow, "flow_turning", "") or "") or None,
+        "flow_signal": str(getattr(primary_flow, "flow_signal", "") or "") or None,
+        "flow_as_of": str(getattr(primary_flow, "flow_as_of", "") or "") or None,
+        "flow_window_minutes": getattr(primary_flow, "flow_window_minutes", None),
+        "flow_kinetics_reliable": bool(
+            primary_flow is not None
+            and getattr(primary_flow, "flow_kinetics_reliable", False)
+        ),
+    })
     # Preserve the actual cache/source timestamps.  Callers such as the
     # evidence-grounded AI assistant must never label an older sector-flow
     # cache with the current request time.
-    flow_snapshots = [item for item in (cached_industry, cached_concept) if item]
-    source_times = [getattr(item, "updated_at", None) for item in flow_snapshots]
+    if profile.get("basis") == "概念资金流":
+        flow_snapshots = [item for item in (cached_concept,) if item]
+    elif profile.get("basis") == "行业资金流":
+        flow_snapshots = [item for item in (cached_industry,) if item]
+    else:
+        flow_snapshots = []
+    source_times = [getattr(primary_flow, "updated_at", None)] if primary_flow is not None else []
+    source_times.extend(getattr(item, "updated_at", None) for item in flow_snapshots)
     source_times = [item for item in source_times if item is not None]
-    sources = [str(getattr(item, "source", "") or "") for item in flow_snapshots]
+    sources = [str(getattr(primary_flow, "provider", "") or "")] if primary_flow is not None else []
+    sources.extend(str(getattr(item, "source", "") or "") for item in flow_snapshots)
     sources = list(dict.fromkeys(item for item in sources if item))
     profile["as_of"] = min(source_times).isoformat() if source_times else "未知"
     profile["source"] = "+".join(sources) or "板块资金缓存不可用"
@@ -869,7 +908,7 @@ def _fetch_eastmoney_h5_board_flow(secid: str, display_name: str) -> Any | None:
         "https://emdatah5.eastmoney.com/dc/ZJLX/getZJLXData",
         params={
             "secid": secid,
-            "fields": "f57,f58,f135,f136,f137,f138,f139,f140,f141,f142,f143,f144,f145,f146,f147,f148,f149,f86",
+            "fields": "f3,f57,f58,f135,f136,f137,f138,f139,f140,f141,f142,f143,f144,f145,f146,f147,f148,f149,f86",
             "ut": "b2884a393a59ad64002292a3e90d46a5",
         },
         headers={"User-Agent": "Mozilla/5.0", "Referer": "https://emdatah5.eastmoney.com/"},
@@ -885,6 +924,15 @@ def _fetch_eastmoney_h5_board_flow(secid: str, display_name: str) -> Any | None:
     super_large_net = round(float(data.get("f140") or 0) / 1e8, 2)
     large_net = round(float(data.get("f143") or 0) / 1e8, 2)
     main_inflow = round(super_large_net + large_net, 2) if (super_large_net or large_net) else main_net
+    raw_change = data.get("f3")
+    try:
+        board_change_pct = (
+            round(float(raw_change) / 100, 4)
+            if raw_change not in (None, "", "-")
+            else None
+        )
+    except (TypeError, ValueError):
+        board_change_pct = None
     flow = SimpleNamespace(
         name=name,
         display_name=name,
@@ -895,12 +943,16 @@ def _fetch_eastmoney_h5_board_flow(secid: str, display_name: str) -> Any | None:
         mainline=name,
         subline="",
         category="行业资金流",
-        change_pct=0.0,
+        # Eastmoney f3 is scaled by 100.  Missing f3 remains missing; a zero
+        # must never be manufactured merely because this endpoint primarily
+        # serves fund-flow fields.
+        change_pct=board_change_pct,
         net_inflow=main_net,
         main_inflow=main_inflow,
         strength=max(0, min(100, int(50 + main_net / 2))),
         leaders=[],
         timeline=_eastmoney_h5_board_timeline(secid, main_net),
+        updated_at=shanghai_now_naive(),
     )
     _set_response_cache(cache_key, flow)
     return flow

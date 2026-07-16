@@ -18,6 +18,7 @@ from fastapi import HTTPException
 from app.services.market_data import MarketDataProvider
 from app.services.opportunity_radar import OpportunityRadarService
 from app.services.sector_expansion import SectorExpansionRadarService
+from app.services.unified_market_events import persist_unified_market_events
 from app.api.helpers.reflexivity import build_consensus_high_open_fade
 from app.core.limiter import limiter
 
@@ -158,4 +159,22 @@ def opportunity_radar(
         result["notes"] = list(dict.fromkeys([*(result.get("notes") or []), regime_note]))
         if result.get("data_quality") == "ok":
             result["data_quality"] = "degraded"
+    today = datetime.now(SHANGHAI_TZ).date().isoformat()
+    if target_trade_date == today:
+        try:
+            persist_unified_market_events(db, result, holdings)
+        except Exception as exc:
+            # Event persistence is an observability side effect.  A temporary DB
+            # failure must not turn valid market evidence into a fabricated data
+            # gap or make the read endpoint unavailable.
+            db.rollback()
+            result["notes"] = list(dict.fromkeys([
+                *(result.get("notes") or []),
+                f"统一事件流写入失败：{type(exc).__name__}；本次雷达结果仍按原始证据返回。",
+            ]))
+    else:
+        result["notes"] = list(dict.fromkeys([
+            *(result.get("notes") or []),
+            "历史日期雷达仅供回看，不写入今日盘中事件流。",
+        ]))
     return OpportunityRadarOut.model_validate(result)

@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import json
-from datetime import timedelta
+import math
+from datetime import datetime, time, timedelta, timezone
 from typing import Any, Mapping
 
 from sqlalchemy.orm import Session
@@ -53,7 +54,122 @@ def _valid_number(value: Any) -> float | None:
         number = float(value)
     except (TypeError, ValueError):
         return None
-    return number
+    return number if math.isfinite(number) else None
+
+
+def _context_value(context: Mapping[str, Any] | Any | None, key: str, default: Any = None) -> Any:
+    if context is None:
+        return default
+    if isinstance(context, Mapping):
+        return context.get(key, default)
+    return getattr(context, key, default)
+
+
+def _parse_evidence_time(value: Any) -> datetime | None:
+    if isinstance(value, datetime):
+        parsed = value
+    else:
+        text = str(value or "").strip().replace("Z", "+00:00")
+        if not text or text == "未知":
+            return None
+        try:
+            parsed = datetime.fromisoformat(text)
+        except ValueError:
+            # Fund-flow kinetics sometimes expose HH:MM only.  Such a value
+            # cannot prove the trade date and therefore must not be promoted
+            # into a deterministic stock signal here.
+            return None
+    if parsed.tzinfo is not None:
+        parsed = parsed.astimezone(timezone(timedelta(hours=8))).replace(tzinfo=None)
+    return parsed
+
+
+def sector_reflexivity_metrics(
+    card: StockDecisionCardOut,
+    sector_context: Mapping[str, Any] | Any | None,
+    *,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    """Normalize traceable sector evidence for a stock reflexivity decision.
+
+    The board change is never inferred from a fund-flow amount.  Intraday
+    speed/turning is admitted only when the upstream kinetics calculation is
+    explicitly reliable.  Stale or unmatched data remains ``None`` so it can
+    only produce a visible evidence gap.
+    """
+
+    result: dict[str, Any] = {
+        "sector_relative_strength_pct": None,
+        "sector_change_pct": None,
+        "sector_net_inflow_yi": None,
+        "sector_main_inflow_yi": None,
+        "sector_flow_speed_yi_per_minute": None,
+        "sector_flow_acceleration": None,
+        "sector_flow_turning": None,
+        "sector_flow_kinetics_reliable": False,
+        "sector_evidence_as_of": None,
+        "sector_evidence_quality": "missing",
+    }
+    if sector_context is None or _context_value(sector_context, "matched") is not True:
+        return result
+
+    quality = str(_context_value(sector_context, "data_quality") or "").strip().lower()
+    source = str(_context_value(sector_context, "source") or "").strip().lower()
+    if quality not in {"realtime", "complete", "ok", "cached_source_timestamped"}:
+        return result
+    if any(marker in source for marker in ("mock", "manual", "simulat")):
+        return result
+
+    captured_at = _parse_evidence_time(_context_value(sector_context, "as_of"))
+    current = now or datetime.now(timezone(timedelta(hours=8))).replace(tzinfo=None)
+    if current.tzinfo is not None:
+        current = current.astimezone(timezone(timedelta(hours=8))).replace(tzinfo=None)
+    if captured_at is None or captured_at > current + timedelta(minutes=2):
+        return result
+    age = current - captured_at
+    during_market = current.weekday() < 5 and time(9, 15) <= current.time() <= time(15, 0)
+    max_age = timedelta(minutes=12) if during_market else timedelta(hours=18)
+    if current.weekday() >= 5:
+        max_age = timedelta(hours=72)
+    if age > max_age:
+        result["sector_evidence_quality"] = "stale"
+        result["sector_evidence_as_of"] = captured_at.isoformat()
+        return result
+
+    sector_change = _valid_number(_context_value(sector_context, "sector_change_pct"))
+    stock_change = _valid_number(card.change_pct)
+    card_quality = str(card.data_quality or "").lower()
+    if sector_change is not None:
+        result["sector_change_pct"] = round(sector_change, 4)
+        if stock_change is not None and card_quality not in {"", "missing", "manual"}:
+            result["sector_relative_strength_pct"] = round(stock_change - sector_change, 4)
+
+    result["sector_net_inflow_yi"] = _valid_number(
+        _context_value(sector_context, "current", _context_value(sector_context, "sector_net_inflow"))
+    )
+    result["sector_main_inflow_yi"] = _valid_number(
+        _context_value(sector_context, "main", _context_value(sector_context, "sector_main_inflow"))
+    )
+    result["sector_evidence_as_of"] = captured_at.isoformat()
+    result["sector_evidence_quality"] = "fresh"
+
+    kinetics_reliable = _context_value(sector_context, "flow_kinetics_reliable") is True
+    result["sector_flow_kinetics_reliable"] = kinetics_reliable
+    if kinetics_reliable:
+        result["sector_flow_speed_yi_per_minute"] = _valid_number(
+            _context_value(sector_context, "flow_speed", _context_value(sector_context, "sector_flow_speed"))
+        )
+        result["sector_flow_acceleration"] = _valid_number(
+            _context_value(
+                sector_context,
+                "flow_acceleration",
+                _context_value(sector_context, "sector_flow_acceleration"),
+            )
+        )
+        result["sector_flow_turning"] = str(
+            _context_value(sector_context, "flow_turning", _context_value(sector_context, "sector_flow_turning")) or ""
+        ).upper() or None
+    return result
 
 
 def _indices_from_regime(regime: MarketRegimeOut | MarketRegimeSnapshot | None) -> list[Any]:
@@ -379,7 +495,12 @@ def _explicit_hard_stop_triggered(card: StockDecisionCardOut) -> bool:
     )
 
 
-def stock_reflexivity_metrics(card: StockDecisionCardOut) -> dict[str, Any]:
+def stock_reflexivity_metrics(
+    card: StockDecisionCardOut,
+    sector_context: Mapping[str, Any] | Any | None = None,
+    *,
+    now: datetime | None = None,
+) -> dict[str, Any]:
     expectation = card.expectation
     volume = card.volume_price
     volume_usable = volume is not None and volume.data_quality not in {"", "missing"}
@@ -421,7 +542,7 @@ def stock_reflexivity_metrics(card: StockDecisionCardOut) -> dict[str, Any]:
             card.current_price, execution.structure_stop_price
         )
 
-    return {
+    metrics = {
         "code": card.code,
         "name": card.name,
         "expectation_gap_score": expectation.expectation_gap_score,
@@ -433,18 +554,18 @@ def stock_reflexivity_metrics(card: StockDecisionCardOut) -> dict[str, Any]:
         "low_rebound_pct": low_rebound,
         "high_drawdown_pct": high_drawdown,
         "volume_ratio": volume_ratio,
-        # The decision card currently has no numeric sector-relative series.
-        # Leave it absent so the scenario engine reports the evidence gap.
-        "sector_relative_strength_pct": None,
         "support_distance_pct": support_distance,
         "hard_stop_triggered": _explicit_hard_stop_triggered(card),
     }
+    metrics.update(sector_reflexivity_metrics(card, sector_context, now=now))
+    return metrics
 
 
 def build_stock_reflexivity(
     card: StockDecisionCardOut,
     market_assessment: dict[str, Any],
     regime: MarketRegimeOut,
+    sector_context: Mapping[str, Any] | Any | None = None,
 ) -> dict[str, Any]:
     context = dict(market_assessment)
     risk_regimes = {
@@ -457,7 +578,10 @@ def build_stock_reflexivity(
         # The behavioral path and the objective market gate are both real.  For
         # stock execution, the more conservative objective risk gate prevails.
         context["current_scenario"] = regime.regime_code
-    result = analyze_stock_reflexivity(stock_reflexivity_metrics(card), context)
+    result = analyze_stock_reflexivity(
+        stock_reflexivity_metrics(card, sector_context),
+        context,
+    )
     result["as_of"] = (
         card.volume_price.captured_at
         if card.volume_price is not None

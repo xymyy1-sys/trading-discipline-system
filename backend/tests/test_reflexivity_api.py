@@ -1,9 +1,10 @@
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from app.api.helpers.reflexivity import (
     build_consensus_high_open_fade,
     market_reflexivity_metrics,
+    sector_reflexivity_metrics,
     stock_reflexivity_metrics,
 )
 from app.api.routes import market as market_routes
@@ -327,6 +328,43 @@ def test_stock_reflexivity_endpoint_accepts_force_refresh_without_network(
     assert payload["hard_stop_triggered"] is False
 
 
+def test_stock_reflexivity_endpoint_injects_matched_holding_sector_evidence(
+    client, monkeypatch
+):
+    now = datetime.now(timezone(timedelta(hours=8))).replace(tzinfo=None)
+    monkeypatch.setattr(stock_routes, "decision_card", lambda db, code: _card())
+    monkeypatch.setattr(stock_routes, "get_market_regime", lambda db, force_refresh=False: _regime())
+    monkeypatch.setattr(stock_routes, "_find_holding_by_code", lambda db, code: object())
+    monkeypatch.setattr(
+        stock_routes,
+        "_cached_holding_theme_flow_profile",
+        lambda holding: {
+            "matched": True,
+            "data_quality": "cached_source_timestamped",
+            "source": "eastmoney-sector-flow",
+            "as_of": now.isoformat(),
+            "sector_change_pct": -1.2,
+            "current": -18.5,
+            "main": -22.0,
+            "flow_speed": -0.42,
+            "flow_acceleration": -0.08,
+            "flow_turning": "TURN_TO_OUTFLOW",
+            "flow_kinetics_reliable": True,
+        },
+    )
+
+    response = client.get("/api/stocks/600879/reflexivity")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert "个股相对板块强弱" not in payload["missing_fields"]
+    scenarios = {item["code"]: item for item in payload["scenarios"]}
+    assert any(
+        "板块资金" in item
+        for item in scenarios["NO_REBOUND_LIQUIDATION"]["evidence"]
+    )
+
+
 def test_only_an_explicit_frozen_stop_can_trigger_hard_stop():
     cost_reference = stock_reflexivity_metrics(
         _card(stop_source="cost_reference", hard_stop_price=10.0)
@@ -351,3 +389,64 @@ def test_missing_volume_price_stays_missing_instead_of_becoming_zero():
     assert metrics["low_rebound_pct"] is None
     assert metrics["high_drawdown_pct"] is None
     assert metrics["volume_ratio"] is None
+
+
+def test_fresh_matched_sector_context_supplies_relative_strength_and_flow_kinetics():
+    now = datetime(2026, 7, 14, 10, 36)
+    metrics = sector_reflexivity_metrics(
+        _card(),
+        {
+            "matched": True,
+            "data_quality": "cached_source_timestamped",
+            "source": "eastmoney-sector-flow",
+            "as_of": "2026-07-14T10:31:00+08:00",
+            "sector_change_pct": -1.2,
+            "current": -18.5,
+            "main": -22.0,
+            "flow_speed": -0.42,
+            "flow_acceleration": -0.08,
+            "flow_turning": "TURN_TO_OUTFLOW",
+            "flow_kinetics_reliable": True,
+        },
+        now=now,
+    )
+
+    assert metrics["sector_relative_strength_pct"] == -3.0
+    assert metrics["sector_net_inflow_yi"] == -18.5
+    assert metrics["sector_flow_speed_yi_per_minute"] == -0.42
+    assert metrics["sector_flow_turning"] == "TURN_TO_OUTFLOW"
+    assert metrics["sector_evidence_quality"] == "fresh"
+
+
+def test_stale_or_unmatched_sector_context_cannot_become_zero_strength():
+    now = datetime(2026, 7, 14, 10, 36)
+    stale = sector_reflexivity_metrics(
+        _card(),
+        {
+            "matched": True,
+            "data_quality": "ok",
+            "source": "eastmoney-sector-flow",
+            "as_of": "2026-07-14T10:00:00+08:00",
+            "sector_change_pct": 0,
+            "current": 0,
+        },
+        now=now,
+    )
+    unmatched = sector_reflexivity_metrics(
+        _card(),
+        {
+            "matched": False,
+            "data_quality": "ok",
+            "source": "eastmoney-sector-flow",
+            "as_of": "2026-07-14T10:35:00+08:00",
+            "sector_change_pct": 0,
+            "current": 0,
+        },
+        now=now,
+    )
+
+    assert stale["sector_evidence_quality"] == "stale"
+    assert stale["sector_relative_strength_pct"] is None
+    assert stale["sector_net_inflow_yi"] is None
+    assert unmatched["sector_relative_strength_pct"] is None
+    assert unmatched["sector_net_inflow_yi"] is None

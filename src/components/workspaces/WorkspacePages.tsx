@@ -161,6 +161,7 @@ export function TodayDecisionSummary() {
   const [streamNotice, setStreamNotice] = useState('')
   const [streamReconnects, setStreamReconnects] = useState(0)
   const streamInterrupted = useRef(false)
+  const streamCursorRef = useRef('')
   const holdingCodesRef = useRef<Set<string>>(new Set())
   const holdingDecisionRefreshedAt = useRef<Record<string, number>>({})
   const marketReflexivityLoadedAt = useRef(0)
@@ -215,19 +216,30 @@ export function TodayDecisionSummary() {
       }
       if (executionRes.status === 'fulfilled' && Array.isArray(executionRes.value)) {
         setExecutionStates(executionRes.value)
-        const holdingRiskEvents = (executionRes.value as PositionExecutionState[])
-          .flatMap(item => item.events ?? [])
-          .filter(isRiskEvent)
-          .sort((left, right) => +new Date(right.captured_at) - +new Date(left.captured_at))
-          .slice(0, 8)
-        setRealtimeEvents(holdingRiskEvents)
       }
       if (seesawRes.status === 'fulfilled') setSeesaw(seesawRes.value)
       if (themeRes.status === 'fulfilled') setTheme(themeRes.value)
       if (alertRes.status === 'fulfilled' && Array.isArray(alertRes.value)) setActiveAlerts(alertRes.value)
       if (intelRes.status === 'fulfilled' && Array.isArray(intelRes.value?.items)) setHoldingNews(intelRes.value.items.filter((item: InformationItem) => item.related_holdings?.length).slice(0, 6))
+      const holdingRiskEvents = executionRes.status === 'fulfilled' && Array.isArray(executionRes.value)
+        ? (executionRes.value as PositionExecutionState[]).flatMap(item => item.events ?? []).filter(isRiskEvent)
+        : []
+      setRealtimeEvents(previous => mergeRealtimeEventList([...previous, ...holdingRiskEvents]))
     })
-    void Promise.allSettled([marketPromise, globalPromise, opportunityPromise, workspacePromise])
+    // Hydrate after both the radar persistence and holdings list have settled.
+    // This closes the SSE insertion race and prevents watchlist-only stock
+    // events from appearing in the holdings cockpit during initial load.
+    const recentEventsPromise = Promise.allSettled([opportunityPromise, workspacePromise])
+      .then(() => fetchJsonWithTimeout(`${API_BASE}/api/intraday-events/recent?limit=40`, 12000))
+      .then(value => {
+        if (!Array.isArray(value)) return
+        const cockpitEvents = (value as IntradayEvidenceEvent[]).filter(event => (
+          isRiskEvent(event)
+          && (['sector', 'market'].includes(event.scope) || holdingCodesRef.current.has(event.target_code))
+        ))
+        setRealtimeEvents(previous => mergeRealtimeEventList([...previous, ...cockpitEvents]))
+      })
+    void Promise.allSettled([marketPromise, globalPromise, opportunityPromise, recentEventsPromise, workspacePromise])
       .finally(() => setLoading(false))
   }
 
@@ -308,7 +320,10 @@ export function TodayDecisionSummary() {
       }
       if (source && source.readyState !== EventSource.CLOSED) return
 
-      source = new EventSource(`${API_BASE}/api/intraday-events/stream`, { withCredentials: true })
+      const cursorQuery = streamCursorRef.current
+        ? `?last_event_id=${encodeURIComponent(streamCursorRef.current)}`
+        : ''
+      source = new EventSource(`${API_BASE}/api/intraday-events/stream${cursorQuery}`, { withCredentials: true })
       source.onopen = () => {
         setStreamState('实时推送已连接')
         if (streamInterrupted.current) {
@@ -328,11 +343,15 @@ export function TodayDecisionSummary() {
       })
       source.addEventListener('intraday-risk', event => {
         try {
-          const payload = JSON.parse((event as MessageEvent).data) as IntradayEvidenceEvent
-          if (!holdingCodesRef.current.has(payload.target_code) || !isRiskEvent(payload)) return
-          setRealtimeEvents(prev => [payload, ...prev.filter(item => item.id !== payload.id)].slice(0, 8))
+          const message = event as MessageEvent
+          if (message.lastEventId) streamCursorRef.current = message.lastEventId
+          const payload = JSON.parse(message.data) as IntradayEvidenceEvent
+          const holdingEvent = holdingCodesRef.current.has(payload.target_code)
+          const marketEvent = ['sector', 'market'].includes(payload.scope)
+          if ((!holdingEvent && !marketEvent) || !isRiskEvent(payload)) return
+          setRealtimeEvents(prev => mergeRealtimeEventList([payload, ...prev]))
           setStreamLastAt(new Date().toLocaleTimeString('zh-CN', { hour12: false }))
-          if (payload.target_code) refreshHoldingDecision(payload.target_code)
+          if (holdingEvent && payload.target_code) refreshHoldingDecision(payload.target_code)
         } catch {
           setStreamState('实时事件解析失败')
         }
@@ -503,6 +522,11 @@ export function TodayDecisionSummary() {
               <b>{event.target_name || event.target_code}</b>
               <span>{chineseLabel(event.event_type)} · {riskActionForEvent(event, executionStates)}</span>
               <small className="sensitive-evidence">{riskDetailForEvent(event, decisionCards, executionStates)}</small>
+              {eventMetadataString(event, 'title') && (event.source_url
+                ? <small><a href={event.source_url} target="_blank" rel="noreferrer">原文：{eventMetadataString(event, 'title')}</a></small>
+                : <small>消息：{eventMetadataString(event, 'title')}</small>)}
+              {(event.source || event.source_published_at) && <small>{event.source || '可追溯事件源'}{event.source_published_at ? ` · 原始发布时间 ${new Date(event.source_published_at).toLocaleString('zh-CN')}` : ''}</small>}
+              {(event.counter_evidence?.length ?? 0) > 0 && <details><summary>查看反证与待补证据</summary>{event.counter_evidence?.slice(0, 4).map(item => <p key={item}>- {chineseEvidence(item)}</p>)}</details>}
             </article>
           ))
         ) : (
@@ -1048,6 +1072,21 @@ function isRiskEvent(event: IntradayEvidenceEvent) {
   ].includes(event.event_type)
 }
 
+function mergeRealtimeEventList(events: IntradayEvidenceEvent[]) {
+  const seen = new Set<string>()
+  return events
+    .filter(event => {
+      const key = event.id !== null && event.id !== undefined
+        ? `id:${event.id}`
+        : `${event.scope}:${event.target_code}:${event.event_type}:${event.captured_at}`
+      if (seen.has(key)) return false
+      seen.add(key)
+      return true
+    })
+    .sort((left, right) => (right.priority - left.priority) || (+new Date(right.captured_at) - +new Date(left.captured_at)))
+    .slice(0, 12)
+}
+
 function riskActionForEvent(event: IntradayEvidenceEvent, states: PositionExecutionState[]) {
   const state = states.find(item => item.code === event.target_code)
   const semantics = intradayEventSemantics(event.event_type, event.severity)
@@ -1057,7 +1096,12 @@ function riskActionForEvent(event: IntradayEvidenceEvent, states: PositionExecut
       ? `${semantics.guidance} 当前执行闸门仍要求：${state.recommended_action}，正向事件不自动解除硬风险。`
       : semantics.guidance)
   }
-  return chineseEvidence(state?.recommended_action || semantics.guidance || (event.severity === 'critical' ? '立即降低风险' : '核对并按计划处理'))
+  return chineseEvidence(state?.recommended_action || eventMetadataString(event, 'action') || semantics.guidance || (event.severity === 'critical' ? '立即降低风险' : '核对并按计划处理'))
+}
+
+function eventMetadataString(event: IntradayEvidenceEvent, key: string) {
+  const value = event.metadata?.[key]
+  return typeof value === 'string' ? value : ''
 }
 
 function riskDetailForEvent(

@@ -450,6 +450,26 @@ def analyze_stock_reflexivity(
     volume = _number(metrics, "volume_ratio", "relative_volume")
     sector_rs = _number(metrics, "sector_relative_strength_pct", "relative_strength_pct")
     sector_flow = _number(metrics, "sector_net_inflow_yi")
+    sector_flow_speed = _number(metrics, "sector_flow_speed_yi_per_minute", "sector_flow_speed")
+    sector_flow_acceleration = _number(metrics, "sector_flow_acceleration")
+    sector_flow_turning = str(metrics.get("sector_flow_turning") or "").upper()
+    sector_flow_reliable = _boolean(metrics, "sector_flow_kinetics_reliable") is True
+    sector_flow_weakening = bool(
+        sector_flow_reliable
+        and (
+            sector_flow_turning in {"TURN_TO_OUTFLOW", "OUTFLOW_ACCELERATING", "INFLOW_FADING", "FLOW_WEAKENING"}
+            or (sector_flow_speed is not None and sector_flow_speed < 0)
+            or (sector_flow_acceleration is not None and sector_flow_acceleration < 0)
+        )
+    )
+    sector_flow_improving = bool(
+        sector_flow_reliable
+        and (
+            sector_flow_turning in {"TURN_TO_INFLOW", "OUTFLOW_NARROWING", "INFLOW_ACCELERATING", "FLOW_IMPROVING"}
+            or (sector_flow_speed is not None and sector_flow_speed > 0)
+            or (sector_flow_acceleration is not None and sector_flow_acceleration > 0)
+        )
+    )
     support_distance = _number(metrics, "support_distance_pct")
     hard_stop = _boolean(metrics, "hard_stop_triggered") is True
     market_scenario = str(market_context.get("current_scenario") or metrics.get("market_regime_code") or "")
@@ -474,12 +494,14 @@ def analyze_stock_reflexivity(
     sell_crowding += 16 if vwap is not None and vwap <= -2 else 8 if vwap is not None and vwap < 0 else 0
     sell_crowding += 15 if drawdown is not None and drawdown >= 7 else 7 if drawdown is not None and drawdown >= 3 else 0
     sell_crowding += 12 if sector_rs is not None and sector_rs <= -2 else 0
+    sell_crowding += 10 if sector_flow_weakening else 0
     sell_crowding += 10 if market_risk else 0
     long_crowding = 0.0
     long_crowding += 22 if gap is not None and gap >= 15 else 10 if gap is not None and gap > 0 else 0
     long_crowding += 18 if change is not None and change >= 7 else 9 if change is not None and change >= 3 else 0
     long_crowding += 16 if vwap is not None and vwap >= 2 else 8 if vwap is not None and vwap > 0 else 0
     long_crowding += 12 if sector_rs is not None and sector_rs >= 2 else 0
+    long_crowding += 10 if sector_flow_improving else 0
     long_crowding += 10 if volume is not None and volume >= 1.8 else 0
 
     scenarios: list[dict[str, Any]] = []
@@ -490,12 +512,15 @@ def analyze_stock_reflexivity(
     score += _add(rebound is not None and rebound >= 2, 20, evidence, f"股价从日内低点反弹{_fmt(rebound)}%")
     score += _add(vwap is not None and vwap >= 0, 18, evidence, f"股价回到分时均价上方{_fmt(vwap, signed=True)}%")
     score += _add(sector_rs is not None and sector_rs >= 0, 13, evidence, f"相对所属板块强度{_fmt(sector_rs, signed=True)}%")
+    score += _add(sector_flow_improving, 10, evidence, "所属板块资金流速/拐点边际改善")
     score += _add(volume is not None and volume >= 1, 12, evidence, f"量能比{_fmt(volume)}，承接有量")
     score += _add(gap is not None and gap >= 0, 10, evidence, f"当前预期差{_fmt(gap, 1, signed=True)}")
     if market_risk:
         counter.append(f"全市场仍处于{market_scenario}风险状态")
     if sector_flow is not None and sector_flow < 0:
         counter.append(f"所属板块资金净流出{abs(sector_flow):.1f}亿元")
+    if sector_flow_weakening:
+        counter.append("所属板块资金流速或拐点正在转弱")
     scenarios.append(_scenario(
         "REBOUND_ABSORPTION", "反弹获得承接", score, evidence, counter,
         ["保留计划内仓位，观察回踩分时均价", "回踩缩量不破且板块同步转强时继续持有"],
@@ -509,6 +534,7 @@ def analyze_stock_reflexivity(
     score += _add(vwap is not None and vwap < 0, 17, evidence, f"股价位于分时均价下方{_fmt(vwap, absolute=True)}%")
     score += _add(rebound is not None and rebound < 1, 14, evidence, f"距日内低点反弹仅{_fmt(rebound)}%")
     score += _add(sector_rs is not None and sector_rs < 0, 12, evidence, f"弱于所属板块{_fmt(sector_rs, absolute=True)}%")
+    score += _add(sector_flow_weakening, 10, evidence, "所属板块资金流速/拐点继续转弱")
     score += _add(market_risk, 10, evidence, "全市场风险闸门处于防守状态")
     score += _add(support_distance is not None and support_distance < 0, 10, evidence, f"已跌破预定义支撑{_fmt(support_distance, absolute=True)}%")
     if volume is not None and volume < 0.8:
@@ -534,6 +560,7 @@ def analyze_stock_reflexivity(
     score += _add(drawdown is not None and drawdown >= 4, 18, evidence, f"距日内高点回撤{_fmt(drawdown)}%")
     score += _add(volume is not None and volume >= 1.2, 12, evidence, f"量能比{_fmt(volume)}但价格未能维持")
     score += _add(sector_rs is not None and sector_rs < 0, 10, evidence, f"反弹后仍弱于板块{_fmt(sector_rs, absolute=True)}%")
+    score += _add(sector_flow_weakening, 10, evidence, "反弹阶段板块资金仍在边际转弱")
     if vwap is not None and vwap >= 0:
         counter.append("股价已经回收分时均价")
     scenarios.append(_scenario(
@@ -549,6 +576,7 @@ def analyze_stock_reflexivity(
     score += _add(vwap is not None and vwap >= 0.5, 17, evidence, f"股价站上分时均价{_fmt(vwap, signed=True)}%")
     score += _add(change is not None and change > 0, 13, evidence, f"股价上涨{_fmt(change)}%")
     score += _add(sector_rs is not None and sector_rs >= 1, 14, evidence, f"强于所属板块{_fmt(sector_rs, signed=True)}%")
+    score += _add(sector_flow_improving, 10, evidence, "所属板块资金流速/拐点同步改善")
     score += _add(volume is not None and 1 <= volume <= 2.5, 11, evidence, f"量能比{_fmt(volume)}，量价尚未极端")
     if market_risk:
         counter.append(f"全市场{market_scenario}仍限制个股仓位上限")

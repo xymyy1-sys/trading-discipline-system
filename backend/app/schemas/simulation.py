@@ -29,6 +29,7 @@ class SimulationAccountOut(BaseModel):
     minimum_commission: float
     stamp_tax_rate: float
     transfer_fee_rate: float
+    account_type: str = "manual"
     status: str
     created_at: datetime
     updated_at: datetime
@@ -212,3 +213,73 @@ class SimulationPerformanceOut(BaseModel):
     by_strategy: list[SimulationPerformanceSlice]
     by_market_regime: list[SimulationPerformanceSlice]
     by_expectation_gap: list[SimulationPerformanceSlice]
+
+
+class SimulationCalibrationCandidate(BaseModel):
+    target: str
+    field: str
+    direction: Literal["tighten", "loosen", "hold"]
+    suggestion: str
+    reason: str
+    sample_count: int
+    support_metric: str
+
+
+class SimulationCalibrationMetric(BaseModel):
+    key: str = "overall"
+    sample_count: int
+    win_rate: float
+    average_return_pct: float
+    median_return_pct: float
+    profit_loss_ratio: float
+    total_realized_pnl: float
+
+
+class SimulationCalibrationProposalOut(BaseModel):
+    account_id: int
+    generated_at: datetime
+    status: str
+    eligible: bool
+    candidate_generation_allowed: bool = False
+    statistics_only: bool = True
+    minimum_samples: int
+    statistical_sample_count: int = 0
+    usable_sample_count: int
+    excluded_sample_count: int
+    exclusion_reasons: list[str] = Field(default_factory=list)
+    summary: str
+    overall: SimulationCalibrationMetric
+    by_strategy: list[SimulationCalibrationMetric] = Field(default_factory=list)
+    by_market_regime: list[SimulationCalibrationMetric] = Field(default_factory=list)
+    by_expectation_gap: list[SimulationCalibrationMetric] = Field(default_factory=list)
+    maximum_drawdown_pct: float = 0
+    candidates: list[SimulationCalibrationCandidate] = Field(default_factory=list)
+    evidence: list[str] = Field(default_factory=list)
+    limitations: list[str] = Field(default_factory=list)
+    requires_manual_confirmation: bool = True
+    auto_apply_allowed: Literal[False] = False
+
+
+class SimulationShadowDecisionOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    account_id: int
+    signal_key: str
+    strategy_source: str
+    source_kind: str
+    source_id: int | None = None
+    rule_version: str
+    source_version: str
+    trade_date: str
+    source_at: datetime | None = None
+    evaluated_at: datetime
+    code: str
+    name: str
+    intent: str
+    side: str
+    quantity: int
+    status: str
+    reason: str
+    order_id: int | None = None
+    evidence_json: str

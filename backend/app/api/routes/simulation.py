@@ -10,10 +10,12 @@ from app.models.trading import (
     SimulationFill,
     SimulationOrder,
     SimulationPosition,
+    SimulationShadowDecision,
 )
 from app.schemas.simulation import (
     SimulationAccountCreate,
     SimulationAccountOut,
+    SimulationCalibrationProposalOut,
     SimulationClosedTradeOut,
     SimulationDailyEquityOut,
     SimulationEvidenceOut,
@@ -22,6 +24,7 @@ from app.schemas.simulation import (
     SimulationOrderOut,
     SimulationPerformanceOut,
     SimulationPositionOut,
+    SimulationShadowDecisionOut,
 )
 from app.services.simulation import (
     cancel_order,
@@ -31,6 +34,7 @@ from app.services.simulation import (
     process_open_orders,
     submit_order,
 )
+from app.services.simulation_calibration import simulation_calibration_proposal
 
 
 router = APIRouter(prefix="/simulation", tags=["simulation"])
@@ -167,6 +171,44 @@ def list_simulation_evidence(
 @router.get("/accounts/{account_id}/performance", response_model=SimulationPerformanceOut)
 def simulation_performance(account_id: int, db: Session = Depends(get_db)) -> dict:
     return performance_report(db, _account_or_404(db, account_id))
+
+
+@router.get(
+    "/accounts/{account_id}/calibration-proposal",
+    response_model=SimulationCalibrationProposalOut,
+)
+def get_simulation_calibration_proposal(
+    account_id: int,
+    db: Session = Depends(get_db),
+) -> dict:
+    return simulation_calibration_proposal(db, _account_or_404(db, account_id))
+
+
+@router.get(
+    "/accounts/{account_id}/shadow-decisions",
+    response_model=list[SimulationShadowDecisionOut],
+)
+def list_simulation_shadow_decisions(
+    account_id: int,
+    status: str = "",
+    limit: int = Query(default=200, ge=1, le=1000),
+    db: Session = Depends(get_db),
+) -> list[SimulationShadowDecision]:
+    """Expose the immutable signal-to-paper-order audit trail.
+
+    This is read-only and never triggers matching or any real-trading path.
+    """
+
+    _account_or_404(db, account_id)
+    query = db.query(SimulationShadowDecision).filter(
+        SimulationShadowDecision.account_id == account_id,
+    )
+    if status:
+        query = query.filter(SimulationShadowDecision.status == status.upper())
+    return query.order_by(
+        SimulationShadowDecision.evaluated_at.desc(),
+        SimulationShadowDecision.id.desc(),
+    ).limit(limit).all()
 
 
 @router.get("/accounts/{account_id}/closed-trades", response_model=list[SimulationClosedTradeOut])

@@ -18,6 +18,8 @@ const RISK_EVENTS = new Set([
   'SHRINKING_DECLINE_WEAKNESS',
   'FLOW_TURN_OUT_DISTRIBUTION_WARNING',
   'HIGH_SELL_WINDOW',
+  'NEWS_NEGATIVE_IMPACT_CONFIRMED',
+  'HOLDING_NEWS_NEGATIVE_IMPACT_CONFIRMED',
 ])
 
 const POSITIVE_EVENTS = new Set([
@@ -25,6 +27,9 @@ const POSITIVE_EVENTS = new Set([
   'SECTOR_FLOW_RECOVERY',
   'VOLUME_FLOW_STRENGTH_CONFIRMED',
   'VOLUME_REBOUND_CONFIRMED',
+  'SECTOR_INCREMENT_CONFIRMED',
+  'NEWS_POSITIVE_IMPACT_CONFIRMED',
+  'HOLDING_NEWS_POSITIVE_IMPACT_CONFIRMED',
 ])
 
 const WATCH_EVENTS = new Set([
@@ -34,6 +39,10 @@ const WATCH_EVENTS = new Set([
   'LOW_PANIC_SELL_GUARD',
   'PANIC_SELL_GUARD',
   'CONTRARIAN_ADD_EVALUATION',
+  'SECTOR_INCREMENT_WATCH',
+  'HOLDING_NEWS_PENDING_VALIDATION',
+  'HOLDING_NEWS_IMPACT_INVALIDATED',
+  'NEWS_IMPACT_INVALIDATED',
 ])
 
 export const ACTIONABLE_FLOW_VOLUME_EVENTS = new Set([
@@ -62,6 +71,15 @@ const GUIDANCE: Record<string, string> = {
   PANIC_SELL_GUARD: '接近日内低位且承接尚未失效，先停止恐慌追卖；固定硬止损仍优先。',
   CONTRARIAN_ADD_EVALUATION: '仅进入逆势加仓评估，必须继续等待板块、资金和分时均价共振，不自动买入。',
   HIGH_SELL_WINDOW: '冲高兑现窗口已出现，按利润保护计划分批处理，不因盘中幻想撤销规则。',
+  SECTOR_INCREMENT_CONFIRMED: '新增涨停、板块资金与价格强度共同确认；仅加入观察，禁止追后排。',
+  SECTOR_INCREMENT_WATCH: '板块出现增量迹象但证据尚未齐备，等待资金和价格继续确认。',
+  NEWS_NEGATIVE_IMPACT_CONFIRMED: '可追溯消息发布后，资金与量价确认负面影响；不把市场同向表现写成消息因果。',
+  HOLDING_NEWS_NEGATIVE_IMPACT_CONFIRMED: '持仓相关负面消息的市场影响已获资金量价确认；按既有失效条件处理，不因标题直接卖出。',
+  NEWS_POSITIVE_IMPACT_CONFIRMED: '可追溯消息发布后，资金与量价确认正向影响；仍不自动追涨。',
+  HOLDING_NEWS_POSITIVE_IMPACT_CONFIRMED: '持仓相关消息的正向影响获得资金量价确认；不自动解除硬风险或触发加仓。',
+  HOLDING_NEWS_PENDING_VALIDATION: '持仓相关消息仅形成待验证假设，等待发布后的资金、价格和分时均价共同确认。',
+  HOLDING_NEWS_IMPACT_INVALIDATED: '后续资金量价不支持消息方向，降低该消息权重，不据此交易。',
+  NEWS_IMPACT_INVALIDATED: '后续资金量价不支持消息方向，降低该消息权重，不据此交易。',
 }
 
 export function intradayEventSemantics(eventType?: string | null, severity?: string | null): IntradayEventSemantics {

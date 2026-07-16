@@ -23,14 +23,13 @@ from app.schemas.trading import (
 from app.services.market_data import MarketDataProvider
 from app.services.market_regime import get_market_regime
 from app.api.helpers.reflexivity import build_market_reflexivity
-from app.services.global_market import GlobalMarketService
+from app.services.global_market import global_market_service
 from app.services.rules import grade_market
 from app.api.helpers.seesaw import _market_seesaw_monitor
 from app.core.limiter import limiter
 
 router = APIRouter()
 market_provider = MarketDataProvider()
-global_market_service = GlobalMarketService(cache_ttl_seconds=300)
 
 @router.get("/market/sector-flow", response_model=SectorFlowOut)
 @limiter.limit("30/minute")

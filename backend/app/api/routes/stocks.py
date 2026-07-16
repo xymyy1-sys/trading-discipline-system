@@ -8,6 +8,8 @@ from sqlalchemy.orm import Session
 from app.api.helpers.execution import build_position_execution_state
 from app.api.helpers.holdings_calc import _find_holding_by_code
 from app.api.helpers.decision import (
+    _event_in_trade_session,
+    _json_dict,
     _json_list,
     build_expectation_snapshot,
     create_expectation_snapshot,
@@ -20,6 +22,7 @@ from app.api.helpers.decision import (
 )
 from app.api.helpers.volume_price import build_volume_price_snapshot
 from app.api.helpers.reflexivity import build_market_reflexivity, build_stock_reflexivity
+from app.api.helpers.seesaw import _cached_holding_theme_flow_profile
 from app.core.trading_clock import shanghai_now_naive, shanghai_today
 from app.core.database import get_db
 from app.models.trading import DataCaptureSnapshot, ExpectationRevision, ExpectationRule, ExpectationScenario, ExpectationSnapshot, Holding, IntradayEvidenceEvent, NextDayPlan, PositionExecutionState, VolumePriceSnapshot, WatchlistEntry
@@ -669,8 +672,17 @@ def get_stock_reflexivity(
     card = decision_card(db, code)
     regime = get_market_regime(db, force_refresh=force_refresh)
     market_assessment = build_market_reflexivity(db, regime)
+    holding = _find_holding_by_code(db, code)
+    sector_context = None
+    if holding is not None:
+        try:
+            sector_context = _cached_holding_theme_flow_profile(holding)
+        except Exception:
+            # A failed board-data source is an evidence gap, never a zero-flow
+            # or zero-relative-strength observation.
+            sector_context = None
     return ReflexivityAssessmentOut.model_validate(
-        build_stock_reflexivity(card, market_assessment, regime)
+        build_stock_reflexivity(card, market_assessment, regime, sector_context)
     )
 
 
@@ -767,11 +779,15 @@ def put_expectation_snapshot(
 def get_stock_timeline(code: str, db: Session = Depends(get_db)) -> list[IntradayEvidenceEventOut]:
     rows = (
         db.query(IntradayEvidenceEvent)
-        .filter(IntradayEvidenceEvent.target_code.in_([code, code.lstrip("0")]))
+        .filter(
+            IntradayEvidenceEvent.trade_date == shanghai_today().isoformat(),
+            IntradayEvidenceEvent.target_code.in_([code, code.lstrip("0")]),
+        )
         .order_by(IntradayEvidenceEvent.captured_at.desc())
         .limit(50)
         .all()
     )
+    rows = [row for row in rows if _event_in_trade_session(row, shanghai_today().isoformat())]
     return [
         IntradayEvidenceEventOut(
             id=row.id,
@@ -783,7 +799,19 @@ def get_stock_timeline(code: str, db: Session = Depends(get_db)) -> list[Intrada
             severity=row.severity,
             value=row.value,
             previous_value=row.previous_value,
+            priority=getattr(row, "priority", 0),
+            group_key=getattr(row, "group_key", ""),
+            state_key=getattr(row, "state_key", None),
+            first_seen_at=getattr(row, "first_seen_at", None),
+            last_seen_at=getattr(row, "last_seen_at", None),
+            occurrence_count=getattr(row, "occurrence_count", 1),
+            confirmed=bool(getattr(row, "confirmed", False)),
             evidence=_json_list(row.evidence_json),
+            counter_evidence=_json_list(getattr(row, "counter_evidence_json", "[]")),
+            source=getattr(row, "source", "") or "",
+            source_url=getattr(row, "source_url", None),
+            source_published_at=getattr(row, "source_published_at", None),
+            metadata=_json_dict(getattr(row, "metadata_json", "{}")),
         )
         for row in rows
     ]

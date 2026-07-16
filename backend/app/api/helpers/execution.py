@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import json
+import math
 import re
 from datetime import datetime, time, timedelta, timezone
-from typing import Any
+from typing import Any, Mapping
 
 from sqlalchemy.orm import Session
 
@@ -45,9 +46,11 @@ from app.schemas.trading import (
     VolumePriceSnapshotOut,
 )
 from app.services.flow_kinetics import FlowKinetics, classify_price_volume_flow_alerts
+from app.services.global_market import global_market_service
 
 WEAK_EXPECTATION_RESULTS = {"WEAKER", "INVALID", "SLIGHTLY_WEAKER"}
 STRONG_EXPECTATION_RESULTS = {"STRONGER", "SLIGHTLY_STRONGER"}
+
 
 DEFAULT_TIME_STOP_RULES: dict[str, dict[str, Any]] = {
     "default": {
@@ -168,6 +171,171 @@ def _market_regime_gate(
         or stale
     )
     return row, freeze_expansion, data_limited, age_minutes
+
+
+def _global_value(item: Mapping[str, Any] | Any, key: str, default: Any = None) -> Any:
+    return item.get(key, default) if isinstance(item, Mapping) else getattr(item, key, default)
+
+
+def _global_evidence_time(value: Any) -> datetime | None:
+    if isinstance(value, datetime):
+        parsed = value
+    else:
+        text = str(value or "").strip().replace("Z", "+00:00")
+        if not text:
+            return None
+        try:
+            parsed = datetime.fromisoformat(text)
+        except ValueError:
+            return None
+    if parsed.tzinfo is not None:
+        parsed = parsed.astimezone(timezone(timedelta(hours=8))).replace(tzinfo=None)
+    return parsed
+
+
+def _valid_global_quote(
+    item: Mapping[str, Any] | Any,
+    *,
+    now: datetime,
+    max_age: timedelta,
+) -> tuple[float, str] | None:
+    status = str(_global_value(item, "status") or "").lower()
+    source = str(_global_value(item, "source") or "").lower()
+    if status not in {"ok", "delayed"} or any(
+        marker in source for marker in ("mock", "manual", "simulat")
+    ):
+        return None
+    raw_change = _global_value(item, "change_pct")
+    if raw_change is None or isinstance(raw_change, bool):
+        return None
+    try:
+        change_pct = float(raw_change)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(change_pct):
+        return None
+    captured_at = _global_evidence_time(_global_value(item, "as_of"))
+    if change_pct is None or captured_at is None:
+        return None
+    if captured_at > now + timedelta(minutes=5) or now - captured_at > max_age:
+        return None
+    return change_pct, str(_global_value(item, "name") or _global_value(item, "symbol") or "外围标的")
+
+
+def global_market_execution_gate(
+    snapshot: Mapping[str, Any] | None,
+    *,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    """Score fresh overseas evidence without turning it into a sell trigger.
+
+    The output can freeze *new* exposure when several independent overseas
+    observations are materially weak.  It is intentionally absent from the
+    holding risk-family score and therefore can never, on its own, create a
+    reduction or liquidation instruction.
+    """
+
+    current = now or _shanghai_now_naive()
+    if current.tzinfo is not None:
+        current = current.astimezone(timezone(timedelta(hours=8))).replace(tzinfo=None)
+    base: dict[str, Any] = {
+        "score": 0,
+        "freeze_expansion": False,
+        "data_limited": True,
+        "valid_quote_count": 0,
+        "evidence": [],
+        "counter_evidence": [],
+    }
+    if not isinstance(snapshot, Mapping):
+        base["evidence"] = ["外围市场证据缺口：不加分、不扣分，也不据此生成卖出结论。"]
+        return base
+    quality = str(snapshot.get("data_quality") or snapshot.get("quality") or "").lower()
+    if quality not in {"ok", "complete", "realtime", "degraded"}:
+        base["evidence"] = ["外围市场数据质量不足：不加分、不扣分，也不据此生成卖出结论。"]
+        return base
+
+    def valid_group(key: str, max_age: timedelta) -> list[tuple[float, str]]:
+        values: list[tuple[float, str]] = []
+        for item in list(snapshot.get(key) or []):
+            normalized = _valid_global_quote(item, now=current, max_age=max_age)
+            if normalized is not None:
+                values.append(normalized)
+        return values
+
+    # US quotes are an overnight close context and tolerate weekends/holidays;
+    # Korean quotes participate in the same Asian session and must be fresher.
+    us = valid_group("us_indices", timedelta(hours=96))
+    korea_age = timedelta(minutes=90) if current.weekday() < 5 and time(9, 15) <= current.time() <= time(15, 0) else timedelta(hours=30)
+    korea = valid_group("korea_indices", korea_age)
+    korea_equities = valid_group("korea_equities", korea_age)
+    us_sectors = valid_group("us_sector_rank", timedelta(hours=96))
+    base["valid_quote_count"] = len(us) + len(korea) + len(korea_equities) + len(us_sectors)
+
+    score = 0
+    evidence: list[str] = []
+    counter: list[str] = []
+
+    def broad_score(label: str, values: list[tuple[float, str]]) -> int:
+        if len(values) < 2:
+            return 0
+        changes = [value for value, _ in values]
+        average = sum(changes) / len(changes)
+        negative_ratio = sum(value < 0 for value in changes) / len(changes)
+        positive_ratio = sum(value > 0 for value in changes) / len(changes)
+        if average <= -1.25 and negative_ratio >= 2 / 3:
+            evidence.append(f"{label}广度偏弱：有效样本{len(changes)}个，平均{average:+.2f}%，仅冻结新增风险。")
+            return -2
+        if average >= 1.25 and positive_ratio >= 2 / 3:
+            counter.append(f"{label}广度偏强：有效样本{len(changes)}个，平均{average:+.2f}%，作为扩仓环境加分但不替代A股确认。")
+            return 2
+        counter.append(f"{label}方向未形成一致极端：有效样本{len(changes)}个，平均{average:+.2f}%。")
+        return 0
+
+    score += broad_score("隔夜美股主要指数", us)
+    score += broad_score("韩国主要指数", korea)
+
+    semiconductor_symbols = {"SOX", "SMH", "SOXX", "005930", "000660"}
+    semiconductor: list[tuple[float, str]] = []
+    for key, values in (
+        ("us_indices", us),
+        ("us_sector_rank", us_sectors),
+        ("korea_equities", korea_equities),
+    ):
+        rows = list(snapshot.get(key) or [])
+        by_name = {name: value for value, name in values}
+        for item in rows:
+            symbol = str(_global_value(item, "symbol") or "").upper()
+            name = str(_global_value(item, "name") or symbol)
+            if symbol in semiconductor_symbols and name in by_name:
+                semiconductor.append((by_name[name], name))
+    if len(semiconductor) >= 2:
+        average = sum(value for value, _ in semiconductor) / len(semiconductor)
+        consistency = sum(value < 0 for value, _ in semiconductor) / len(semiconductor)
+        if average <= -2 and consistency >= 2 / 3:
+            score -= 1
+            evidence.append(f"海外半导体代理共振偏弱：有效样本{len(semiconductor)}个，平均{average:+.2f}%。")
+        elif average >= 2 and sum(value > 0 for value, _ in semiconductor) / len(semiconductor) >= 2 / 3:
+            score += 1
+            counter.append(f"海外半导体代理共振偏强：有效样本{len(semiconductor)}个，平均{average:+.2f}%。")
+
+    score = max(-3, min(3, score))
+    base.update({
+        "score": score,
+        "freeze_expansion": score <= -2,
+        "data_limited": not (len(us) >= 2 or len(korea) >= 2),
+        "evidence": evidence,
+        "counter_evidence": counter,
+    })
+    if base["valid_quote_count"] == 0:
+        base["evidence"] = ["外围行情均缺少有效时间戳、已过期或不可用：本次不参与执行门控。"]
+    return base
+
+
+def _load_global_market_snapshot(*, force_refresh: bool = False) -> Mapping[str, Any] | None:
+    try:
+        return global_market_service.snapshot(force_refresh=force_refresh)
+    except Exception:
+        return None
 
 
 def _quote_for_holding(holding: Holding, quotes: dict[str, dict[str, Any]] | None = None) -> dict[str, Any]:
@@ -1417,6 +1585,7 @@ def build_position_execution_state(
     seesaw: Any | None = None,
     expectation: ExpectationSnapshot | ExpectationSnapshotOut | None = None,
     volume_price: VolumePriceSnapshot | VolumePriceSnapshotOut | None = None,
+    global_cues: Mapping[str, Any] | None = None,
     persist: bool = True,
 ) -> PositionExecutionStateOut:
     quote = quote or {}
@@ -1514,6 +1683,17 @@ def build_position_execution_state(
             counter_evidence.append(
                 f"全市场状态{market_regime.regime_name or '未分类'}未触发全局冻结闸门；个股仍须独立通过预期和量价验证。"
             )
+    global_gate = global_market_execution_gate(global_cues, now=now) if global_cues is not None else None
+    if global_gate is not None:
+        evidence.extend([f"外围证据：{item}" for item in global_gate["evidence"]])
+        counter_evidence.extend([f"外围反证：{item}" for item in global_gate["counter_evidence"]])
+        evidence.append(
+            f"外围环境扩仓分 {int(global_gate['score']):+d}；该分数只影响新增风险权限，绝不单独触发减仓或清仓。"
+        )
+        if global_gate["freeze_expansion"]:
+            market_expansion_frozen = True
+            invalid_conditions.append("外围主要指数出现新鲜且一致的显著弱势时，暂停加仓、抄底和做T买回。")
+            recovery_conditions.append("外围冻结解除后，仍需A股市场、所属板块与个股量价共同确认，才恢复扩仓评估。")
     risk_family_scores: dict[str, int] = {}
     positive_family_scores: dict[str, int] = {}
 
@@ -2175,6 +2355,7 @@ def _execution_state_out(
 
 def build_execution_states(db: Session, holdings: list[Holding], force_refresh: bool = False) -> list[PositionExecutionStateOut]:
     quotes = _latest_quotes(holdings)
+    global_cues = _load_global_market_snapshot(force_refresh=force_refresh) if holdings else None
     seesaw_by_code: dict[str, Any] = {}
     try:
         seesaw = _market_seesaw_monitor(holdings, force_refresh=force_refresh)
@@ -2187,6 +2368,7 @@ def build_execution_states(db: Session, holdings: list[Holding], force_refresh: 
             holding,
             quote=_quote_for_holding(holding, quotes),
             seesaw=seesaw_by_code.get(_normalize_code(holding.code)),
+            global_cues=global_cues,
         )
         for holding in holdings
     ]
