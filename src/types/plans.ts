@@ -53,6 +53,17 @@ export interface AuctionPlan {
   stage_decision: string;
   action_ladder: string[];
   stage_checks: AuctionStageCheck[];
+  mainline_name: string;
+  mainline_rank: number | null;
+  mainline_score: number | null;
+  mainline_level: string;
+  is_mainline: boolean | null;
+  theme_stage: string;
+  theme_stage_reason: string;
+  identity_roles: string[];
+  identity_action: string;
+  position_rule: string;
+  theme_evidence: string[];
 }
 
 export interface NextDayPlan {

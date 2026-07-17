@@ -30,6 +30,57 @@ from app.api.helpers.seesaw import _sell_plan
 
 router = APIRouter()
 
+
+_LIMIT_UP_SYSTEM_AUCTION_FIELDS = {
+    "mainline_name",
+    "mainline_rank",
+    "mainline_score",
+    "mainline_level",
+    "is_mainline",
+    "theme_stage",
+    "theme_stage_reason",
+    "identity_roles",
+    "identity_action",
+    "position_rule",
+    "theme_evidence",
+}
+
+
+def _guard_limit_up_auction_update(existing_raw: str, incoming: dict) -> dict:
+    """Keep the system's theme judgement and position ceiling authoritative."""
+    existing = _json_obj(existing_raw)
+    merged = {**existing, **incoming}
+
+    for field in _LIMIT_UP_SYSTEM_AUCTION_FIELDS:
+        if field in existing:
+            merged[field] = existing[field]
+        else:
+            # Old plans without system evidence must remain fail-closed; clients
+            # cannot manufacture mainline/stage/identity evidence themselves.
+            merged.pop(field, None)
+
+    try:
+        system_cap = max(0.0, float(existing.get("max_position_ratio") or 0))
+    except (TypeError, ValueError):
+        system_cap = 0.0
+    try:
+        requested_cap = max(0.0, float(incoming.get("max_position_ratio", system_cap) or 0))
+    except (TypeError, ValueError):
+        requested_cap = 0.0
+    effective_cap = min(system_cap, requested_cap)
+    stage = str(existing.get("theme_stage") or "数据不足")
+    has_identity = bool(existing.get("identity_roles"))
+    system_eligible = (
+        existing.get("is_mainline") is True
+        and stage not in {"高潮", "退潮", "数据不足"}
+        and has_identity
+        and effective_cap > 0
+    )
+    merged["max_position_ratio"] = effective_cap if system_eligible else 0.0
+    if not system_eligible:
+        merged["overnight_order"] = False
+    return merged
+
 @router.get("/next-day-plans", response_model=list[NextDayPlanOut])
 def list_next_day_plans(
     plan_date: str | None = None,
@@ -150,7 +201,10 @@ def update_next_day_plan(
     if "classification_basis" in data and data["classification_basis"] is not None:
         plan.classification_basis = json.dumps(data.pop("classification_basis"), ensure_ascii=False)
     if "auction_plan" in data and data["auction_plan"] is not None:
-        plan.auction_plan = json.dumps(data.pop("auction_plan"), ensure_ascii=False)
+        auction_plan = data.pop("auction_plan")
+        if plan.plan_type == "limit_up_auction":
+            auction_plan = _guard_limit_up_auction_update(plan.auction_plan, auction_plan)
+        plan.auction_plan = json.dumps(auction_plan, ensure_ascii=False)
     if "forbidden_actions" in data and data["forbidden_actions"] is not None:
         plan.forbidden_actions = json.dumps(data.pop("forbidden_actions"), ensure_ascii=False)
     for key, value in data.items():

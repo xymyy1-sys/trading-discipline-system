@@ -2364,6 +2364,7 @@ class MarketDataProvider:
                 notes=notes + ["不使用模拟涨停家数，不生成打板许可。"],
             )
             _set_response_cache(cache_key, result)
+            _set_response_cache("limit-up-atmosphere-latest", result)
             return result
 
         try:
@@ -2462,6 +2463,22 @@ class MarketDataProvider:
                 missing.append("昨日涨停次日开盘/溢价行情")
                 notes.append(f"昨日涨停次日行情不可用：{exc.__class__.__name__}。")
 
+        theme_radar: ThemeRadarOut | None = None
+        try:
+            # 打板上下文必须独立于浏览器是否打开“主线题材”页。这里主动取得
+            # 服务端题材雷达，并复用其缓存，不能仅凭涨停池内部聚类宣称主线。
+            # 普通切页复用5分钟缓存；用户明确点击刷新时同时刷新题材雷达，
+            # 避免“当前主线”仍引用上一轮排名和阶段。
+            theme_radar = self.theme_radar(force_refresh=force_refresh)
+            if theme_radar.themes:
+                sources.append(theme_radar.source)
+            else:
+                missing.append("题材资金排名/阶段")
+                notes.append("题材雷达没有可验证主题，涨停股只能生成观察预案。")
+        except Exception as exc:
+            missing.append("题材资金排名/阶段")
+            notes.append(f"题材雷达暂不可用：{exc.__class__.__name__}；不把涨停聚类直接认定为主线。")
+
         score, decision, decision_label, evidence, risks = self._score_limit_up_atmosphere(
             metrics, missing
         )
@@ -2470,6 +2487,7 @@ class MarketDataProvider:
             stocks=current_stocks,
             broken_stocks=broken_stocks,
             atmosphere_decision=decision,
+            theme_radar=theme_radar,
         )
         data_quality = "完整" if not missing else "部分"
         result = LimitUpAtmosphereOut(
@@ -2489,6 +2507,7 @@ class MarketDataProvider:
             notes=notes,
         )
         _set_response_cache(cache_key, result)
+        _set_response_cache("limit-up-atmosphere-latest", result)
         return result
 
     def _score_limit_up_atmosphere(
@@ -2605,6 +2624,7 @@ class MarketDataProvider:
         stocks: list[LimitUpStockOut],
         broken_stocks: list[LimitUpStockOut] | None,
         atmosphere_decision: str,
+        theme_radar: ThemeRadarOut | None = None,
     ) -> list[LimitUpThemeLadderOut]:
         """Build rule-based theme ladders and identity competition from real pools.
 
@@ -2669,6 +2689,19 @@ class MarketDataProvider:
             else:
                 completeness_label = "梯队存在断层"
 
+            radar_theme = self._match_limit_up_theme_radar(
+                cluster=cluster,
+                members=members,
+                theme_radar=theme_radar,
+            )
+            mainline_context = self._build_limit_up_mainline_context(
+                radar_theme=radar_theme,
+                atmosphere_decision=atmosphere_decision,
+                ladder_count=len(members),
+                completeness_score=completeness_score,
+                completeness_label=completeness_label,
+            )
+
             if atmosphere_decision in {"FORBID", "DATA_GAP"}:
                 action = "禁止打板"
             elif atmosphere_decision == "ALLOW" and completeness_score >= 70:
@@ -2677,6 +2710,14 @@ class MarketDataProvider:
                 action = "谨慎接力，只看前排确认"
             else:
                 action = "谨慎观望，不追后排跟风"
+
+            if mainline_context["max_position_ratio"] <= 0:
+                action = str(mainline_context["stage_position_rule"])
+            elif mainline_context["is_mainline"] is True:
+                action = (
+                    f"{action}；仅限{'、'.join(mainline_context['eligible_roles'])}，"
+                    f"单只上限{mainline_context['max_position_ratio'] * 100:.0f}%"
+                )
 
             if atmosphere_decision in {"FORBID", "DATA_GAP"}:
                 continuation = "全市场接力闸门未通过，题材即使有高度也按分化/退潮预期处理。"
@@ -2688,6 +2729,19 @@ class MarketDataProvider:
                 continuation = "只有首板扩散，次日先验证一进二，尚不能定义为持续主线。"
             else:
                 continuation = "梯队有局部承接但存在断层，次日先看前排卡位结果和后排是否补齐。"
+
+            if mainline_context["is_mainline"] is False:
+                continuation = (
+                    f"{mainline_context['mainline_level']}，持续性不能由单只涨停外推；"
+                    f"{continuation}"
+                )
+            elif mainline_context["is_mainline"] is True:
+                continuation = (
+                    f"{mainline_context['mainline_level']}·{mainline_context['stage']}阶段；"
+                    f"{continuation}"
+                )
+            else:
+                continuation = f"主线地位与阶段数据不足；{continuation}"
 
             invalidation = [
                 f"题材涨停家数由 {len(members)} 只明显收缩，或炸板率快速上升。",
@@ -2702,6 +2756,7 @@ class MarketDataProvider:
                 members,
                 theme_highest=highest,
                 global_highest=global_highest,
+                mainline_context=mainline_context,
             )
             results.append(LimitUpThemeLadderOut(
                 name=cluster.name,
@@ -2719,10 +2774,25 @@ class MarketDataProvider:
                 continuation_expectation=continuation,
                 invalidation_conditions=invalidation,
                 identity_roles=roles,
+                mainline_name=str(mainline_context["mainline_name"]),
+                mainline_rank=mainline_context["mainline_rank"],
+                mainline_score=mainline_context["mainline_score"],
+                mainline_level=str(mainline_context["mainline_level"]),
+                is_mainline=mainline_context["is_mainline"],
+                stage=str(mainline_context["stage"]),
+                stage_reason=str(mainline_context["stage_reason"]),
+                net_inflow=mainline_context["net_inflow"],
+                main_inflow=mainline_context["main_inflow"],
+                stage_position_rule=str(mainline_context["stage_position_rule"]),
+                max_position_ratio=float(mainline_context["max_position_ratio"]),
+                eligible_roles=list(mainline_context["eligible_roles"]),
+                evidence=list(mainline_context["evidence"]),
             ))
         return sorted(
             results,
             key=lambda item: (
+                1 if item.mainline_level == "核心主线" else 0,
+                1 if item.mainline_level == "主线分支" else 0,
                 item.completeness_score,
                 item.highest_level,
                 item.limit_up_count,
@@ -2730,12 +2800,163 @@ class MarketDataProvider:
             reverse=True,
         )[:12]
 
+    def _match_limit_up_theme_radar(
+        self,
+        *,
+        cluster: LimitUpClusterOut,
+        members: list[LimitUpStockOut],
+        theme_radar: ThemeRadarOut | None,
+    ) -> ThemeRadarItem | None:
+        if theme_radar is None or not theme_radar.themes:
+            return None
+        member_names = {stock.name for stock in members if stock.name}
+        member_codes = {stock.code for stock in members if stock.code}
+        member_labels = {
+            label
+            for stock in members
+            for label in [stock.industry, *stock.concepts]
+            if label
+        }
+        inferred_mainline = self._classify_mainline({
+            "name": cluster.name,
+            "leaders": list(member_names),
+            "theme_type": "涨停题材",
+        })
+        best: ThemeRadarItem | None = None
+        best_score = 0
+        for theme in theme_radar.themes:
+            score = 0
+            related = {theme.name, *theme.related_boards}
+            core_names = {row.name for row in theme.core_stocks if row.name}
+            core_codes = {row.code for row in theme.core_stocks if row.code}
+            leaders = {name for name in theme.leader_names if name and name != "待识别"}
+            if theme.name == inferred_mainline:
+                score += 120
+            if theme.name == cluster.name:
+                score += 100
+            if cluster.name in related:
+                score += 80
+            if member_labels & related:
+                score += 55
+            if member_names & (core_names | leaders):
+                score += 45
+            if member_codes & core_codes:
+                score += 45
+            # Substring matching is only a secondary aid; exact board, stock or
+            # classifier matches above must remain the main evidence.
+            if any(
+                len(left) >= 3 and len(right) >= 3 and (left in right or right in left)
+                for left in {cluster.name, inferred_mainline, *member_labels}
+                for right in related
+            ):
+                score += 20
+            if score > best_score:
+                best_score = score
+                best = theme
+        return best if best_score >= 45 else None
+
+    @staticmethod
+    def _build_limit_up_mainline_context(
+        *,
+        radar_theme: ThemeRadarItem | None,
+        atmosphere_decision: str,
+        ladder_count: int,
+        completeness_score: int,
+        completeness_label: str,
+    ) -> dict[str, Any]:
+        if radar_theme is None:
+            return {
+                "mainline_name": "待验证",
+                "mainline_rank": None,
+                "mainline_score": None,
+                "mainline_level": "待验证",
+                "is_mainline": None,
+                "stage": "数据不足",
+                "stage_reason": "涨停题材未匹配到真实题材资金排名",
+                "net_inflow": None,
+                "main_inflow": None,
+                "stage_position_rule": "主线和题材阶段未确认，只生成观察预案，禁止新开打板仓",
+                "max_position_ratio": 0.0,
+                "eligible_roles": [],
+                "evidence": [f"涨停梯队：{ladder_count}只，完整度{completeness_score}分（{completeness_label}）。", "缺少题材资金排名和阶段证据。"],
+            }
+
+        rank = int(radar_theme.rank or 0)
+        score = int(radar_theme.score or 0)
+        net = float(radar_theme.net_inflow or 0)
+        main = float(radar_theme.main_inflow or 0)
+        breadth = max(ladder_count, int(radar_theme.limit_up_count or 0))
+        stage = str(radar_theme.stage or "数据不足")
+        flow_confirmed = net > 0 and main > 0
+
+        if stage == "退潮":
+            level = "退潮题材"
+            is_mainline = False
+        elif rank == 1 and score >= 75 and flow_confirmed and breadth >= 3:
+            level = "核心主线"
+            is_mainline = True
+        elif rank <= 3 and score >= 68 and flow_confirmed and breadth >= 2:
+            level = "主线分支"
+            is_mainline = True
+        elif rank <= 8 and score >= 58 and net > 0:
+            level = "轮动题材"
+            is_mainline = False
+        else:
+            level = "非主线题材"
+            is_mainline = False
+
+        eligible_roles: list[str] = []
+        cap = 0.0
+        if atmosphere_decision in {"FORBID", "DATA_GAP"}:
+            rule = "全市场打板闸门未通过，任何题材都禁止新开打板仓"
+        elif not is_mainline:
+            rule = f"{level}只观察，不因单只股票涨停而开打板仓"
+        elif stage in {"启动", "发酵"}:
+            eligible_roles = ["全场最高标", "题材最高标", "龙头候选", "容量中军"]
+            cap = 0.10 if atmosphere_decision == "ALLOW" else 0.05
+            rule = f"{stage}阶段只做主线前排确认，单只仓位上限{cap * 100:.0f}%"
+        elif stage == "分歧":
+            eligible_roles = ["全场最高标", "题材最高标", "龙头候选"]
+            cap = 0.05
+            rule = "分歧阶段等待核心弱转强，确认前不下单，确认后单只上限5%"
+        elif stage == "加速":
+            eligible_roles = ["全场最高标", "题材最高标", "龙头候选", "容量中军"]
+            cap = 0.05 if atmosphere_decision == "ALLOW" else 0.03
+            rule = f"加速阶段不追后排，只允许核心换手确认，单只上限{cap * 100:.0f}%"
+        elif stage == "高潮":
+            rule = "高潮阶段防一致性兑现，禁止新开打板仓，只管理已有核心仓"
+        else:
+            rule = "题材阶段未确认，只观察，禁止新开打板仓"
+
+        evidence = [
+            f"题材雷达：{radar_theme.name}排名第{rank}，强度{score}分，阶段={stage}。",
+            f"资金证据：板块净流入{net:.2f}亿，主力净流入{main:.2f}亿，涨停扩散{breadth}只。",
+            f"梯队证据：完整度{completeness_score}分（{completeness_label}）。",
+            f"动态定位：{level}；该定位由当日排名、资金、涨停扩散和阶段共同计算。",
+        ]
+        return {
+            "mainline_name": radar_theme.name,
+            "mainline_rank": rank,
+            "mainline_score": score,
+            "mainline_level": level,
+            "is_mainline": is_mainline,
+            "stage": stage,
+            "stage_reason": radar_theme.stage_reason,
+            "net_inflow": round(net, 2),
+            "main_inflow": round(main, 2),
+            "stage_position_rule": rule,
+            "max_position_ratio": cap,
+            "eligible_roles": eligible_roles,
+            "evidence": evidence,
+        }
+
     def _build_limit_up_identity_roles(
         self,
         stocks: list[LimitUpStockOut],
         *,
         theme_highest: int,
         global_highest: int,
+        mainline_context: dict[str, Any] | None = None,
     ) -> list[LimitUpIdentityRoleOut]:
         ranked = sorted(
             stocks,
@@ -2748,13 +2969,21 @@ class MarketDataProvider:
         top_score = self._limit_up_role_score(ranked[0])
         same_height = [stock for stock in ranked if stock.consecutive_limit_days == theme_highest]
         capacity_enabled = len(ranked) >= 3 and capacity.amount > 0
+        context = mainline_context or {}
+        theme_cap = float(context.get("max_position_ratio") or 0)
+        eligible_roles = set(context.get("eligible_roles") or [])
+        position_rule = str(context.get("stage_position_rule") or "主线和阶段证据不足，只观察")
+        theme_level = str(context.get("mainline_level") or "待验证")
+        theme_stage = str(context.get("stage") or "数据不足")
         roles: list[LimitUpIdentityRoleOut] = []
         for index, stock in enumerate(ranked):
             score = self._limit_up_role_score(stock)
             tags: list[str] = []
             if stock.consecutive_limit_days == global_highest and global_highest >= 2:
                 tags.append("全场最高标")
-            elif stock.consecutive_limit_days == theme_highest and theme_highest >= 2:
+            # 全场最高标同时也应保留其题材最高标身份。这两种身份并不
+            # 互斥，正是判断“题材龙头兼全市场高度标”的关键证据。
+            if stock.consecutive_limit_days == theme_highest and theme_highest >= 2:
                 tags.append("题材最高标")
             if index == 0:
                 tags.append("龙头候选")
@@ -2770,6 +2999,33 @@ class MarketDataProvider:
                 tags.append("补涨候选")
             if not tags:
                 tags.append("助攻" if stock.first_limit_time and stock.break_count == 0 else "跟风")
+            permitted_tags = eligible_roles & set(tags)
+            stock_cap = 0.0
+            recommended_action = position_rule
+            if theme_cap > 0 and permitted_tags:
+                stock_cap = theme_cap
+                # 单纯依靠容量身份时降低仓位；若同一只股票同时是题材/
+                # 全场高度标或龙头候选，不因附带“容量中军”标签重复降级。
+                leader_tags = {"全场最高标", "题材最高标", "龙头候选"}
+                if "容量中军" in tags and not (leader_tags & set(tags)):
+                    stock_cap = min(stock_cap, 0.05)
+                if "同身位卡位竞争" in tags:
+                    stock_cap = min(stock_cap, 0.05)
+                recommended_action = (
+                    f"仅在竞价、开盘承接和同题材助攻同时确认后评估，"
+                    f"单只仓位上限{stock_cap * 100:.0f}%"
+                )
+            elif theme_cap > 0 and "补涨候选" in tags:
+                recommended_action = "主线补涨只观察，不与龙头同仓位；出现一进二和板块继续扩散后再重评"
+            elif theme_cap > 0:
+                recommended_action = "身份不属于当前阶段允许对象，禁止追后排或跟风板"
+
+            if stock_cap > 0 and theme_level in {"核心主线", "主线分支"} and theme_stage in {"启动", "发酵"}:
+                risk_level = "低"
+            elif stock_cap > 0:
+                risk_level = "中"
+            else:
+                risk_level = "高"
             facts = [
                 f"{stock.consecutive_limit_days}板",
                 f"成交{stock.amount:.2f}亿",
@@ -2788,6 +3044,14 @@ class MarketDataProvider:
                 sealed_amount=stock.sealed_amount,
                 break_count=stock.break_count,
                 reason="、".join(facts) + "；角色由梯队身位、封单/成交、首封时间和炸板次数规则计算。",
+                recommended_action=recommended_action,
+                max_position_ratio=stock_cap,
+                risk_level=risk_level,
+                persistence_basis=[
+                    f"题材定位={theme_level}",
+                    f"题材阶段={theme_stage}",
+                    f"个股身份={' / '.join(tags)}",
+                ],
             ))
         return roles[:8]
 

@@ -1732,6 +1732,10 @@ class LimitUpIdentityRoleOut(BaseModel):
     sealed_amount: float = 0
     break_count: int = 0
     reason: str
+    recommended_action: str = "只观察"
+    max_position_ratio: float = 0
+    risk_level: str = "高"
+    persistence_basis: list[str] = Field(default_factory=list)
 
 
 class LimitUpThemeLadderOut(BaseModel):
@@ -1750,6 +1754,19 @@ class LimitUpThemeLadderOut(BaseModel):
     continuation_expectation: str
     invalidation_conditions: list[str] = Field(default_factory=list)
     identity_roles: list[LimitUpIdentityRoleOut] = Field(default_factory=list)
+    mainline_name: str = ""
+    mainline_rank: int | None = None
+    mainline_score: int | None = None
+    mainline_level: str = "待验证"
+    is_mainline: bool | None = None
+    stage: str = "数据不足"
+    stage_reason: str = "缺少题材资金与阶段证据"
+    net_inflow: float | None = None
+    main_inflow: float | None = None
+    stage_position_rule: str = "数据不足时禁止新开打板仓"
+    max_position_ratio: float = 0
+    eligible_roles: list[str] = Field(default_factory=list)
+    evidence: list[str] = Field(default_factory=list)
 
 
 class LimitUpAtmosphereOut(BaseModel):
@@ -1908,6 +1925,17 @@ class AuctionPlan(BaseModel):
     stage_decision: str = ""
     action_ladder: list[str] = Field(default_factory=list)
     stage_checks: list[AuctionStageCheck] = Field(default_factory=list)
+    mainline_name: str = ""
+    mainline_rank: int | None = None
+    mainline_score: int | None = None
+    mainline_level: str = "待验证"
+    is_mainline: bool | None = None
+    theme_stage: str = "数据不足"
+    theme_stage_reason: str = "缺少题材资金与阶段证据"
+    identity_roles: list[str] = Field(default_factory=list)
+    identity_action: str = "只观察"
+    position_rule: str = "数据不足时禁止新开打板仓"
+    theme_evidence: list[str] = Field(default_factory=list)
 
 
 class NextDayPlanBase(BaseModel):

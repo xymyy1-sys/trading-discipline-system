@@ -8,6 +8,8 @@ from app.schemas.trading import (
     LimitUpGroupOut,
     LimitUpLadderOut,
     LimitUpStockOut,
+    ThemeRadarItem,
+    ThemeRadarOut,
 )
 from app.services.market_data import MarketDataProvider
 
@@ -55,6 +57,51 @@ def _previous_rows() -> list[dict]:
         {"代码": "600001", "名称": "测试一", "连板数": 3, "所属行业": "半导体"},
         {"代码": "600002", "名称": "测试二", "连板数": 1, "所属行业": "半导体"},
     ]
+
+
+def _theme_radar(
+    *,
+    rank: int = 1,
+    score: int = 82,
+    stage: str = "发酵",
+    net_inflow: float = 18.0,
+    main_inflow: float = 9.0,
+) -> ThemeRadarOut:
+    theme = ThemeRadarItem(
+        name="存储芯片",
+        board_code="BK1036",
+        theme_type="主线题材",
+        related_boards=["半导体", "芯片"],
+        stage=stage,
+        stage_reason=f"测试题材处于{stage}阶段",
+        score=score,
+        rank=rank,
+        change_pct=3.8,
+        net_inflow=net_inflow,
+        main_inflow=main_inflow,
+        limit_up_count=3,
+        stock_count=30,
+        leader_names=["测试一"],
+        core_stocks=[],
+        timeline=[],
+        resonance_tags=["资金净流入放大", "涨停扩散"],
+        action="测试行动",
+        risk="测试风险",
+    )
+    return ThemeRadarOut(
+        source="eastmoney-test-theme-radar",
+        updated_at=datetime.now(),
+        market_temperature="偏强",
+        strongest_theme=theme,
+        resonance=[theme],
+        themes=[theme],
+        notes=[],
+    )
+
+
+def _stub_theme_radar(monkeypatch, provider: MarketDataProvider, **kwargs) -> None:
+    radar = _theme_radar(**kwargs)
+    monkeypatch.setattr(provider, "theme_radar", lambda **_: radar)
 
 
 def _raw_pool_row(code: str = "600001") -> dict:
@@ -134,6 +181,7 @@ def test_default_candidate_dates_keep_pre_market_on_prior_weekday():
 
 def test_atmosphere_default_reuses_ladder_resolved_trade_date(monkeypatch):
     provider = MarketDataProvider()
+    _stub_theme_radar(monkeypatch, provider)
     ladder = _ladder()
     ladder.trade_date = "2026-07-09"
     seen: dict[str, str | None] = {}
@@ -169,6 +217,7 @@ def test_atmosphere_default_reuses_ladder_resolved_trade_date(monkeypatch):
 
 def test_limit_up_atmosphere_uses_real_pool_and_premium_samples(monkeypatch):
     provider = MarketDataProvider()
+    _stub_theme_radar(monkeypatch, provider)
     monkeypatch.setattr(provider, "limit_up_ladder", lambda **_: _ladder())
     monkeypatch.setattr(provider, "_fetch_broken_limit_pool_raw", lambda *_: [])
     monkeypatch.setattr(provider, "_fetch_dated_pool_total", lambda *_: 0)
@@ -217,12 +266,17 @@ def test_limit_up_atmosphere_uses_real_pool_and_premium_samples(monkeypatch):
     assert theme.high_board_count == 1
     assert theme.completeness_label == "多层梯队已成形"
     assert theme.action.startswith("允许观察前排")
+    assert theme.mainline_level == "核心主线"
+    assert theme.stage == "发酵"
+    assert theme.max_position_ratio == 0.1
+    assert theme.identity_roles[0].max_position_ratio == 0.1
     assert any("龙头候选" in item.roles for item in theme.identity_roles)
     assert "不代表已知主力意图" in result.role_disclaimer
 
 
 def test_limit_up_atmosphere_never_allows_when_historical_quotes_are_missing(monkeypatch):
     provider = MarketDataProvider()
+    _stub_theme_radar(monkeypatch, provider)
     monkeypatch.setattr(provider, "limit_up_ladder", lambda **_: _ladder())
     monkeypatch.setattr(provider, "_fetch_broken_limit_pool_raw", lambda *_: [])
     monkeypatch.setattr(provider, "_fetch_dated_pool_total", lambda *_: 0)
@@ -302,6 +356,69 @@ def test_theme_identity_marks_same_level_competition_without_intent_claim():
     assert all("同身位卡位竞争" in item.roles for item in roles)
     assert all("规则计算" in item.reason for item in roles)
     assert all("主力" not in item.reason for item in roles)
+
+
+def test_non_mainline_theme_never_opens_limit_up_position():
+    provider = MarketDataProvider()
+    context = provider._build_limit_up_mainline_context(
+        radar_theme=_theme_radar(
+            rank=12,
+            score=55,
+            stage="发酵",
+            net_inflow=2,
+            main_inflow=0.5,
+        ).themes[0],
+        atmosphere_decision="ALLOW",
+        ladder_count=3,
+        completeness_score=82,
+        completeness_label="多层梯队已成形",
+    )
+
+    assert context["mainline_level"] == "非主线题材"
+    assert context["is_mainline"] is False
+    assert context["max_position_ratio"] == 0
+    assert "只观察" in context["stage_position_rule"]
+
+
+def test_mainline_climax_or_ebb_forces_zero_position():
+    provider = MarketDataProvider()
+    for stage in ("高潮", "退潮"):
+        context = provider._build_limit_up_mainline_context(
+            radar_theme=_theme_radar(stage=stage).themes[0],
+            atmosphere_decision="ALLOW",
+            ladder_count=4,
+            completeness_score=88,
+            completeness_label="多层梯队已成形",
+        )
+
+        assert context["max_position_ratio"] == 0
+        assert "禁止" in context["stage_position_rule"] or "只观察" in context["stage_position_rule"]
+
+
+def test_highest_board_identity_is_dynamic_not_stock_name_hardcoded():
+    provider = MarketDataProvider()
+    leader = _stock("600664", "测试医药龙头", 6)
+    follower = _stock("600665", "测试医药助攻", 2)
+    context = provider._build_limit_up_mainline_context(
+        radar_theme=_theme_radar(stage="发酵").themes[0],
+        atmosphere_decision="ALLOW",
+        ladder_count=4,
+        completeness_score=85,
+        completeness_label="多层梯队已成形",
+    )
+
+    roles = provider._build_limit_up_identity_roles(
+        [leader, follower],
+        theme_highest=6,
+        global_highest=6,
+        mainline_context=context,
+    )
+
+    leader_role = next(item for item in roles if item.code == leader.code)
+    assert "全场最高标" in leader_role.roles
+    assert "题材最高标" in leader_role.roles
+    assert leader_role.max_position_ratio == 0.1
+    assert "身份" in leader_role.persistence_basis[2]
 
 
 def test_zero_low_open_ratio_is_treated_as_real_positive_evidence():

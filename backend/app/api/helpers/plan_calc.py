@@ -38,6 +38,7 @@ _CATEGORY_RISK_PRIORITY = {
     "弱于预期股": 3,
     "震荡趋势股": 4,
     "主线前排股": 5,
+    "非主线观察股": 2,
 }
 
 _FORBIDDEN_BY_CATEGORY = {
@@ -52,6 +53,7 @@ _FORBIDDEN_BY_CATEGORY = {
     "弱于预期股": ["不补仓", "不默认接回", "反抽优先减仓"],
     "震荡趋势股": ["不追高", "不无条件买回"],
     "主线前排股": ["不机械做T", "不因小波动丢核心仓"],
+    "非主线观察股": ["不因单只涨停开仓", "不追后排", "主线与阶段未确认前仓位为0"],
 }
 
 def _contains_any(text: str, keywords: tuple[str, ...]) -> bool:
@@ -373,6 +375,9 @@ def _limit_up_next_day_plan(
     board_level = f"{max(payload.level, 1)}板"
     evidence = _limit_up_auction_evidence(payload, concepts)
     risk_notes = evidence["risk_notes"]
+    requested_cap = max(0.0, min(0.10, float(payload.max_position_ratio or 0)))
+    evidence_cap = max(0.0, min(0.10, float(evidence.get("max_position_ratio") or 0)))
+    approved_cap = min(requested_cap, evidence_cap)
     weak_reduce_price = round(payload.price, 2)
     weak_exit_price = round(payload.price * 0.97, 2)
     keep_condition = (
@@ -386,13 +391,13 @@ def _limit_up_next_day_plan(
         "board_level": board_level,
         "industry": payload.industry,
         "concepts": concepts,
-        "overnight_order": True,
+        "overnight_order": approved_cap > 0,
         "order_price": next_limit_price,
         "limit_up_price": next_limit_price,
         "keep_order_condition": keep_condition,
         "cancel_condition": cancel_condition,
         "opening_confirmation": "集合竞价只是筛选，连续竞价开盘后的承接才是确认。",
-        "max_position_ratio": payload.max_position_ratio,
+        "max_position_ratio": approved_cap,
         "break_limit_action": "炸板后不临时加仓；只有强回封、板块仍扩散、成交承接健康时才重新评估。",
         "notes": payload.expectation,
         "board_strength": evidence["board_strength"],
@@ -403,6 +408,17 @@ def _limit_up_next_day_plan(
         "weak_reduce_price": weak_reduce_price,
         "weak_exit_price": weak_exit_price,
         "risk_notes": risk_notes,
+        "mainline_name": evidence["mainline_name"],
+        "mainline_rank": evidence["mainline_rank"],
+        "mainline_score": evidence["mainline_score"],
+        "mainline_level": evidence["mainline_level"],
+        "is_mainline": evidence["is_mainline"],
+        "theme_stage": evidence["theme_stage"],
+        "theme_stage_reason": evidence["theme_stage_reason"],
+        "identity_roles": evidence["identity_roles"],
+        "identity_action": evidence["identity_action"],
+        "position_rule": evidence["position_rule"],
+        "theme_evidence": evidence["theme_evidence"],
     }
     plan = existing or NextDayPlan()
     plan.plan_date = plan_date
@@ -414,7 +430,7 @@ def _limit_up_next_day_plan(
     plan.cost_price = payload.price
     plan.current_price = payload.price
     plan.position_ratio = 0.0
-    plan.holding_category = "主线前排股"
+    plan.holding_category = "主线前排股" if evidence["is_mainline"] is True and approved_cap > 0 else "非主线观察股"
     plan.classification_basis = json.dumps(
         {
             "sector": payload.industry or concept_text,
@@ -436,9 +452,14 @@ def _limit_up_next_day_plan(
     )
     plan.outperform_action = (
         f"超预期才看晋级：若封单稳定且板块助攻成立，持有为主；"
-        f"委托价不高于 {next_limit_price:.2f}，仓位上限 {payload.max_position_ratio * 100:.0f}%。"
+        f"委托价不高于 {next_limit_price:.2f}，仓位上限 {approved_cap * 100:.0f}%。"
         "高位天量或偏离5日线过远时以保护利润为主，不继续扩大仓位。"
     )
+    if approved_cap <= 0:
+        plan.outperform_action = (
+            f"即使个股超预期，也先验证{evidence['mainline_name'] or payload.industry or concept_text}"
+            f"的主线地位、{evidence['theme_stage']}阶段和前排身份；当前只观察，不下单。"
+        )
     plan.expected_condition = (
         f"符合预期：高开2%-5%，短暂换手后10点前回封；"
         f"回踩不破 {weak_reduce_price:.2f}，分时均价承接强，板块资金仍在前排。"
@@ -476,6 +497,7 @@ def _limit_up_next_day_plan(
             "不盘中临时追高",
             "高位天量后不继续扩大仓位",
             "炸板无承接必须放弃",
+            "非主线、高潮或退潮阶段仓位上限为0",
         ],
         ensure_ascii=False,
     )
@@ -490,6 +512,18 @@ def _limit_up_auction_evidence(payload: LimitUpPlanCreate, concepts: list[str]) 
     board_supported = False
     weak_board = False
     support_count = 0
+    mainline_name = ""
+    mainline_rank: int | None = None
+    mainline_score: int | None = None
+    mainline_level = "待验证"
+    is_mainline: bool | None = None
+    theme_stage = "数据不足"
+    theme_stage_reason = "缺少题材资金与阶段证据"
+    identity_roles: list[str] = []
+    identity_action = "只观察"
+    position_rule = "主线、阶段和个股身份未完成联合确认，仓位上限为0%"
+    evidence_position_cap = 0.0
+    theme_evidence: list[str] = []
 
     radar = _get_response_cache("theme-radar")
     if radar is not None:
@@ -556,6 +590,57 @@ def _limit_up_auction_evidence(payload: LimitUpPlanCreate, concepts: list[str]) 
     if not leader_support:
         leader_support = ["前排助攻数据缺口：请先刷新涨停天梯和题材雷达。"]
 
+    atmosphere = _get_response_cache("limit-up-atmosphere-latest")
+    if atmosphere is not None:
+        matched_theme = None
+        matched_role = None
+        for theme in getattr(atmosphere, "theme_ladders", []) or []:
+            role = next(
+                (
+                    item for item in theme.identity_roles
+                    if item.code == payload.code or item.name == payload.name
+                ),
+                None,
+            )
+            if role is not None:
+                matched_theme = theme
+                matched_role = role
+                break
+            payload_theme_text = " ".join([payload.industry, *concepts])
+            if matched_theme is None and (
+                _contains_any(theme.name, tuple([payload.industry, *concepts]))
+                or _contains_any(payload_theme_text, (theme.name, theme.mainline_name))
+            ):
+                matched_theme = theme
+        if matched_theme is not None:
+            mainline_name = matched_theme.mainline_name or matched_theme.name
+            mainline_rank = matched_theme.mainline_rank
+            mainline_score = matched_theme.mainline_score
+            mainline_level = matched_theme.mainline_level
+            is_mainline = matched_theme.is_mainline
+            theme_stage = matched_theme.stage
+            theme_stage_reason = matched_theme.stage_reason
+            position_rule = matched_theme.stage_position_rule
+            theme_evidence = list(matched_theme.evidence)
+            board_strength = "；".join(theme_evidence[:3]) or board_strength
+            mainline_position = (
+                f"{mainline_name} / {mainline_level} / 排名"
+                f"{mainline_rank if mainline_rank is not None else '待确认'} / 阶段={theme_stage}。"
+            )
+            if matched_role is not None:
+                identity_roles = list(matched_role.roles)
+                identity_action = matched_role.recommended_action
+                evidence_position_cap = float(matched_role.max_position_ratio or 0)
+                position_rule = matched_role.recommended_action
+                leader_support = list(dict.fromkeys([
+                    f"{matched_role.name}({matched_role.code})：{' / '.join(identity_roles)}；{matched_role.reason}",
+                    *leader_support,
+                ]))[:8]
+            else:
+                identity_action = "该股未进入题材前排身份列表，只生成观察预案，禁止下单"
+                evidence_position_cap = 0.0
+                position_rule = identity_action
+
     limit_quality = _limit_quality_text(
         payload.amount,
         payload.turnover,
@@ -564,7 +649,15 @@ def _limit_up_auction_evidence(payload: LimitUpPlanCreate, concepts: list[str]) 
         f"{max(payload.level, 1)}板",
     )
     risk_notes = _auction_risk_notes(payload, break_count, board_supported, weak_board, support_count)
+    if is_mainline is False:
+        risk_notes.append(f"{mainline_level}：单只涨停不能证明持续性，当前禁止新开打板仓。")
+    if theme_stage in {"高潮", "退潮"}:
+        risk_notes.append(f"题材处于{theme_stage}阶段：防一致性兑现或退潮补跌，仓位上限为0。")
+    if evidence_position_cap <= 0:
+        risk_notes.append(f"仓位门控：{position_rule}")
     expectation_level = _auction_expectation_level(payload, break_count, board_strength, weak_board, support_count)
+    if evidence_position_cap <= 0:
+        expectation_level = f"观察级：{mainline_level}·{theme_stage}，不开放打板仓位"
     return {
         "board_strength": board_strength,
         "mainline_position": mainline_position,
@@ -572,6 +665,18 @@ def _limit_up_auction_evidence(payload: LimitUpPlanCreate, concepts: list[str]) 
         "limit_quality": limit_quality,
         "expectation_level": expectation_level,
         "risk_notes": risk_notes,
+        "mainline_name": mainline_name,
+        "mainline_rank": mainline_rank,
+        "mainline_score": mainline_score,
+        "mainline_level": mainline_level,
+        "is_mainline": is_mainline,
+        "theme_stage": theme_stage,
+        "theme_stage_reason": theme_stage_reason,
+        "identity_roles": identity_roles,
+        "identity_action": identity_action,
+        "position_rule": position_rule,
+        "max_position_ratio": evidence_position_cap,
+        "theme_evidence": theme_evidence,
     }
 
 def _limit_quality_text(amount: float, turnover: float, break_count: int, sealed_amount: float, board_level: str) -> str:

@@ -543,6 +543,10 @@ export interface LimitUpIdentityRole {
   sealed_amount: number;
   break_count: number;
   reason: string;
+  recommended_action: string;
+  max_position_ratio: number;
+  risk_level: string;
+  persistence_basis: string[];
 }
 
 export interface LimitUpThemeLadder {
@@ -561,6 +565,19 @@ export interface LimitUpThemeLadder {
   continuation_expectation: string;
   invalidation_conditions: string[];
   identity_roles: LimitUpIdentityRole[];
+  mainline_name: string;
+  mainline_rank: number | null;
+  mainline_score: number | null;
+  mainline_level: string;
+  is_mainline: boolean | null;
+  stage: string;
+  stage_reason: string;
+  net_inflow: number | null;
+  main_inflow: number | null;
+  stage_position_rule: string;
+  max_position_ratio: number;
+  eligible_roles: string[];
+  evidence: string[];
 }
 
 export interface LimitUpAtmosphere {

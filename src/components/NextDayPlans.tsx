@@ -64,15 +64,33 @@ export default function NextDayPlans({ mode = 'holding' }: { mode?: 'holding' | 
     () => seesaw?.holding_alerts.find(item => item.code === selected?.code || item.name === selected?.name) ?? null,
     [seesaw, selected],
   )
+  const limitOrderEligibility = useMemo(() => {
+    if (!draft || draft.plan_type !== 'limit_up_auction') {
+      return { allowed: false, reason: '仅打板预案适用主线门控。' }
+    }
+    const auction = draft.auction_plan
+    if (auction.is_mainline !== true) {
+      return { allowed: false, reason: auction.is_mainline === false ? '该标的不属于当前主线，系统仓位上限为 0。' : '主线归属尚未被真实数据确认，暂不允许挂单。' }
+    }
+    if (['高潮', '退潮'].includes(auction.theme_stage)) {
+      return { allowed: false, reason: `题材处于${auction.theme_stage}阶段，不接一致性高潮，也不参与退潮博弈。` }
+    }
+    if (!(auction.max_position_ratio > 0)) {
+      return { allowed: false, reason: '系统未开放仓位，只生成观察预案。' }
+    }
+    if (!auction.board_strength || !auction.limit_quality) {
+      return { allowed: false, reason: '板块资金或封板质量证据不完整，暂不允许挂单。' }
+    }
+    return { allowed: true, reason: '主线、题材阶段、身份竞争和封板质量均已通过，仍须等待竞价与开盘量价确认。' }
+  }, [draft])
   const conditionOrderAdvice = useMemo(() => {
     if (!draft) return null
     if (draft.plan_type === 'limit_up_auction') {
-      const hasEvidence = Boolean(draft.auction_plan.board_strength && draft.auction_plan.limit_quality)
       return {
-        level: hasEvidence ? '谨慎预埋' : '暂不预埋',
-        action: hasEvidence
+        level: limitOrderEligibility.allowed ? '谨慎预埋' : '禁止预埋',
+        action: limitOrderEligibility.allowed
           ? `可在券商端预填 ${num(draft.auction_plan.order_price || draft.limit_up_price)} 的买入委托，但盘前不得无条件启用。`
-          : '题材、资金或封板质量证据不完整，只保存预案，不向券商提交委托。',
+          : `${limitOrderEligibility.reason}只保存观察预案，不向券商提交委托。`,
         trigger: draft.auction_plan.keep_order_condition || draft.auction_plan.opening_confirmation || '竞价强度、主线地位和量价同时确认后才允许生效。',
         cancel: draft.auction_plan.cancel_condition || '竞价弱于预期、主线退潮、核心股负反馈或数据源异常时立即撤单。',
       }
@@ -87,7 +105,7 @@ export default function NextDayPlans({ mode = 'holding' }: { mode?: 'holding' | 
       trigger: `减仓线 ${num(draft.reduce_price)}，最终风险线 ${num(draft.final_risk_price)}；数量以计划卡和可卖数量为上限。`,
       cancel: '只有收盘后重新评估并保存了更强证据，才允许上调或撤销保护线；盘中不得因主观期待放宽。',
     }
-  }, [draft])
+  }, [draft, limitOrderEligibility])
 
   const selectPlan = (plan: Plan) => {
     selectedIdRef.current = plan.id
@@ -127,10 +145,13 @@ export default function NextDayPlans({ mode = 'holding' }: { mode?: 'holding' | 
 
   const savePlan = () => {
     if (!draft) return
+    const payload = draft.plan_type === 'limit_up_auction' && !limitOrderEligibility.allowed
+      ? { ...draft, auction_plan: { ...draft.auction_plan, overnight_order: false } }
+      : draft
     fetch(`${API_BASE}/api/next-day-plans/${draft.id}`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(draft),
+      body: JSON.stringify(payload),
     })
       .then(r => r.json())
       .then((saved: Plan) => {
@@ -377,6 +398,50 @@ export default function NextDayPlans({ mode = 'holding' }: { mode?: 'holding' | 
                   </div>
                   <span>{draft.auction_plan.refreshed_at || '未刷新'}</span>
                 </div>
+                {draft.plan_type === 'limit_up_auction' && (
+                  <div className={`limit-mainline-decision ${limitOrderEligibility.allowed ? 'eligible' : 'blocked'}`}>
+                    <div className="limit-mainline-head">
+                      <div>
+                        <span>主线地位 × 题材阶段 × 个股身份</span>
+                        <h4>{draft.auction_plan.mainline_name || draft.auction_plan.industry || '主线尚未确认'}</h4>
+                      </div>
+                      <strong>{limitOrderEligibility.allowed ? '允许条件观察仓' : '禁止开仓'}</strong>
+                    </div>
+                    <div className="limit-mainline-badges">
+                      <span className={draft.auction_plan.is_mainline ? 'positive' : 'negative'}>
+                        {draft.auction_plan.mainline_level || (draft.auction_plan.is_mainline ? '主线' : '非主线')}
+                      </span>
+                      <span>主线排名 {draft.auction_plan.mainline_rank ?? '--'}</span>
+                      <span>主线强度 {draft.auction_plan.mainline_score == null ? '--' : draft.auction_plan.mainline_score.toFixed(0)}</span>
+                      <span className={['高潮', '退潮'].includes(draft.auction_plan.theme_stage) ? 'negative' : ''}>
+                        题材阶段 {draft.auction_plan.theme_stage || '待确认'}
+                      </span>
+                      <span>身份 {draft.auction_plan.identity_roles?.join(' · ') || '待确认'}</span>
+                    </div>
+                    <p className="limit-stage-reason">{draft.auction_plan.theme_stage_reason || '等待题材雷达、资金排名和涨停梯队形成阶段判断。'}</p>
+                    <div className="limit-position-gate">
+                      <div>
+                        <b>身份竞争结论</b>
+                        <p>{draft.auction_plan.identity_action || '身份未确认，不参与开仓。'}</p>
+                      </div>
+                      <div>
+                        <b>阶段仓位规则</b>
+                        <p>{draft.auction_plan.position_rule || '主线与阶段未确认前仓位为 0。'}</p>
+                      </div>
+                      <div className="limit-system-cap">
+                        <b>系统仓位上限</b>
+                        <strong>{(draft.auction_plan.max_position_ratio * 100).toFixed(0)}%</strong>
+                      </div>
+                    </div>
+                    <p className="limit-order-gate-result"><b>条件单门控：</b>{limitOrderEligibility.reason}</p>
+                    <div className="limit-theme-evidence">
+                      <b>数据依据</b>
+                      {draft.auction_plan.theme_evidence?.length ? (
+                        <ul>{draft.auction_plan.theme_evidence.slice(0, 8).map(item => <li key={item}>{item}</li>)}</ul>
+                      ) : <p>暂无可审计的主线排名、阶段和梯队证据，仓位保持 0。</p>}
+                    </div>
+                  </div>
+                )}
                 {!!draft.auction_plan.stage_checks?.length && (
                   <div className="stage-check-grid">
                     {draft.auction_plan.stage_checks.map(item => (
@@ -450,11 +515,16 @@ export default function NextDayPlans({ mode = 'holding' }: { mode?: 'holding' | 
                   <label>明日涨停价
                     <input type="number" step="0.01" value={draft.limit_up_price} onChange={e => updateDraft('limit_up_price', Number(e.target.value))} />
                   </label>
-                  <label>仓位上限
-                    <SensitiveNumberInput privacyMode={privacyMode} step="0.01" value={draft.auction_plan.max_position_ratio} onChange={value => updateAuctionPlan('max_position_ratio', value)} />
+                  <label>系统仓位上限（只读）
+                    <SensitiveNumberInput privacyMode={privacyMode} readOnly step="0.01" value={draft.auction_plan.max_position_ratio} onChange={() => {}} />
                   </label>
                   <label className="check-item done">
-                    <input type="checkbox" checked={draft.auction_plan.overnight_order} onChange={e => updateAuctionPlan('overnight_order', e.target.checked)} />
+                    <input
+                      type="checkbox"
+                      checked={limitOrderEligibility.allowed && draft.auction_plan.overnight_order}
+                      disabled={!limitOrderEligibility.allowed}
+                      onChange={e => updateAuctionPlan('overnight_order', e.target.checked)}
+                    />
                     <span>允许隔夜挂单</span>
                   </label>
                 </div>}
@@ -522,12 +592,15 @@ function SensitiveNumberInput({
   value,
   onChange,
   step,
+  readOnly = false,
 }: {
   privacyMode: boolean
   value: number
   onChange: (value: number) => void
   step?: string
+  readOnly?: boolean
 }) {
+  const locked = privacyMode || readOnly
   return (
     <input
       className="sensitive-number-input"
@@ -535,10 +608,10 @@ function SensitiveNumberInput({
       type={privacyMode ? 'text' : 'number'}
       step={privacyMode ? undefined : step}
       value={privacyMode ? '******' : value}
-      readOnly={privacyMode}
-      aria-label={privacyMode ? '敏感数据已隐藏' : undefined}
+      readOnly={locked}
+      aria-label={privacyMode ? '敏感数据已隐藏' : readOnly ? '系统仓位上限，只读' : undefined}
       onChange={event => {
-        if (!privacyMode) onChange(Number(event.target.value))
+        if (!locked) onChange(Number(event.target.value))
       }}
     />
   )

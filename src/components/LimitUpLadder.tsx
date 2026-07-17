@@ -60,17 +60,33 @@ export default function LimitUpLadder() {
     })).filter(group => group.stocks.length)
   }, [activeConcept, data, query])
 
+  const stockStrategyByCode = useMemo(() => {
+    const mapping = new Map<string, { theme: LimitUpAtmosphere['theme_ladders'][number]; role: LimitUpAtmosphere['theme_ladders'][number]['identity_roles'][number] }>()
+    for (const theme of atmosphere?.theme_ladders ?? []) {
+      for (const role of theme.identity_roles) {
+        const previous = mapping.get(role.code)
+        const priority = (theme.is_mainline ? 1000 : 0) + theme.completeness_score + role.role_score + role.max_position_ratio * 100
+        const previousPriority = previous
+          ? (previous.theme.is_mainline ? 1000 : 0) + previous.theme.completeness_score + previous.role.role_score + previous.role.max_position_ratio * 100
+          : -1
+        if (role.code && priority > previousPriority) mapping.set(role.code, { theme, role })
+      }
+    }
+    return mapping
+  }, [atmosphere])
+
   const highest = data?.groups[0]?.level ?? 0
   const total = data?.groups.reduce((sum, group) => sum + group.stocks.length, 0) ?? 0
   const topCluster = data?.clusters[0]
   const isRecentTradeDay = !!data?.notes.some(note => note.includes('非交易日') || note.includes('最近交易日'))
 
   const createAuctionPlan = (stock: LimitUpStock, level: number) => {
+    const strategy = stockStrategyByCode.get(stock.code)
     setCreatingCode(stock.code)
     fetch(`${API_BASE}/api/next-day-plans/from-limit-up`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ ...stock, level, max_position_ratio: 0.1 }),
+      body: JSON.stringify({ ...stock, level, max_position_ratio: strategy?.role.max_position_ratio ?? 0 }),
     })
       .then(r => r.json())
       .then(() => {
@@ -162,6 +178,25 @@ export default function LimitUpLadder() {
                         </div>
                         <b>{stock.consecutive_limit_days}板</b>
                       </div>
+                      {stockStrategyByCode.get(stock.code) ? (() => {
+                        const strategy = stockStrategyByCode.get(stock.code)!
+                        return (
+                          <div className={`stock-mainline-context risk-${strategy.role.risk_level}`}>
+                            <div>
+                              <span>{strategy.theme.mainline_level}</span>
+                              <span>{strategy.theme.stage}阶段</span>
+                              <span>{strategy.role.roles.join(' / ')}</span>
+                            </div>
+                            <p>{strategy.role.recommended_action}</p>
+                            <b>打板仓位上限 {Math.round(strategy.role.max_position_ratio * 100)}%</b>
+                          </div>
+                        )
+                      })() : (
+                        <div className="stock-mainline-context risk-高">
+                          <p>未取得主线、题材阶段和前排身份的联合证据，只允许观察。</p>
+                          <b>打板仓位上限 0%</b>
+                        </div>
+                      )}
                       <div className="limit-card-stats">
                         <span>涨幅 <em>{stock.change_pct.toFixed(2)}%</em></span>
                         <span>封单 <em>{stock.sealed_amount.toFixed(2)}亿</em></span>
@@ -182,7 +217,7 @@ export default function LimitUpLadder() {
                         disabled={creatingCode === stock.code}
                       >
                         <NotebookPen size={14} />
-                        {creatingCode === stock.code ? '生成中' : '生成打板预案'}
+                        {creatingCode === stock.code ? '生成中' : (stockStrategyByCode.get(stock.code)?.role.max_position_ratio ? '生成打板预案' : '生成观察预案')}
                       </button>
                     </article>
                   ))}
@@ -308,6 +343,13 @@ function AtmospherePanel({
                   <button type="button" onClick={() => onSelectTheme(theme.name)}>{theme.name}</button>
                   <strong>{theme.completeness_score}分</strong>
                 </div>
+                <div className="theme-mainline-badges">
+                  <span className={theme.is_mainline ? 'is-mainline' : theme.is_mainline === false ? 'not-mainline' : 'unknown'}>{theme.mainline_level}</span>
+                  <span>{theme.mainline_rank == null ? '排名待确认' : `全市场题材第${theme.mainline_rank}`}</span>
+                  <span>{theme.stage}阶段</span>
+                  <span>题材仓位上限 {Math.round(theme.max_position_ratio * 100)}%</span>
+                </div>
+                <p className="theme-stage-reason">{theme.stage_reason}</p>
                 <p className="theme-ladder-label">{theme.completeness_label}</p>
                 <div className="theme-layer-stats">
                   <span>涨停 <b>{theme.limit_up_count}</b></span>
@@ -320,12 +362,17 @@ function AtmospherePanel({
                 <strong className={`theme-action ${theme.action.startsWith('禁止') ? 'forbid' : theme.action.startsWith('允许') ? 'allow' : 'caution'}`}>
                   {theme.action}
                 </strong>
+                <p className="theme-position-rule"><b>阶段—仓位规则：</b>{theme.stage_position_rule}</p>
                 <p className="theme-continuation"><b>次日延续：</b>{theme.continuation_expectation}</p>
+                {!!theme.evidence.length && (
+                  <ul className="theme-mainline-evidence">{theme.evidence.slice(0, 4).map(item => <li key={item}>{item}</li>)}</ul>
+                )}
                 <div className="identity-list">
                   {theme.identity_roles.slice(0, 5).map(stock => (
                     <div className="identity-row" key={stock.code || stock.name} title={stock.reason}>
                       <span><b>{stock.name}</b><small>{stock.code} · {stock.level}板 · 角色分{stock.role_score}</small></span>
                       <em>{stock.roles.join(' / ')}</em>
+                      <small className={`identity-permission risk-${stock.risk_level}`}>{stock.recommended_action} · 上限{Math.round(stock.max_position_ratio * 100)}%</small>
                     </div>
                   ))}
                 </div>
