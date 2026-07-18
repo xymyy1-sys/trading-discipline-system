@@ -409,6 +409,66 @@ class ActionRecommendationRevision(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc), index=True)
 
 
+class RecommendationOutcome(Base):
+    """Post-hoc market outcomes for one immutable recommendation signal.
+
+    ``ActionRecommendation`` is the mutable latest state for a holding/day.
+    Therefore ``source_key`` points either at an immutable recommendation
+    revision or, for legacy rows without revisions, at the recommendation
+    itself.  Nothing in this table is consumed by the live decision engine.
+    """
+
+    __tablename__ = "recommendation_outcomes"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    source_key: Mapped[str] = mapped_column(String(96), unique=True, index=True)
+    recommendation_id: Mapped[int] = mapped_column(Integer, index=True)
+    recommendation_revision_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
+    trade_date: Mapped[str] = mapped_column(String(16), index=True)
+    code: Mapped[str] = mapped_column(String(16), index=True)
+    name: Mapped[str] = mapped_column(String(64), default="")
+    signal_at: Mapped[datetime] = mapped_column(DateTime, index=True)
+    level: Mapped[str] = mapped_column(String(24), default="INFO")
+    state: Mapped[str] = mapped_column(String(48), default="")
+    action: Mapped[str] = mapped_column(String(64), default="")
+    recommended_ratio: Mapped[float] = mapped_column(Float, default=0)
+
+    reference_snapshot_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
+    reference_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    reference_latency_seconds: Mapped[float | None] = mapped_column(Float, nullable=True)
+    reference_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    reference_source: Mapped[str] = mapped_column(String(128), default="")
+    reference_quality: Mapped[str] = mapped_column(String(32), default="")
+
+    price_5m: Mapped[float | None] = mapped_column(Float, nullable=True)
+    return_5m_pct: Mapped[float | None] = mapped_column(Float, nullable=True)
+    price_15m: Mapped[float | None] = mapped_column(Float, nullable=True)
+    return_15m_pct: Mapped[float | None] = mapped_column(Float, nullable=True)
+    price_30m: Mapped[float | None] = mapped_column(Float, nullable=True)
+    return_30m_pct: Mapped[float | None] = mapped_column(Float, nullable=True)
+    close_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    return_close_pct: Mapped[float | None] = mapped_column(Float, nullable=True)
+    next_trade_date: Mapped[str | None] = mapped_column(String(16), nullable=True, index=True)
+    next_open_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    return_next_open_pct: Mapped[float | None] = mapped_column(Float, nullable=True)
+    next_close_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    return_next_close_pct: Mapped[float | None] = mapped_column(Float, nullable=True)
+    mfe_pct: Mapped[float | None] = mapped_column(Float, nullable=True)
+    mae_pct: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+    status: Mapped[str] = mapped_column(String(16), default="pending", index=True)
+    data_quality: Mapped[str] = mapped_column(String(24), default="pending", index=True)
+    invalid_reason: Mapped[str] = mapped_column(Text, default="")
+    missing_horizons_json: Mapped[str] = mapped_column(Text, default="[]")
+    evaluated_through_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc), index=True)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime,
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
+    )
+
+
 class RecommendationFeedback(Base):
     __tablename__ = "recommendation_feedback"
 

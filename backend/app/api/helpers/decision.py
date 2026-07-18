@@ -70,6 +70,91 @@ def _json_dict(raw: str | None) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
 
+def expectation_evidence_coverage(
+    *,
+    quote: dict[str, Any] | None,
+    volume: VolumePriceSnapshot | None,
+    reference_trade_date: str,
+) -> tuple[float, list[str], list[str]]:
+    """Calculate explainable evidence coverage for an expectation snapshot.
+
+    Confidence is intentionally evidence coverage rather than a statistical
+    probability.  Five independently inspectable inputs each contribute 20%.
+    A present but degraded field is reported as a gap instead of receiving a
+    hard-coded fallback score.
+    """
+
+    quote = quote or {}
+    current_price = _safe_float(quote.get("price"))
+    open_price = _safe_float(quote.get("open"))
+    previous_close = _safe_float(quote.get("prev_close"))
+    if current_price <= 0 and volume is not None:
+        current_price = float(volume.price or 0)
+    if open_price <= 0 and volume is not None:
+        open_price = float(volume.open_price or 0)
+    if previous_close <= 0 and volume is not None:
+        previous_close = float(volume.prev_close or 0)
+
+    fresh_volume = False
+    volume_age_days: int | None = None
+    if volume is not None and volume.trade_date:
+        try:
+            reference_date = datetime.fromisoformat(reference_trade_date).date()
+            volume_date = datetime.fromisoformat(volume.trade_date).date()
+            volume_age_days = (reference_date - volume_date).days
+            fresh_volume = 0 <= volume_age_days <= 3
+        except (TypeError, ValueError):
+            fresh_volume = False
+
+    quality = str(getattr(volume, "data_quality", "") or "").lower()
+    quality_reliable = quality in {"realtime", "reliable", "complete", "ok"}
+    vwap_reliable = bool(
+        volume is not None
+        and volume.vwap_reliable
+        and float(volume.vwap or 0) > 0
+    )
+    vwap_value = float(volume.vwap or 0) if volume is not None else 0.0
+
+    components = [
+        (
+            current_price > 0,
+            f"证据完整度·行情：有效价格 {current_price:.2f} 可用（+20%）。",
+            "证据完整度缺口·行情：没有有效现价/收盘价（+0%）。",
+        ),
+        (
+            fresh_volume,
+            (
+                f"证据完整度·量价：{volume.trade_date} 量价快照为同日/最近数据（+20%）。"
+                if volume is not None
+                else ""
+            ),
+            (
+                "证据完整度缺口·量价：没有同日/最近量价快照（+0%）。"
+                if volume_age_days is None
+                else f"证据完整度缺口·量价：快照距参考日 {volume_age_days} 天（+0%）。"
+            ),
+        ),
+        (
+            quality_reliable,
+            f"证据完整度·质量：量价数据质量为 {quality}（+20%）。",
+            f"证据完整度缺口·质量：量价数据质量为 {quality or '缺失'}（+0%）。",
+        ),
+        (
+            vwap_reliable,
+            f"证据完整度·VWAP：真实分时VWAP {vwap_value:.2f} 可用（+20%）。",
+            "证据完整度缺口·VWAP：真实分时VWAP不可用或不可靠（+0%）。",
+        ),
+        (
+            open_price > 0 and previous_close > 0,
+            f"证据完整度·开盘基准：开盘 {open_price:.2f}、昨收 {previous_close:.2f} 可用（+20%）。",
+            "证据完整度缺口·开盘基准：开盘价或昨收价缺失（+0%）。",
+        ),
+    ]
+    evidence = [positive for present, positive, _ in components if present and positive]
+    counter = [negative for present, _, negative in components if not present and negative]
+    return round(sum(0.2 for present, _, _ in components if present), 2), evidence, counter
+
+
 def _event_in_trade_session(row: IntradayEvidenceEvent, trade_date: str) -> bool:
     """Use publication time for news and capture time for market evidence.
 
@@ -594,7 +679,13 @@ def build_expectation_snapshot(
         transition = "INTRADAY_REVERSAL_PENDING"
         suggestion = "价格已脱离深水低点，但V形反转尚待VWAP与次低点确认；不追高，确认失败仍按原风险计划处理。"
         evidence.extend(_json_list(latest_volume.evidence_json)[:2])
-    confidence = 0.72 if quote_is_usable else 0.2
+    confidence, coverage_evidence, coverage_counter = expectation_evidence_coverage(
+        quote=quote,
+        volume=latest_volume,
+        reference_trade_date=_today(),
+    )
+    evidence.extend(coverage_evidence)
+    counter.extend(coverage_counter)
     row = existing
     if row is None:
         row = ExpectationSnapshot(trade_date=_today(), code=code, stage=stage)

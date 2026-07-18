@@ -11,6 +11,7 @@ from app.api.routes.strategies import router as strategies_router
 from app.api.routes.acceptance import router as acceptance_router
 from app.api.routes.ai import router as ai_router
 from app.api.routes.simulation import router as simulation_router
+from app.api.routes.recommendation_outcomes import router as recommendation_outcomes_router
 from app.core.security import require_auth
 
 # Root router for HTML/root paths
@@ -32,4 +33,5 @@ protected_router.include_router(strategies_router)
 protected_router.include_router(acceptance_router)
 protected_router.include_router(ai_router)
 protected_router.include_router(simulation_router)
+protected_router.include_router(recommendation_outcomes_router)
 router.include_router(protected_router)

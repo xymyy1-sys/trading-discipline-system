@@ -1,20 +1,22 @@
 from __future__ import annotations
 
 import json
-from datetime import date, datetime, timedelta
+from datetime import date, datetime
 
 from sqlalchemy.orm import Session
 
-from app.api.helpers.decision import EXPECTATION_DEFAULTS, _persist_expectation_revision
+from app.api.helpers.decision import (
+    EXPECTATION_DEFAULTS,
+    _persist_expectation_revision,
+    expectation_evidence_coverage,
+)
 from app.core.trading_clock import shanghai_now_naive, shanghai_today
 from app.models.trading import ExpectationSnapshot, Holding, NextDayPlan, VolumePriceSnapshot
+from app.services.trading_calendar import next_a_share_trading_day
 
 
 def next_trading_date(value: date | None = None, *, now: datetime | None = None) -> str:
-    target = (value or shanghai_today(now)) + timedelta(days=1)
-    while target.weekday() >= 5:
-        target += timedelta(days=1)
-    return target.isoformat()
+    return next_a_share_trading_day(value or shanghai_today(now)).isoformat()
 
 
 def generate_next_day_expectations(db: Session) -> int:
@@ -77,6 +79,12 @@ def generate_next_day_expectations(db: Session) -> int:
         low, high = EXPECTATION_DEFAULTS[base]
         if base == "REPAIR" and volume:
             low, high = (-3.0, 0.5) if volume.high_drawdown >= 5 else (-2.0, 1.5)
+        coverage, coverage_evidence, coverage_counter = expectation_evidence_coverage(
+            quote={},
+            volume=volume,
+            reference_trade_date=shanghai_today().isoformat(),
+        )
+        evidence.extend(coverage_evidence)
         row = db.query(ExpectationSnapshot).filter(
             ExpectationSnapshot.trade_date == trade_date,
             ExpectationSnapshot.code == code,
@@ -93,11 +101,14 @@ def generate_next_day_expectations(db: Session) -> int:
         row.actual_open_pct = 0
         row.actual_change_pct = 0
         row.expectation_gap_score = 0
-        row.expectation_result = "MATCHED"
+        # A close baseline is a hypothesis for the next session, not a verified
+        # result.  Marking it as MATCHED here polluted hit-rate statistics and
+        # made the UI claim success before auction/open evidence existed.
+        row.expectation_result = "UNKNOWN"
         row.state_transition = "WAITING_VALIDATION"
-        row.confidence = 0.78 if volume and volume.vwap_reliable else 0.62
+        row.confidence = coverage
         row.evidence_json = json.dumps(evidence, ensure_ascii=False)
-        row.counter_evidence_json = "[]"
+        row.counter_evidence_json = json.dumps(coverage_counter, ensure_ascii=False)
         row.suggestion = "次日先用集合竞价验证开盘区间：高于区间上沿为超预期/弱转强候选，落在区间内为符合预期，低于下沿则转弱；再用开盘5分钟、VWAP和量价承接持续修正。"
         row.created_at = shanghai_now_naive()
         db.add(row)

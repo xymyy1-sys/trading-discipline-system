@@ -90,7 +90,7 @@ export default function LimitUpLadder() {
     })
       .then(r => r.json())
       .then(() => {
-        window.dispatchEvent(new CustomEvent('nav', { detail: '次日计划卡' }))
+        window.dispatchEvent(new CustomEvent('workspace-module', { detail: 'plans' }))
       })
       .finally(() => setCreatingCode(null))
   }

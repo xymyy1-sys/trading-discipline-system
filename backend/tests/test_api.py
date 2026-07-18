@@ -349,7 +349,7 @@ def test_review_calibration_summary(client, db_session):
         "execution_adoption",
         "plan_execution_drift",
     }
-    assert any(item["target"] == "预期阈值" for item in data["calibration_suggestions"])
+    assert any(item["target"] == "结果闭环" for item in data["calibration_suggestions"])
 def test_login_rejects_invalid_password(client):
     response = client.post("/api/auth/login", json={"username": "admin", "password": "wrong-password"})
     assert response.status_code == 401
@@ -464,7 +464,7 @@ def test_calibration_apply_requires_gate_and_explicit_confirmation(client):
     assert response.status_code == 409
 
 
-def test_expectation_calibration_can_apply_and_rollback(client, db_session):
+def test_expectation_state_counts_cannot_apply_without_forward_outcomes(client, db_session):
     from app.models.trading import ExpectationRule, ExpectationSnapshot
 
     client.get("/api/expectation-rules")
@@ -479,25 +479,16 @@ def test_expectation_calibration_can_apply_and_rollback(client, db_session):
     db_session.commit()
 
     proposal = client.get("/api/reviews/calibration-proposal").json()
-    assert proposal["eligible"] is True
-    assert proposal["sample_count"] == 20
-    assert proposal["changes"]
+    assert proposal["eligible"] is False
+    assert proposal["sample_count"] == 0
+    assert proposal["minimum_samples"] == 30
+    assert proposal["changes"] == []
+    assert "没有真实结果闭环，禁止校准" in proposal["rationale"]
 
     denied = client.post("/api/reviews/calibration-apply", json={"confirmation": "yes"})
     assert denied.status_code == 409
     applied = client.post("/api/reviews/calibration-apply", json={"confirmation": "APPLY_CALIBRATION"})
-    assert applied.status_code == 200
-    run = applied.json()
-    assert run["status"] == "applied"
-    db_session.expire_all()
-    assert db_session.get(ExpectationRule, rule.id).underperform_threshold > original_under
-    assert db_session.get(ExpectationRule, rule.id).outperform_threshold > original_outperform
-    duplicate = client.post("/api/reviews/calibration-apply", json={"confirmation": "APPLY_CALIBRATION"})
-    assert duplicate.status_code == 409
-
-    rolled_back = client.post(f"/api/reviews/calibration-runs/{run['id']}/rollback")
-    assert rolled_back.status_code == 200
-    assert rolled_back.json()["status"] == "rolled_back"
+    assert applied.status_code == 409
     db_session.expire_all()
     assert db_session.get(ExpectationRule, rule.id).underperform_threshold == original_under
     assert db_session.get(ExpectationRule, rule.id).outperform_threshold == original_outperform

@@ -52,6 +52,10 @@ from app.services.mainline_classifier import (
     _classify_sector_taxonomy,
 )
 from app.services.flow_kinetics import analyze_flow_kinetics
+from app.services.trading_calendar import (
+    is_a_share_trading_day,
+    previous_a_share_trading_day,
+)
 
 
 def _shanghai_now_naive() -> datetime:
@@ -60,10 +64,10 @@ def _shanghai_now_naive() -> datetime:
 
 
 def _last_trading_day() -> str:
-    d = _shanghai_now_naive()
-    while d.weekday() >= 5:
-        d -= timedelta(days=1)
-    return d.strftime("%Y-%m-%d")
+    return previous_a_share_trading_day(
+        _shanghai_now_naive().date(),
+        inclusive=True,
+    ).isoformat()
 
 
 def _limit_up_default_candidate_dates(
@@ -83,12 +87,12 @@ def _limit_up_default_candidate_dates(
     current = now or _shanghai_now_naive()
     cursor = current.date()
     minutes = current.hour * 60 + current.minute
-    if cursor.weekday() >= 5 or minutes < 570:
-        cursor -= timedelta(days=1)
+    if not is_a_share_trading_day(cursor) or minutes < 570:
+        cursor = previous_a_share_trading_day(cursor)
 
     candidates: list[str] = []
     while len(candidates) < max(1, lookback):
-        if cursor.weekday() < 5:
+        if is_a_share_trading_day(cursor):
             candidates.append(cursor.isoformat())
         cursor -= timedelta(days=1)
     return candidates
@@ -108,11 +112,11 @@ def _is_valid_limit_up_ladder(value: LimitUpLadderOut | None) -> bool:
     )
 
 def _is_trading_day() -> bool:
-    return _shanghai_now_naive().weekday() < 5
+    return is_a_share_trading_day(_shanghai_now_naive().date())
 
 def _is_trading_time() -> bool:
     now = _shanghai_now_naive()
-    if now.weekday() >= 5:
+    if not is_a_share_trading_day(now.date()):
         return False
     t = now.hour * 60 + now.minute
     return 555 <= t <= 690 or 780 <= t <= 900
@@ -2264,7 +2268,9 @@ class MarketDataProvider:
         if date:
             target_date = date
         elif _is_trading_day():
-            target_date = (_shanghai_now_naive() - timedelta(days=1)).strftime("%Y-%m-%d")
+            target_date = previous_a_share_trading_day(
+                _shanghai_now_naive().date(),
+            ).isoformat()
         else:
             target_date = _last_trading_day()
         related_stocks = related_stocks or {}

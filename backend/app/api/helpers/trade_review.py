@@ -11,6 +11,7 @@ from app.models.trading import (
     ExpectationSnapshot,
     NextDayPlan,
     RecommendationFeedback,
+    RecommendationOutcome,
     TTradePlan,
     TradeLog,
     TradeReview,
@@ -212,21 +213,46 @@ def _model_calibration_metrics(
     metrics: list[CalibrationMetricOut] = []
     suggestions: list[CalibrationSuggestionOut] = []
 
+    completed_outcome_count = (
+        db.query(RecommendationOutcome)
+        .filter(
+            RecommendationOutcome.status == "complete",
+            RecommendationOutcome.data_quality == "reliable",
+        )
+        .count()
+    )
+    if completed_outcome_count < 30:
+        suggestions.append(CalibrationSuggestionOut(
+            level="阻断",
+            target="结果闭环",
+            suggestion="没有足够真实结果闭环，禁止自动校准参数。",
+            reason=(
+                f"当前只有 {completed_outcome_count}/30 条可靠且完整的建议后前向结果；"
+                "预期状态、量价形态和建议采纳都不能替代真实收益结果。"
+            ),
+            sample_count=completed_outcome_count,
+        ))
+
     expectation_samples = [item for item in expectations if item.expectation_result and item.expectation_result != "UNKNOWN"]
     expectation_fail = sum(1 for item in expectation_samples if item.expectation_result in {"WEAKER", "INVALID", "SLIGHTLY_WEAKER"})
     expectation_success = sum(1 for item in expectation_samples if item.expectation_result in {"MATCHED", "STRONGER"})
     metrics.append(_metric(
         key="expectation_hit",
-        label="阶段预期命中",
+        label="阶段预期状态分布（非收益胜率）",
         sample_count=len(expectation_samples),
         success_count=expectation_success,
         fail_count=expectation_fail,
         evidence=[
             f"弱于预期 {expectation_fail} 次",
             f"符合/强于预期 {expectation_success} 次",
+            "该比例只描述状态分类，不代表交易盈利或建议有效。",
         ],
     ))
-    if len(expectation_samples) >= 5 and expectation_fail / len(expectation_samples) >= 0.45:
+    if (
+        completed_outcome_count >= 30
+        and len(expectation_samples) >= 5
+        and expectation_fail / len(expectation_samples) >= 0.45
+    ):
         suggestions.append(CalibrationSuggestionOut(
             level="高",
             target="预期阈值",
@@ -241,13 +267,14 @@ def _model_calibration_metrics(
     repaired_volume = [item for item in volume_samples if _contains_any(item.pattern, ("修复", "站上VWAP", "放量上涨"))]
     metrics.append(_metric(
         key="volume_price_risk",
-        label="量价风险识别",
+        label="量价形态分布（非识别胜率）",
         sample_count=len(volume_samples),
         success_count=len(weak_volume),
         fail_count=len(repaired_volume),
         evidence=[
             f"风险形态 {len(weak_volume)} 次",
             f"修复/强势形态 {len(repaired_volume)} 次",
+            "风险形态占比不等于风险识别成功率。",
         ],
         success_word="风险样本",
     ))
@@ -296,11 +323,15 @@ def _model_calibration_metrics(
     ]
     metrics.append(_metric(
         key="execution_adoption",
-        label="执行建议采纳",
+        label="建议采纳记录（非成败）",
         sample_count=len(feedback_samples),
         success_count=len(executed),
         fail_count=len(ignored),
-        evidence=[f"已执行/部分执行 {len(executed)} 条", f"忽略/暂不执行 {len(ignored)} 条"],
+        evidence=[
+            f"已执行/部分执行 {len(executed)} 条",
+            f"忽略/暂不执行 {len(ignored)} 条",
+            "采纳率只描述用户动作，不代表建议成功率。",
+        ],
     ))
     if len(feedback_samples) >= 5 and len(ignored) / len(feedback_samples) >= 0.4:
         suggestions.append(CalibrationSuggestionOut(
@@ -345,45 +376,31 @@ def _model_calibration_metrics(
 
 
 def _expectation_calibration_proposal(db: Session) -> CalibrationProposalOut:
-    summary = _review_calibration_summary(db)
-    metric = next(item for item in summary.model_metrics if item.key == "expectation_hit")
-    active_run = (
-        db.query(CalibrationRun)
-        .filter(CalibrationRun.metric_key == "expectation_hit", CalibrationRun.status == "applied")
-        .order_by(CalibrationRun.created_at.desc())
-        .first()
-    )
-    already_applied = bool(active_run and active_run.sample_count >= metric.sample_count)
-    eligible = metric.sample_count >= 20 and metric.fail_count / max(metric.sample_count, 1) >= 0.45 and not already_applied
-    rationale = (
-        f"同一批 {metric.sample_count} 个样本的校准已经应用；需要新增有效样本或先回滚，禁止重复累加阈值。"
-        if already_applied else (
-        f"{metric.sample_count} 个有效阶段预期样本中有 {metric.fail_count} 个弱于预期；"
-        "建议把弱于预期识别线和强于预期确认线各收紧 0.25 个百分点。"
-        if eligible else
-        f"当前有效样本 {metric.sample_count}/20，或弱于预期比例未达到 45%，不允许应用参数变更。"
+    completed_outcome_count = (
+        db.query(RecommendationOutcome)
+        .filter(
+            RecommendationOutcome.status == "complete",
+            RecommendationOutcome.data_quality == "reliable",
         )
+        .count()
     )
-    changes: list[CalibrationRuleChangeOut] = []
-    if eligible:
-        for rule in db.query(ExpectationRule).filter(ExpectationRule.enabled.is_(True)).order_by(ExpectationRule.id).all():
-            changes.extend([
-                CalibrationRuleChangeOut(
-                    rule_id=rule.id, display_name=rule.display_name,
-                    field="underperform_threshold", before=rule.underperform_threshold,
-                    after=round(min(rule.underperform_threshold + 0.25, rule.expected_open_low - 0.01), 2),
-                ),
-                CalibrationRuleChangeOut(
-                    rule_id=rule.id, display_name=rule.display_name,
-                    field="outperform_threshold", before=rule.outperform_threshold,
-                    after=round(max(rule.outperform_threshold + 0.25, rule.expected_open_high + 0.01), 2),
-                ),
-            ])
+    if completed_outcome_count < 30:
+        rationale = (
+            "没有真实结果闭环，禁止校准："
+            f"当前可靠完整样本 {completed_outcome_count}/30。"
+            "阶段预期分类、弱势量价形态和建议采纳率都不是盈利结果。"
+        )
+    else:
+        rationale = (
+            f"已有 {completed_outcome_count} 条可靠完整前向结果，但当前尚未完成动作方向调整后的成败标签和分层验证；"
+            "为避免把行情红利或状态分布误当规则能力，继续禁止自动改写阈值，仅允许人工审阅结果账本。"
+        )
     return CalibrationProposalOut(
-        sample_count=metric.sample_count,
-        eligible=eligible,
+        sample_count=completed_outcome_count,
+        minimum_samples=30,
+        eligible=False,
         rationale=rationale,
-        changes=changes,
+        changes=[],
     )
 
 
@@ -392,7 +409,7 @@ def _apply_expectation_calibration(db: Session, confirmation: str) -> Calibratio
         raise ValueError("confirmation must be APPLY_CALIBRATION")
     proposal = _expectation_calibration_proposal(db)
     if not proposal.eligible or not proposal.changes:
-        raise ValueError("calibration sample gate is not satisfied")
+        raise ValueError(proposal.rationale)
     rule_ids = sorted({change.rule_id for change in proposal.changes})
     rules = db.query(ExpectationRule).filter(ExpectationRule.id.in_(rule_ids)).all()
     before = [_rule_calibration_state(rule) for rule in rules]

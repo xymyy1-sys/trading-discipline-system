@@ -104,7 +104,7 @@ function EvidenceHeader({ label, tone, confidence, quality }: { label: string; t
         <p>当前状态：<strong className={`capital-state ${tone}`}>{label}</strong></p>
       </div>
       <div className="effective-capital-score">
-        <span>证据置信度</span>
+        <span>证据完整度</span>
         <b>{confidence === null ? '--' : `${confidence.toFixed(0)}%`}</b>
         <small>{quality}</small>
       </div>

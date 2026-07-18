@@ -31,9 +31,17 @@ from app.services.intraday_evidence_engine import collect_holding_evidence, coll
 from app.services.market_data import MarketDataProvider
 from app.services.market_regime import get_market_regime
 from app.services.opportunity_radar import OpportunityRadarService
+from app.services.recommendation_outcomes import (
+    refresh_recommendation_outcomes,
+    unresolved_outcome_targets,
+)
 from app.services.sector_expansion import SectorExpansionRadarService
 from app.services.simulation import process_open_orders
 from app.services.simulation_shadow import mark_shadow_equity_after_close, run_shadow_experiments
+from app.services.trading_calendar import (
+    is_a_share_trading_day,
+    trading_calendar_diagnostic,
+)
 from app.services.unified_market_events import persist_unified_market_events
 
 COLLECTOR_INTERVAL_SECONDS = 60
@@ -134,7 +142,7 @@ def _json_list(raw: str | None) -> list[str]:
 def _is_market_watch_time(now: datetime | None = None) -> bool:
     now = shanghai_now_naive(now) if now is not None else _shanghai_now_naive()
     current = now.time()
-    return now.weekday() < 5 and (
+    return is_a_share_trading_day(now.date()) and (
         time(9, 15) <= current <= time(11, 30)
         or time(13, 0) <= current <= time(15, 0)
     )
@@ -144,13 +152,13 @@ def _is_market_regime_watch_time(now: datetime | None = None) -> bool:
     """Collect from the end of auction through a final post-close snapshot."""
     now = shanghai_now_naive(now) if now is not None else _shanghai_now_naive()
     current = now.time()
-    return now.weekday() < 5 and time(9, 25) <= current <= time(15, 5)
+    return is_a_share_trading_day(now.date()) and time(9, 25) <= current <= time(15, 5)
 
 
 def _is_simulation_match_time(now: datetime | None = None) -> bool:
     """Simulation fills are only evaluated during the continuous auction."""
     now = shanghai_now_naive(now) if now is not None else _shanghai_now_naive()
-    if now.weekday() >= 5:
+    if not is_a_share_trading_day(now.date()):
         return False
     current = now.time()
     return time(9, 30) <= current <= time(11, 30) or time(13, 0) <= current <= time(15, 0)
@@ -291,6 +299,9 @@ def run_simulation_shadow_equity_once(*, now: datetime | None = None) -> dict[st
     global _simulation_shadow_equity_last_success_at, _simulation_shadow_equity_last_error
     evaluated_at = shanghai_now_naive(now) if now is not None else _shanghai_now_naive()
     result: dict[str, object] = {"equity_ids": [], "skipped_count": 0, "errors": []}
+    if not is_a_share_trading_day(evaluated_at.date()):
+        result["skipped"] = "market_closed"
+        return result
     db = SessionLocal()
     try:
         shadow = mark_shadow_equity_after_close(db, now=evaluated_at)
@@ -350,11 +361,13 @@ def run_market_regime_collection_once(
     del trigger  # Reserved for future collection-run audit metadata.
     global _market_regime_running, _market_regime_last_error, _market_regime_last_success_at
 
+    collected_at = shanghai_now_naive(now) if now is not None else _shanghai_now_naive()
+    if not is_a_share_trading_day(collected_at.date()):
+        return None
     if not _market_regime_guard.acquire(blocking=False):
         return None
     _market_regime_running = True
     db = None
-    collected_at = shanghai_now_naive(now) if now is not None else _shanghai_now_naive()
     key = "市场环境"
     try:
         db = SessionLocal()
@@ -635,6 +648,12 @@ def run_intraday_collection_once(trigger: str = "manual") -> IntradayCollectionR
         ).all():
             if row.code not in holding_codes:
                 tracked[row.code] = (row.name, "打板预案")
+        # Continue collecting a bounded set of unresolved signals even after a
+        # position is sold.  The result ledger otherwise cannot distinguish an
+        # avoided decline from a sale immediately before a rebound.
+        for code, name in unresolved_outcome_targets(db, now=started):
+            if code not in holding_codes:
+                tracked.setdefault(code, (name, "建议结果跟踪"))
         stage = current_expectation_stage(started)
         _queue_depth = len(holdings) + len(tracked)
         run.holding_count = len(holdings)
@@ -703,6 +722,18 @@ def run_intraday_collection_once(trigger: str = "manual") -> IntradayCollectionR
                 continue
             snapshot_count += 1
             notes.append(f"{code} {name}（{base_hint}）已采集 {stage}。")
+        outcome_refresh = _run_with_resilience(
+            "建议结果账本",
+            lambda: refresh_recommendation_outcomes(db, now=started, limit=100),
+            notes,
+            on_error=db.rollback,
+        )
+        if outcome_refresh is not None:
+            notes.append(
+                "建议结果账本已刷新："
+                f"新增 {int(outcome_refresh.get('created', 0))}，"
+                f"评估 {int(outcome_refresh.get('evaluated', 0))}。"
+            )
         run.status = "success"
     except Exception as exc:
         db.rollback()
@@ -773,7 +804,12 @@ async def _collector_iteration() -> None:
         except Exception as exc:
             _simulation_shadow_last_error = f"{exc.__class__.__name__}: {exc}"
     now = _shanghai_now_naive()
-    if COLLECTOR_ENABLED and now.weekday() < 5 and now.time() > time(15, 0) and _close_expectation_date != now.date().isoformat():
+    if (
+        COLLECTOR_ENABLED
+        and is_a_share_trading_day(now.date())
+        and now.time() > time(15, 0)
+        and _close_expectation_date != now.date().isoformat()
+    ):
         from app.services.next_day_expectations import generate_next_day_expectations
         db = SessionLocal()
         try:
@@ -787,7 +823,7 @@ async def _collector_iteration() -> None:
             db.close()
     if (
         COLLECTOR_ENABLED
-        and now.weekday() < 5
+        and is_a_share_trading_day(now.date())
         and now.time() >= time(15, 5)
         and _close_shadow_equity_date != now.date().isoformat()
     ):
@@ -852,6 +888,7 @@ def latest_collection_run() -> IntradayCollectionRun | None:
 
 
 def collector_status() -> dict[str, object]:
+    calendar = trading_calendar_diagnostic(_shanghai_now_naive().date())
     return {
         "enabled": COLLECTOR_ENABLED,
         "interval_seconds": COLLECTOR_INTERVAL_SECONDS,
@@ -876,6 +913,8 @@ def collector_status() -> dict[str, object]:
         "queue_depth": _queue_depth,
         "open_circuits": [key for key, until in _circuit_until.items() if until > clock.time()],
         "failure_counts": dict(_failure_counts),
+        "calendar_source": calendar["calendar_source"],
+        "calendar_diagnostic": calendar["diagnostic"],
         "last_run": latest_collection_run(),
     }
 

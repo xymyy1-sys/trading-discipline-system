@@ -4,7 +4,7 @@ from datetime import datetime
 from sqlalchemy.orm import Session
 
 from app.models.trading import ActionRecommendation, ExpectationSnapshot, IntradayEvidenceEvent, PositionStateHistory, VolumePriceSnapshot
-from app.schemas.trading import ReplayCheckpoint, ReplayFrame, ReplayReportOut
+from app.schemas.trading import ReplayFrame, ReplayReportOut
 
 
 def _items(raw: str) -> list[str]:
@@ -39,12 +39,10 @@ class ReplayEngine:
             name = name or row.name
             frames.append(ReplayFrame(timestamp=row.created_at, frame_type="recommendation", state=row.state, action=row.action, evidence=_items(row.evidence_json)))
         frames.sort(key=lambda item: item.timestamp)
-        checkpoints: list[ReplayCheckpoint] = []
-        if code in {"600584", "60584"}:
-            expected = [("09:30", "YELLOW"), ("09:45", "VWAP"), ("10:05", "ORANGE"), ("10:20", "REDUCE")]
-            for expected_time, signal in expected:
-                matched = next((frame for frame in frames if signal.lower() in f"{frame.state} {frame.action} {' '.join(frame.evidence)}".lower()), None)
-                checkpoints.append(ReplayCheckpoint(expected_time=expected_time, expected_signal=signal, matched=matched is not None, matched_time=matched.timestamp if matched else None))
+        # Replay is a generic reconstruction of persisted evidence.  Acceptance
+        # checkpoints belong in test fixtures/configuration; a stock-specific
+        # script here made one code appear "complete" by a different standard.
+        checkpoints = []
         summary = [f"回放帧 {len(frames)} 条", f"事件 {sum(frame.frame_type == 'event' for frame in frames)} 条", f"建议 {sum(frame.frame_type == 'recommendation' for frame in frames)} 条"]
-        complete = bool(frames) and (not checkpoints or all(item.matched for item in checkpoints))
+        complete = bool(frames)
         return ReplayReportOut(code=code, name=name, trade_date=trade_date, generated_at=datetime.now(), complete=complete, frames=frames, checkpoints=checkpoints, summary=summary)

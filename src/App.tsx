@@ -58,8 +58,8 @@ const workspacePaths = new Set<string>(navItems.map(([, , path]) => path))
 const oldPathToWorkspace: Record<string, string> = {
   '/题材雷达': '/选股中心',
   '/资金流证据': '/选股中心',
-  '/涨停天梯': '/选股中心',
-  '/信息差': '/今日决策',
+  '/涨停天梯': '/打板预期',
+  '/信息差': '/选股中心',
   '/市场环境': '/今日决策',
   '/持仓快照': '/持仓执行',
   '/个股决策卡': '/选股中心',
@@ -160,9 +160,9 @@ export default function App() {
           ))}
         </nav>
         <div className="discipline-strip">
-          <span>今日模式</span>
-          <strong>标准短线</strong>
-          <small>单票上限 40% · 亏损仓禁止补仓</small>
+          <span>纪律原则</span>
+          <strong>计划先于操作</strong>
+          <small>以当前计划、真实证据和风险闸门为准</small>
         </div>
       </aside>
 
@@ -188,8 +188,6 @@ export default function App() {
               })}
               title={privacyMode ? '恢复显示敏感数据' : '隐藏全部资金和持仓金额'}
             >{privacyMode ? <Eye size={16}/> : <EyeOff size={16}/>} {privacyMode ? '恢复资金数据' : '隐藏资金数据'}</button>}
-            <Metric label="市场档位" value="--" tone="neutral" />
-            <Metric label="总仓上限" value="--" tone="neutral" />
             <Metric
               label="后端"
               value={apiStatus}
@@ -238,7 +236,7 @@ function StockSelectionWorkspace() {
         { key: 'intel', label: '行业要闻', description: '东方财富、央视及行业资讯原文与市场验证', Component: IntelDesk },
         { key: 'radar', label: '主线题材', description: '主线强度、共振方向、核心股', Component: Dashboard },
         { key: 'flow', label: '订单流证据', description: '板块订单流方向拐点、排名与强弱', Component: FlowDesk },
-        { key: 'ladder', label: '涨停质量', description: '连板高度、封板质量、题材聚类', Component: LimitUpLadder },
+        { key: 'ladder', label: '涨停质量', description: '查看打板氛围摘要并进入唯一的完整天梯', Component: LimitUpQualityShortcut },
         { key: 'card', label: '个股研判', description: '预期、实际、事件与失效条件', Component: DecisionCard },
       ]}
     />
@@ -308,10 +306,10 @@ function ReviewCalibrationWorkspace() {
       forbidden={['只复盘盈亏', '忽略未执行提醒', '用主观判断覆盖证据']}
       modules={[
         { key: 'replay', label: '历史回放', description: '单股盘中事件与操作建议时间线', Component: HistoricalReplay },
-        { key: 'strategies', label: '交易规则', description: '可编辑、可版本化的交易剧本', Component: StrategyTemplates },
+        { key: 'strategies', label: '交易规则草稿', description: '仅保存规则草稿，尚未接入实时决策引擎', Component: StrategyTemplates },
         { key: 'calibration', label: '执行校准', description: '计划偏差、执行反馈、纪律缺口', Component: ReviewCalibration },
         { key: 'trades', label: '交易日志', description: '交易记录、深度复盘、执行原因', Component: TradeLog },
-        { key: 'month', label: '月度复盘', description: '月度纪律、盈亏结构、改进建议', Component: MonthlyReview },
+        { key: 'outcomes', label: '建议结果账本', description: '建议产生后的真实前向走势与数据完整度', Component: MonthlyReview },
       ]}
     />
   )
@@ -325,6 +323,19 @@ function BrandIcon() {
       <path className="brand-bars" d="M15 27v6M24 23v10M33 16v17" />
     </svg>
   </span>
+}
+
+function LimitUpQualityShortcut() {
+  return (
+    <section className="panel ladder-shortcut-panel">
+      <div>
+        <span className="eyebrow">唯一数据入口</span>
+        <h2>完整涨停天梯已归入“打板预期”</h2>
+        <p>选股中心只把涨停质量作为观察池的一项证据，不再重复加载整套天梯。连板高度、题材梯队、封板质量和打板预案统一在打板预期查看。</p>
+      </div>
+      <button type="button" onClick={() => window.dispatchEvent(new CustomEvent('nav', { detail: '打板预期' }))}>进入打板预期</button>
+    </section>
+  )
 }
 
 function Metric({ label, value, tone }: { label: string; value: string; tone: 'neutral' | 'muted' }) {

@@ -184,7 +184,7 @@ export default function DecisionCard({ mode = 'watchlist' }: { mode?: DecisionCa
               <div><b>状态变化</b><span>{chineseLabel(card.expectation.state_transition)}</span></div>
               <div><b>预期差</b><span>{card.expectation.expectation_gap_score}</span></div>
               <div><b>合理开盘</b><span>{card.expectation.expected_open_low.toFixed(1)}% - {card.expectation.expected_open_high.toFixed(1)}%</span></div>
-              <div><b>可信度</b><span>{(card.expectation.confidence * 100).toFixed(0)}%</span></div>
+              <div><b>证据完整度</b><span>{(card.expectation.confidence * 100).toFixed(0)}%</span></div>
             </div>
 
             {card.entry_discipline && <EntryDisciplinePanel gate={card.entry_discipline} holding={mode === 'holding'} />}
@@ -407,6 +407,7 @@ function ExpectationVersionChain({ chain }: { chain: ExpectationChain | null }) 
         {latest.scenarios.map(item => (
           <article key={item.id}>
             <div><b>{item.scenario_type}</b><strong>{(item.probability * 100).toFixed(0)}%</strong></div>
+            <small>规则情景权重（未校准）</small>
             <span>区间 {item.expected_low.toFixed(1)}% ～ {item.expected_high.toFixed(1)}%</span>
             <p>{item.validation_conditions.slice(0, 2).join('；')}</p>
             <small>{item.action_discipline}</small>

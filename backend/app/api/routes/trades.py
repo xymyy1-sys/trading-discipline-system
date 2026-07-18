@@ -5,7 +5,7 @@ from app.core.database import get_db
 from app.models.trading import (
     ActionRecommendation,
     ExpectationSnapshot,
-    MarketSnapshot,
+    MarketRegimeSnapshot,
     RecommendationFeedback,
     TradeLog,
     TradeReview,
@@ -189,7 +189,10 @@ def _effectiveness_report(db: Session, key: str, minimum_samples: int) -> Effect
     if metric is None:
         raise HTTPException(status_code=404, detail="effectiveness metric not found")
     suggestions = [item for item in summary.calibration_suggestions if item.sample_count == 0 or item.sample_count <= metric.sample_count]
-    return EffectivenessReportOut(metric=metric, suggestions=suggestions, auto_calibration_allowed=metric.sample_count >= minimum_samples)
+    # These legacy metrics describe state distributions/adoption, not forward
+    # market outcomes.  Keep the response shape for compatibility but never
+    # advertise automatic calibration from them.
+    return EffectivenessReportOut(metric=metric, suggestions=suggestions, auto_calibration_allowed=False)
 
 
 @router.get("/reviews/expectation-effectiveness", response_model=EffectivenessReportOut)
@@ -210,38 +213,78 @@ def execution_effectiveness(db: Session = Depends(get_db)) -> EffectivenessRepor
 @router.get("/reviews/environment-effectiveness")
 def environment_effectiveness(db: Session = Depends(get_db)) -> list[dict]:
     """按真实市场快照分层统计预期、建议采纳与不利波动。"""
-    latest_grade_by_date: dict[str, tuple[object, str]] = {}
-    for row in db.query(MarketSnapshot).order_by(MarketSnapshot.captured_at.asc()).all():
-        key = row.captured_at.date().isoformat()
-        latest_grade_by_date[key] = (row.captured_at, row.grade or "未评级")
+    latest_grade_by_date: dict[str, tuple[object, str, str]] = {}
+    for row in (
+        db.query(MarketRegimeSnapshot)
+        .order_by(
+            MarketRegimeSnapshot.trade_date.asc(),
+            MarketRegimeSnapshot.captured_at.asc(),
+            MarketRegimeSnapshot.id.asc(),
+        )
+        .all()
+    ):
+        # The collector persists the authoritative trading date.  Do not infer
+        # it from captured_at: historical imports and timezone-naive SQLite
+        # timestamps can otherwise be assigned to the wrong session.
+        label = row.regime_name or row.regime_code or "未评级"
+        quality = row.data_quality or "missing"
+        latest_grade_by_date[row.trade_date] = (row.captured_at, label, quality)
+    quality_by_grade: dict[str, set[str]] = defaultdict(set)
+    for _, label, quality in latest_grade_by_date.values():
+        quality_by_grade[label].add(quality)
 
     buckets: dict[str, dict] = defaultdict(lambda: {
         "expectation_samples": 0, "expectation_hits": 0,
         "recommendation_samples": 0, "executed_feedback": 0,
         "feedback_samples": 0, "adverse_samples": [],
     })
-    for row in db.query(ExpectationSnapshot).all():
-        grade = latest_grade_by_date.get(row.trade_date, (None, "未评级"))[1]
+    final_expectation_by_stock_day: dict[tuple[str, str], ExpectationSnapshot] = {}
+    for row in (
+        db.query(ExpectationSnapshot)
+        .order_by(
+            ExpectationSnapshot.trade_date.asc(),
+            ExpectationSnapshot.code.asc(),
+            ExpectationSnapshot.created_at.asc(),
+            ExpectationSnapshot.id.asc(),
+        )
+        .all()
+    ):
+        final_expectation_by_stock_day[(row.trade_date, _normalize_code(row.code))] = row
+    for row in final_expectation_by_stock_day.values():
+        if not row.expectation_result or row.expectation_result in {"UNKNOWN", "PENDING"}:
+            continue
+        grade = latest_grade_by_date.get(row.trade_date, (None, "未评级", "missing"))[1]
         buckets[grade]["expectation_samples"] += 1
         if row.expectation_result in {"MATCHED", "STRONGER"}:
             buckets[grade]["expectation_hits"] += 1
     recommendations = db.query(ActionRecommendation).all()
     recommendation_by_id = {row.id: row for row in recommendations}
     for row in recommendations:
-        grade = latest_grade_by_date.get(row.trade_date, (None, "未评级"))[1]
+        grade = latest_grade_by_date.get(row.trade_date, (None, "未评级", "missing"))[1]
         buckets[grade]["recommendation_samples"] += 1
     for row in db.query(RecommendationFeedback).all():
         recommendation = recommendation_by_id.get(row.recommendation_id)
         if not recommendation:
             continue
-        grade = latest_grade_by_date.get(recommendation.trade_date, (None, "未评级"))[1]
+        grade = latest_grade_by_date.get(recommendation.trade_date, (None, "未评级", "missing"))[1]
         buckets[grade]["feedback_samples"] += 1
         if row.status in {"已执行", "部分执行"}:
             buckets[grade]["executed_feedback"] += 1
+    # high_drawdown is cumulative within a session.  Counting every minute
+    # snapshot heavily overweights stocks with denser collection.  Reduce each
+    # stock/session to its maximum observed adverse excursion first.
+    adverse_by_stock_day: dict[tuple[str, str], float] = {}
     for row in db.query(VolumePriceSnapshot).all():
-        grade = latest_grade_by_date.get(row.trade_date, (None, "未评级"))[1]
-        if row.data_quality != "missing":
-            buckets[grade]["adverse_samples"].append(max(0.0, float(row.high_drawdown or 0)))
+        if row.data_quality == "missing":
+            continue
+        key = (row.trade_date, _normalize_code(row.code))
+        adverse_by_stock_day[key] = max(
+            adverse_by_stock_day.get(key, 0.0),
+            max(0.0, float(row.high_drawdown or 0)),
+        )
+    for (trade_date, _), adverse_move in adverse_by_stock_day.items():
+        grade = latest_grade_by_date.get(trade_date, (None, "未评级", "missing"))[1]
+        buckets[grade]["adverse_samples"].append(adverse_move)
 
     return [{
         "market_grade": grade,
@@ -250,7 +293,11 @@ def environment_effectiveness(db: Session = Depends(get_db)) -> list[dict]:
         "recommendation_samples": values["recommendation_samples"],
         "execution_adoption_rate": round(values["executed_feedback"] / values["feedback_samples"] * 100, 2) if values["feedback_samples"] else 0,
         "average_adverse_move": round(sum(values["adverse_samples"]) / len(values["adverse_samples"]), 2) if values["adverse_samples"] else 0,
-        "data_quality": "可统计" if grade != "未评级" else "缺少同日市场环境快照",
+        "data_quality": (
+            "缺少同日市场环境快照"
+            if grade == "未评级"
+            else "、".join(sorted(quality_by_grade.get(grade) or {"missing"}))
+        ),
     } for grade, values in sorted(buckets.items())]
 
 

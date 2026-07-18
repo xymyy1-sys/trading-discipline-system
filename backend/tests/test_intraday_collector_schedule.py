@@ -1,3 +1,4 @@
+import asyncio
 from datetime import datetime, timedelta
 
 from app.models.trading import MarketRegimeSnapshot
@@ -17,6 +18,42 @@ def test_market_regime_collection_window_includes_close_snapshot():
     assert collector._is_market_regime_watch_time(datetime(2026, 7, 13, 9, 24)) is False
     assert collector._is_market_regime_watch_time(datetime(2026, 7, 13, 15, 6)) is False
     assert collector._is_market_regime_watch_time(datetime(2026, 7, 12, 10, 0)) is False
+
+
+def test_all_core_windows_are_closed_on_exchange_holiday():
+    spring_festival = datetime(2026, 2, 18, 10, 0)
+
+    assert collector._is_market_watch_time(spring_festival) is False
+    assert collector._is_market_regime_watch_time(spring_festival) is False
+    assert collector._is_simulation_match_time(spring_festival) is False
+
+
+def test_collector_iteration_skips_intraday_and_close_jobs_on_exchange_holiday(monkeypatch):
+    holiday = datetime(2026, 10, 1, 15, 10)
+    calls: list[str] = []
+    monkeypatch.setattr(collector, "COLLECTOR_ENABLED", True)
+    monkeypatch.setattr(collector, "_shanghai_now_naive", lambda: holiday)
+    monkeypatch.setattr(collector, "run_intraday_collection_once", lambda *_args: calls.append("holding"))
+    monkeypatch.setattr(collector, "run_simulation_matching_once", lambda **_kwargs: calls.append("matching"))
+    monkeypatch.setattr(collector, "run_simulation_shadow_once", lambda **_kwargs: calls.append("shadow"))
+    monkeypatch.setattr(collector, "run_simulation_shadow_equity_once", lambda **_kwargs: calls.append("equity"))
+
+    asyncio.run(collector._collector_iteration())
+
+    assert calls == []
+
+
+def test_forced_market_regime_collection_is_rejected_on_exchange_holiday(monkeypatch):
+    monkeypatch.setattr(
+        collector,
+        "SessionLocal",
+        lambda: (_ for _ in ()).throw(AssertionError("database should not be opened")),
+    )
+
+    assert collector.run_market_regime_collection_once(
+        now=datetime(2026, 10, 1, 10, 0),
+        force=True,
+    ) is None
 
 
 def test_default_market_windows_use_shanghai_clock(monkeypatch):

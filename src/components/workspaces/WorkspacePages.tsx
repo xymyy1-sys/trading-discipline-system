@@ -31,7 +31,6 @@ import type {
   StockDecisionCard,
   ThemeRadar,
 } from '../../types'
-import AiInsightButton from '../AiInsightButton'
 import FlowKineticsEvidence from '../FlowKineticsEvidence'
 import PositionAiAssistant from '../PositionAiAssistant'
 import { holdingFlowKineticsFields } from '../../flowKinetics'
@@ -98,6 +97,16 @@ export function WorkspacePage({
     if (!selected?.key) return
     setVisitedModules(previous => previous.has(selected.key) ? previous : new Set(previous).add(selected.key))
   }, [selected?.key])
+
+  useEffect(() => {
+    const handler = (event: Event) => {
+      const detail = (event as CustomEvent<string>).detail
+      const target = modules.find(item => item.key === detail || item.label === detail)
+      if (target) setActive(target.key)
+    }
+    window.addEventListener('workspace-module', handler)
+    return () => window.removeEventListener('workspace-module', handler)
+  }, [modules])
 
   return (
     <section className="workspace-page">
@@ -437,7 +446,6 @@ export function TodayDecisionSummary() {
 
   return (
     <section className="decision-command">
-      <div className="ai-market-action"><AiInsightButton scope="market" target="today" label="AI全局复核" /></div>
       <div className="command-card emphasis">
         <span>今日处理优先级</span>
         <strong>{riskTargetCount}</strong>
@@ -630,7 +638,7 @@ export function TodayDecisionSummary() {
         </header>
         <div className="cockpit-market-grid">
           <div className={marketRiskActive ? 'market-state-danger' : ''}><span>赚钱 / 亏钱效应</span><strong>{earningEffect} / {marketRegime ? marketLossLabel(marketRegime.loss_score) : '--'}</strong><small>{marketRegime ? `机会 ${marketRegime.opportunity_score} · 亏钱 ${marketRegime.loss_score}` : '等待全A真实广度'}</small><button type="button" className="market-evidence-link" onClick={() => setShowMarketEvidence(value => !value)}>查看计算依据</button></div>
-          <div><span>市场状态</span><strong>{marketCycle}</strong><small>{marketRegime ? `风险${marketRegime.risk_level} · 可信度 ${(marketRegime.confidence * 100).toFixed(0)}%` : '等待量能、广度和指数共振'}</small></div>
+          <div><span>市场状态</span><strong>{marketCycle}</strong><small>{marketRegime ? `风险${marketRegime.risk_level} · 证据完整度 ${(marketRegime.confidence * 100).toFixed(0)}%` : '等待量能、广度和指数共振'}</small></div>
           <div><span>上涨 / 下跌家数</span><strong>{marketRegime?.up_count ?? '--'} / {marketRegime?.down_count ?? '--'}</strong><small>涨停 / 跌停 {marketRegime?.limit_up_count ?? '--'} / {marketRegime?.limit_down_count ?? '--'} · 中位涨幅 {formatSignedNumber(marketRegime?.median_change_pct, '%')}</small></div>
           <div><span>成交额与量能</span><strong>{formatNumber(marketRegime?.turnover_yi, ' 亿')}</strong><small>较前日 {formatRatio(marketRegime?.volume_ratio_previous)} · 较5日均量 {formatRatio(marketRegime?.volume_ratio_5d)}</small></div>
           <div><span>全市场订单流估算</span><strong className={(marketRegime?.market_main_net_inflow_yi ?? 0) < 0 ? 'num-down' : 'num-up'}>{formatSignedNumber(marketRegime?.market_main_net_inflow_yi, ' 亿')}</strong><small>供应商方向分类 · 指数合成涨跌 {formatSignedNumber(marketRegime?.index_composite_change_pct, '%')}</small></div>
@@ -666,7 +674,7 @@ export function TodayDecisionSummary() {
           <div className={`reflexivity-current ${reflexivityTone(marketReflexivity.current_scenario)}`}>
             <div><span>当前最匹配路径</span><strong>{marketReflexivity.current_scenario_label}</strong></div>
             <div><span>拥挤代理</span><strong>{marketReflexivity.crowding.label} · {marketReflexivity.crowding.score.toFixed(0)}分</strong></div>
-            <div><span>规则匹配 / 置信度</span><strong>{marketReflexivity.scenario_match_score?.toFixed(0) ?? '--'} / {(marketReflexivity.confidence * 100).toFixed(0)}%</strong></div>
+            <div><span>规则匹配 / 证据完整度</span><strong>{marketReflexivity.scenario_match_score?.toFixed(0) ?? '--'} / {(marketReflexivity.confidence * 100).toFixed(0)}%</strong></div>
           </div>
           <div className="reflexivity-scenarios">
             {(marketReflexivity.scenarios ?? []).map(scenario => (
@@ -819,7 +827,7 @@ export function TodayDecisionSummary() {
                 <p><b>盘前预期：</b>{chineseLabel(selectedCard.expectation.base_expectation)}</p>
                 <p><b>实际表现：</b>{chineseLabel(selectedCard.expectation.expectation_result)}</p>
                 <p><b>状态变化：</b>{chineseLabel(selectedCard.expectation.state_transition)}</p>
-                <p><b>预期差：</b>{selectedCard.expectation.expectation_gap_score.toFixed(1)} 分 · 可信度 {(selectedCard.expectation.confidence * 100).toFixed(0)}%</p>
+                <p><b>预期差：</b>{selectedCard.expectation.expectation_gap_score.toFixed(1)} 分 · 证据完整度 {(selectedCard.expectation.confidence * 100).toFixed(0)}%</p>
                 <small>合理开盘区间 {selectedCard.expectation.expected_open_low.toFixed(2)}% ～ {selectedCard.expectation.expected_open_high.toFixed(2)}%</small>
               </> : <p>正在读取该持仓的预期快照。</p>}
             </article>
@@ -868,7 +876,7 @@ export function TodayDecisionSummary() {
                   <div className="stock-reflexivity-summary">
                     <p><b>当前路径：</b>{assessment.current_scenario_label}</p>
                     <p><b>拥挤代理：</b>{assessment.crowding.label} · {assessment.crowding.score.toFixed(0)}分</p>
-                    <p><b>规则匹配：</b>{assessment.scenario_match_score?.toFixed(0) ?? '--'} · 置信度 {(assessment.confidence * 100).toFixed(0)}%</p>
+                    <p><b>规则匹配：</b>{assessment.scenario_match_score?.toFixed(0) ?? '--'} · 证据完整度 {(assessment.confidence * 100).toFixed(0)}%</p>
                     <p><b>扩仓闸门：</b>{assessment.market_gate?.new_position_allowed ? '开放，仍需个股确认' : '关闭，禁止新增风险'}</p>
                   </div>
                   <div className="stock-reflexivity-evidence">

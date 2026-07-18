@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 
 from app.api.helpers.decision import _today, current_expectation_stage
 from app.api.helpers.quotes import _provider_event_metadata
@@ -46,6 +46,10 @@ def test_next_trade_date_uses_shanghai_business_date():
     value = datetime(2026, 7, 16, 16, 30, tzinfo=timezone.utc)
 
     assert next_trading_date(now=value) == "2026-07-20"
+
+
+def test_next_trade_date_skips_published_exchange_holiday():
+    assert next_trading_date(value=date(2026, 9, 30)) == "2026-10-08"
 
 
 def test_quote_freshness_compares_event_and_receipt_in_same_timezone():

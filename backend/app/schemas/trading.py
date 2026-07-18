@@ -182,6 +182,64 @@ class ActionRecommendationOut(BaseModel):
         from_attributes = True
 
 
+class RecommendationOutcomeOut(BaseModel):
+    id: int
+    source_key: str
+    recommendation_id: int
+    recommendation_revision_id: int | None = None
+    trade_date: str
+    code: str
+    name: str = ""
+    signal_at: datetime
+    level: str = "INFO"
+    state: str = ""
+    action: str = ""
+    recommended_ratio: float = 0
+    reference_snapshot_id: int | None = None
+    reference_at: datetime | None = None
+    reference_latency_seconds: float | None = None
+    reference_price: float | None = None
+    reference_source: str = ""
+    reference_quality: str = ""
+    price_5m: float | None = None
+    return_5m_pct: float | None = None
+    price_15m: float | None = None
+    return_15m_pct: float | None = None
+    price_30m: float | None = None
+    return_30m_pct: float | None = None
+    close_price: float | None = None
+    return_close_pct: float | None = None
+    next_trade_date: str | None = None
+    next_open_price: float | None = None
+    return_next_open_pct: float | None = None
+    next_close_price: float | None = None
+    return_next_close_pct: float | None = None
+    mfe_pct: float | None = Field(
+        None,
+        description="兼容字段：采样区间最高涨幅，未按建议动作方向解释",
+    )
+    mae_pct: float | None = Field(
+        None,
+        description="兼容字段：采样区间最低跌幅，未按建议动作方向解释",
+    )
+    status: Literal["pending", "partial", "complete", "invalid"]
+    data_quality: str
+    invalid_reason: str = ""
+    missing_horizons: list[str] = Field(default_factory=list)
+    evaluated_through_at: datetime | None = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class RecommendationOutcomeSummaryOut(BaseModel):
+    total: int
+    status_counts: dict[str, int] = Field(default_factory=dict)
+    quality_counts: dict[str, int] = Field(default_factory=dict)
+    complete_coverage_pct: float = 0
+    average_returns: dict[str, float | None] = Field(default_factory=dict)
+    note: str = ""
+
+
 class ProfitProtectionSnapshotOut(BaseModel):
     id: int | None = None
     holding_id: int
