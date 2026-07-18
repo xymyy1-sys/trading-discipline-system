@@ -1,10 +1,11 @@
+import json
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, Request
 from sqlalchemy.orm import Session
 from app.core.database import get_db
-from app.models.trading import Holding, MarketRegimeSnapshot
+from app.models.trading import DataCaptureSnapshot, Holding, MarketRegimeSnapshot
 from app.schemas.trading import (
     PreTradeCheckIn,
     PreTradeCheckOut,
@@ -16,16 +17,10 @@ from app.schemas.trading import (
 from app.services.rules import calculate_risk_position, run_pre_trade_check
 from fastapi import HTTPException
 from app.services.market_data import MarketDataProvider
-from app.services.opportunity_radar import OpportunityRadarService
-from app.services.sector_expansion import SectorExpansionRadarService
-from app.services.unified_market_events import persist_unified_market_events
-from app.api.helpers.reflexivity import build_consensus_high_open_fade
 from app.core.limiter import limiter
 
 router = APIRouter()
 market_provider = MarketDataProvider()
-opportunity_radar_service = OpportunityRadarService()
-sector_expansion_service = SectorExpansionRadarService()
 SHANGHAI_TZ = ZoneInfo("Asia/Shanghai")
 OPPORTUNITY_MARKET_SNAPSHOT_MAX_AGE = timedelta(minutes=15)
 
@@ -77,9 +72,26 @@ def risk_position(payload: RiskPositionIn) -> RiskPositionOut:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 @router.get("/intel/daily", response_model=InformationDifferentialOut)
-def information_differential(date: str | None = None, force_refresh: bool = False, db: Session = Depends(get_db)) -> InformationDifferentialOut:
+def information_differential(date: str | None = None, db: Session = Depends(get_db)) -> InformationDifferentialOut:
     holdings = {row.code: row.name for row in db.query(Holding).all()}
-    return market_provider.information_differential(date=date, force_refresh=force_refresh, related_stocks=holdings)
+    return market_provider.information_differential(
+        date=date,
+        related_stocks=holdings,
+        cache_only=True,
+    )
+
+
+@router.post("/intel/daily/refresh", response_model=InformationDifferentialOut)
+def refresh_information_differential(
+    date: str | None = None,
+    db: Session = Depends(get_db),
+) -> InformationDifferentialOut:
+    holdings = {row.code: row.name for row in db.query(Holding).all()}
+    return market_provider.information_differential(
+        date=date,
+        force_refresh=True,
+        related_stocks=holdings,
+    )
 
 
 @router.get("/intel/opportunity-radar", response_model=OpportunityRadarOut)
@@ -87,94 +99,48 @@ def information_differential(date: str | None = None, force_refresh: bool = Fals
 def opportunity_radar(
     request: Request,
     date: str | None = None,
-    force_refresh: bool = False,
     db: Session = Depends(get_db),
 ) -> OpportunityRadarOut:
-    """Map news to sectors, then require real funds, price and VWAP confirmation."""
-    holdings = {row.code: row.name for row in db.query(Holding).all()}
-    information = market_provider.information_differential(
-        date=date,
-        force_refresh=force_refresh,
-        related_stocks=holdings,
+    """Read the latest collector-produced opportunity radar snapshot."""
+    query = db.query(DataCaptureSnapshot).filter(
+        DataCaptureSnapshot.data_type == "opportunity_radar",
+        DataCaptureSnapshot.target_code == "market",
     )
-    sector_flows = [
-        market_provider.sector_flow(
-            flow_type=flow_type,
-            period="今日",
-            force_refresh=force_refresh,
-        )
-        for flow_type in ("行业资金流", "概念资金流")
-    ]
-    target_trade_date = date or datetime.now(SHANGHAI_TZ).date().isoformat()
-    latest_regime, regime_note = _fresh_market_snapshot(
-        db,
-        trade_date=target_trade_date,
-    )
-    try:
-        sector_opening = market_provider.sector_opening_breadth(
-            trade_date=target_trade_date,
-            force_refresh=force_refresh,
-        )
-    except Exception as exc:
-        sector_opening = {
-            "trade_date": target_trade_date,
-            "data_quality": "missing",
-            "source": "",
-            "sample_count": 0,
-            "notes": [f"行业板块真实开盘广度暂不可用：{type(exc).__name__}"],
-        }
-    result = opportunity_radar_service.assess(
-        information,
-        sector_flows,
-        market_change_pct=(latest_regime.index_composite_change_pct if latest_regime else None),
-    )
-    result["consensus_high_open_fade"] = build_consensus_high_open_fade(
-        db,
-        latest_regime,
-        sector_opening,
-    )
-    try:
-        ladder = market_provider.limit_up_ladder(
-            target_trade_date,
-            force_refresh=force_refresh,
-        )
-        result["intraday_expansion"] = sector_expansion_service.assess(
-            ladder,
-            sector_flows,
-            as_of=datetime.now(SHANGHAI_TZ),
-        )
-    except Exception:
-        now = datetime.now(SHANGHAI_TZ).isoformat()
-        result["intraday_expansion"] = {
-            "updated_at": now,
-            "as_of": now,
-            "window_minutes": 0,
-            "data_quality": "missing",
-            "source": [],
-            "items": [],
-            "counts": {"增量已确认": 0, "增量待确认": 0},
-            "notes": ["涨停梯队或板块订单流方向估算暂不可用，本轮不生成模拟增量方向。"],
-        }
-    if regime_note:
-        result["notes"] = list(dict.fromkeys([*(result.get("notes") or []), regime_note]))
-        if result.get("data_quality") == "ok":
-            result["data_quality"] = "degraded"
-    today = datetime.now(SHANGHAI_TZ).date().isoformat()
-    if target_trade_date == today:
+    if date:
+        query = query.filter(DataCaptureSnapshot.trade_date == date)
+    row = query.order_by(
+        DataCaptureSnapshot.captured_at.desc(),
+        DataCaptureSnapshot.id.desc(),
+    ).first()
+    if row is not None:
         try:
-            persist_unified_market_events(db, result, holdings)
-        except Exception as exc:
-            # Event persistence is an observability side effect.  A temporary DB
-            # failure must not turn valid market evidence into a fabricated data
-            # gap or make the read endpoint unavailable.
-            db.rollback()
-            result["notes"] = list(dict.fromkeys([
-                *(result.get("notes") or []),
-                f"统一事件流写入失败：{type(exc).__name__}；本次雷达结果仍按原始证据返回。",
-            ]))
-    else:
-        result["notes"] = list(dict.fromkeys([
-            *(result.get("notes") or []),
-            "历史日期雷达仅供回看，不写入今日盘中事件流。",
-        ]))
-    return OpportunityRadarOut.model_validate(result)
+            return OpportunityRadarOut.model_validate(
+                json.loads(row.normalized_value_json or "{}")
+            )
+        except (TypeError, ValueError, json.JSONDecodeError):
+            pass
+    now = datetime.now(SHANGHAI_TZ).isoformat()
+    return OpportunityRadarOut(
+        updated_at=now,
+        as_of=now,
+        source=[],
+        data_quality="missing",
+        items=[],
+        counts={},
+        discipline="资讯不能单独触发买入；缺少资金与量价证据时只观察。",
+        notes=["尚无机会雷达持久化快照，请点击刷新或等待后台采集器。"],
+        available_sector_evidence=0,
+    )
+
+
+@router.post("/intel/opportunity-radar/refresh", response_model=OpportunityRadarOut)
+@limiter.limit("4/minute")
+def refresh_opportunity_radar(
+    request: Request,
+    db: Session = Depends(get_db),
+) -> OpportunityRadarOut:
+    """Explicitly collect a fresh radar, then read its persisted snapshot."""
+    from app.services.intraday_collector import run_opportunity_radar_collection_once
+
+    run_opportunity_radar_collection_once(trigger="manual", force_refresh=True)
+    return opportunity_radar(request=request, db=db)

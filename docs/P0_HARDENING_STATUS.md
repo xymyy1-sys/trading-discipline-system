@@ -1,6 +1,10 @@
 # V2 P0 Hardening Status
 
-Status: V2 product and P0 hardening code complete; GitHub CI and target-server production verification pending.
+> 历史 V2 状态文档。V2 基线已于 2026-07-12 完成目标服务器验证，详见 `docs/PRODUCTION_ACCEPTANCE_20260712.md`。HTTPS/HSTS 因当前无域名继续受外部条件阻塞；600584 指定交易日数据验收、策略效果和校准样本验证仍未完成。
+
+Status: V2 product and P0 hardening code complete and production baseline verified. Current V3 recommendation-feedback P0 is code-complete; production deployment is recorded separately, while reliable forward-sample validation is still pending.
+
+本轮 V3 闭环使用“至少 30 个完整且可靠的建议版本结果”作为结果面板可见性门槛；下文 V2 的“20 样本/45% 偏差”是旧参数提案闸门，两者不是同一口径，均不代表策略收益已经验证。
 
 Historical replay is implemented against persisted evidence. A complete 600584 acceptance pass still requires the target trading-day evidence dataset to be present.
 

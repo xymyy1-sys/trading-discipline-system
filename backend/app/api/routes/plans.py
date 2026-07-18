@@ -84,14 +84,34 @@ def _guard_limit_up_auction_update(existing_raw: str, incoming: dict) -> dict:
 @router.get("/next-day-plans", response_model=list[NextDayPlanOut])
 def list_next_day_plans(
     plan_date: str | None = None,
-    refresh: bool = False,
     db: Session = Depends(get_db),
 ) -> list[NextDayPlanOut]:
     plan_date = plan_date or _next_trade_date()
     query = db.query(NextDayPlan)
     query = query.filter(NextDayPlan.plan_date == plan_date)
     plans = query.order_by(NextDayPlan.risk_priority.asc(), NextDayPlan.updated_at.desc()).all()
-    price_notes = _refresh_existing_holding_plans(plans, db) if refresh else {}
+    return [_next_day_plan_out(item) for item in plans]
+
+
+@router.post("/next-day-plans/refresh", response_model=list[NextDayPlanOut])
+def refresh_next_day_plans(
+    plan_date: str | None = None,
+    db: Session = Depends(get_db),
+) -> list[NextDayPlanOut]:
+    """Explicitly refresh persisted plan prices and derived risk fields.
+
+    Keeping this mutation behind POST makes ordinary page navigation a pure
+    snapshot read while retaining the user's manual "refresh current state"
+    action.
+    """
+    plan_date = plan_date or _next_trade_date()
+    plans = (
+        db.query(NextDayPlan)
+        .filter(NextDayPlan.plan_date == plan_date)
+        .order_by(NextDayPlan.risk_priority.asc(), NextDayPlan.updated_at.desc())
+        .all()
+    )
+    price_notes = _refresh_existing_holding_plans(plans, db)
     return [_next_day_plan_out(item, price_note=price_notes.get(item.code, "")) for item in plans]
 
 @router.post("/next-day-plans", response_model=NextDayPlanOut)

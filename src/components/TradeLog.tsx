@@ -188,7 +188,7 @@ export default function TradeLog() {
             <input placeholder="成本价" type="number" step="0.01" value={form.cost_price} onChange={e => setForm(p => ({ ...p, cost_price: e.target.value }))} />
             <input placeholder="交易理由" value={form.reason} onChange={e => setForm(p => ({ ...p, reason: e.target.value }))} />
             <select value={form.mode} onChange={e => setForm(p => ({ ...p, mode: e.target.value }))}>
-              {['标准短线模式', '集中进攻模式'].map(m => <option key={m}>{m}</option>)}
+              <option>标准短线模式</option>
             </select>
             <select value={form.compliant} onChange={e => setForm(p => ({ ...p, compliant: e.target.value }))}>
               <option value="true">符合体系</option>

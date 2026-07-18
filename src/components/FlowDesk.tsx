@@ -26,6 +26,12 @@ const BOARD_TYPES: BoardType[] = ['行业', '概念', '风格', '地域', '港�
 const PERIODS = ['今日', '5日', '10日']
 const DARK_SCOPES: DarkScope[] = ['个股', '行业', '概念']
 
+async function refreshJson<T>(url: string): Promise<{ data: T; fetchedAt: string }> {
+  const response = await fetch(url, { method: 'POST' })
+  if (!response.ok) throw new Error(`HTTP ${response.status}`)
+  return { data: await response.json() as T, fetchedAt: new Date().toISOString() }
+}
+
 export default function FlowDesk() {
   const [tab, setTab] = useState<MainTab>('funds')
   const [boardType, setBoardType] = useState<BoardType>('行业')
@@ -46,12 +52,14 @@ export default function FlowDesk() {
   const loadFunds = useCallback((force = false) => {
     setLoading(true)
     const query = new URLSearchParams({ board_type: boardType, period })
-    if (force) query.set('force_refresh', 'true')
-    cachedJson<BoardFlowPanel>(
-      `board-flow-panel:${boardType}:${period}`,
-      `${API_BASE}/api/market/board-flow-panel?${query.toString()}`,
-      force,
-    )
+    const basePath = `${API_BASE}/api/market/board-flow-panel`
+    const request = force
+      ? refreshJson<BoardFlowPanel>(`${basePath}/refresh?${query.toString()}`)
+      : cachedJson<BoardFlowPanel>(
+          `board-flow-panel:${boardType}:${period}`,
+          `${basePath}?${query.toString()}`,
+        )
+    request
       .then(({ data, fetchedAt }) => {
         setBoardFlow(data)
         setFetchedAt(fetchedAt)
@@ -63,11 +71,11 @@ export default function FlowDesk() {
 
   const loadHot = useCallback((force = false) => {
     setLoading(true)
-    cachedJson<HotThemesOut>(
-      'hot-themes',
-      `${API_BASE}/api/market/hot-themes${force ? '?force_refresh=true' : ''}`,
-      force,
-    )
+    const basePath = `${API_BASE}/api/market/hot-themes`
+    const request = force
+      ? refreshJson<HotThemesOut>(`${basePath}/refresh`)
+      : cachedJson<HotThemesOut>('hot-themes', basePath)
+    request
       .then(({ data, fetchedAt }) => {
         setHotThemes(data)
         setFetchedAt(fetchedAt)
@@ -80,12 +88,14 @@ export default function FlowDesk() {
   const loadDark = useCallback((force = false) => {
     setLoading(true)
     const query = new URLSearchParams({ scope: darkScope })
-    if (force) query.set('force_refresh', 'true')
-    cachedJson<DarkTradeOut>(
-      `dark-trade:${darkScope}`,
-      `${API_BASE}/api/market/dark-trade?${query.toString()}`,
-      force,
-    )
+    const basePath = `${API_BASE}/api/market/dark-trade`
+    const request = force
+      ? refreshJson<DarkTradeOut>(`${basePath}/refresh?${query.toString()}`)
+      : cachedJson<DarkTradeOut>(
+          `dark-trade:${darkScope}`,
+          `${basePath}?${query.toString()}`,
+        )
+    request
       .then(({ data, fetchedAt }) => {
         setDarkTrade(data)
         setFetchedAt(fetchedAt)
@@ -102,12 +112,14 @@ export default function FlowDesk() {
   const loadTemperature = useCallback((force = false) => {
     setLoading(true)
     const query = new URLSearchParams({ board_type: temperatureBoardType })
-    if (force) query.set('force_refresh', 'true')
-    cachedJson<SectorTemperatureOut>(
-      `sector-temperature:${temperatureBoardType}`,
-      `${API_BASE}/api/market/sector-temperature?${query.toString()}`,
-      force,
-    )
+    const basePath = `${API_BASE}/api/market/sector-temperature`
+    const request = force
+      ? refreshJson<SectorTemperatureOut>(`${basePath}/refresh?${query.toString()}`)
+      : cachedJson<SectorTemperatureOut>(
+          `sector-temperature:${temperatureBoardType}`,
+          `${basePath}?${query.toString()}`,
+        )
+    request
       .then(({ data, fetchedAt }) => {
         setSectorTemperature(data)
         setFetchedAt(fetchedAt)

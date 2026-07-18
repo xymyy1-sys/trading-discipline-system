@@ -806,7 +806,7 @@ def _holding_market_evidence(holding: Holding, quote: dict[str, Any] | None = No
         evidence["weak_open"] = open_gap <= -1.5
         volume_context = _volume_price_context(holding.code, quote)
         evidence.update(volume_context)
-    theme_flow = _cached_holding_theme_flow_profile(holding)
+    theme_flow = _cached_holding_theme_flow_profile(holding, allow_network=True)
     if theme_flow["sectors"]:
         evidence["flow_basis"] = str(theme_flow.get("basis") or "行业资金流").replace("资金流", "订单流算法")
         evidence["primary_industry_sector"] = "、".join(theme_flow["sectors"][:3])

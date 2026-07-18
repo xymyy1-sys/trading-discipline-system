@@ -410,7 +410,9 @@ def test_sector_breadth_uses_full_industry_universe_not_top20_display(monkeypatc
     assert any("真实分钟曲线" in item for item in notes)
 
 
-def test_market_regime_endpoint_persists_real_collection(monkeypatch, client, db_session):
+def test_market_regime_get_is_read_only_and_post_refresh_persists_collection(
+    monkeypatch, client, db_session
+):
     captured_at = datetime(2026, 7, 13, 10, 30)
     collection = MarketRegimeCollection(
         metrics=_metrics(
@@ -450,19 +452,33 @@ def test_market_regime_endpoint_persists_real_collection(monkeypatch, client, db
         ],
         notes=["fixture仅替换采集层，验证接口与持久化。"],
     )
+    collection_calls: list[bool] = []
+
+    def fake_collection(force_refresh=False):
+        collection_calls.append(force_refresh)
+        return collection
+
     monkeypatch.setattr(
         "app.services.market_regime.collect_market_regime_inputs",
-        lambda force_refresh=False: collection,
+        fake_collection,
     )
     clear_market_regime_cache()
 
-    response = client.get("/api/market/regime?force_refresh=true")
+    read_response = client.get("/api/market/regime?force_refresh=true")
+
+    assert read_response.status_code == 200
+    assert read_response.json()["regime_code"] == "UNKNOWN"
+    assert collection_calls == []
+    assert db_session.query(MarketRegimeSnapshot).count() == 0
+
+    response = client.post("/api/market/regime/refresh")
 
     assert response.status_code == 200
     payload = response.json()
     assert payload["regime_code"] == "VOLUME_BROAD_RALLY"
     assert payload["source"] == "eastmoney-test-fixture"
     assert payload["indices"][0]["code"] == "000001"
+    assert collection_calls == [True]
     assert db_session.query(MarketRegimeSnapshot).count() == 1
     row = db_session.query(MarketRegimeSnapshot).one()
     assert row.trade_date == "2026-07-13"

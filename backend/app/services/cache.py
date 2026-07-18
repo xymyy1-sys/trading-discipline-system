@@ -22,7 +22,15 @@ def _get_cached_flow(key: str) -> tuple[list[dict[str, Any]], str, str] | None:
     with _CACHE_LOCK:
         return _last_good_flow_cache.get(key)
 
-def _get_response_cache(key: str) -> Any | None:
+def _get_response_cache(key: str, *, allow_stale: bool = False) -> Any | None:
+    """Read a response snapshot.
+
+    Normal provider calls keep the five-minute freshness contract.  Read-only
+    page endpoints may opt into the last in-process snapshot so navigation does
+    not turn a previously refreshed screen blank merely because the TTL elapsed.
+    Expired entries are intentionally retained until a later explicit refresh
+    replaces them; process restart remains an explicit data-gap boundary.
+    """
     now = time.time()
     with _CACHE_LOCK:
         cached = _response_cache.get(key)
@@ -30,8 +38,7 @@ def _get_response_cache(key: str) -> Any | None:
             return None
         expires_at, value = cached
         if expires_at <= now:
-            _response_cache.pop(key, None)
-            return None
+            return value if allow_stale else None
         return value
 
 def _set_response_cache(key: str, value: Any) -> None:

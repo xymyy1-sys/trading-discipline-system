@@ -1068,6 +1068,63 @@ def clear_market_regime_cache() -> None:
         _REGIME_CACHE = None
 
 
+def read_market_regime(db: Session) -> MarketRegimeOut:
+    """Read the newest persisted market regime without collecting or writing.
+
+    Page navigation must never become an implicit market-data refresh.  The
+    scheduler and the explicit refresh endpoint own collection; this helper is
+    the stable read model consumed by GET endpoints.
+    """
+
+    now = shanghai_now_naive()
+    today = now.date().isoformat()
+    row = (
+        db.query(MarketRegimeSnapshot)
+        .filter(MarketRegimeSnapshot.trade_date == today)
+        .order_by(MarketRegimeSnapshot.captured_at.desc(), MarketRegimeSnapshot.id.desc())
+        .first()
+    )
+    if row is None:
+        row = (
+            db.query(MarketRegimeSnapshot)
+            .order_by(MarketRegimeSnapshot.captured_at.desc(), MarketRegimeSnapshot.id.desc())
+            .first()
+        )
+    if row is None:
+        return MarketRegimeOut(
+            trade_date=today,
+            captured_at=now,
+            source="persisted-snapshot-unavailable",
+            data_quality="missing",
+            coverage_ratio=0,
+            confidence=0,
+            regime_code="UNKNOWN",
+            regime_name="市场证据待采集",
+            risk_level="未知",
+            opportunity_score=0,
+            loss_score=0,
+            liquidity_score=0,
+            forbidden_actions=["市场证据缺失时禁止主动扩大仓位"],
+            missing_fields=["market_regime_snapshot"],
+            notes=["尚无持久化市场环境快照，请使用刷新按钮或等待后台采集器。"],
+        )
+
+    captured_at = row.captured_at
+    if captured_at.tzinfo is not None:
+        captured_at = captured_at.replace(tzinfo=None)
+    freshness = max(0, int((now - captured_at).total_seconds()))
+    result = _snapshot_to_out(row, freshness_seconds=freshness)
+    if row.trade_date != today:
+        return result.model_copy(update={
+            "data_quality": "stale",
+            "notes": [
+                *result.notes,
+                f"当前展示最近持久化快照（{row.trade_date}），不代表今日实时状态。",
+            ],
+        })
+    return result
+
+
 def get_market_regime(db: Session, force_refresh: bool = False) -> MarketRegimeOut:
     global _REGIME_CACHE
     now_clock = clock.time()

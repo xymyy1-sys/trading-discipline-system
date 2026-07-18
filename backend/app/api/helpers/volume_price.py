@@ -387,7 +387,7 @@ def build_volume_price_snapshot(
     from app.api.helpers.decision import quote_for_code
 
     from app.api.helpers.quotes import _daily_history_metrics
-    quote = quote or quote_for_code(code)
+    quote = quote_for_code(code) if quote is None else quote
     daily = daily_metrics if daily_metrics is not None else _daily_history_metrics(code)
     lookup_code = _quote_lookup_code(code, {code: quote}) if quote else code
     price = _safe_float(quote.get("price"))

@@ -167,12 +167,28 @@ class MarketDataProvider:
     def __init__(self) -> None:
         pass
 
-    def theme_radar(self, force_refresh: bool = False) -> ThemeRadarOut:
+    def theme_radar(
+        self,
+        force_refresh: bool = False,
+        *,
+        cache_only: bool = False,
+    ) -> ThemeRadarOut:
         cache_key = "theme-radar"
         if not force_refresh:
-            cached = _get_response_cache(cache_key)
+            cached = _get_response_cache(cache_key, allow_stale=True) if cache_only else _get_response_cache(cache_key)
             if cached is not None:
                 return cached
+
+        if cache_only:
+            return ThemeRadarOut(
+                source="cache-unavailable",
+                updated_at=datetime.utcnow(),
+                market_temperature="待采集",
+                strongest_theme=None,
+                resonance=[],
+                themes=[],
+                notes=["尚无主线题材缓存，请点击刷新或等待后台采集。"],
+            )
 
         now = datetime.utcnow()
         notes: list[str] = []
@@ -2264,7 +2280,14 @@ class MarketDataProvider:
             })
         return results
 
-    def information_differential(self, date: str | None = None, force_refresh: bool = False, related_stocks: dict[str, str] | None = None) -> InformationDifferentialOut:
+    def information_differential(
+        self,
+        date: str | None = None,
+        force_refresh: bool = False,
+        related_stocks: dict[str, str] | None = None,
+        *,
+        cache_only: bool = False,
+    ) -> InformationDifferentialOut:
         if date:
             target_date = date
         elif _is_trading_day():
@@ -2276,9 +2299,18 @@ class MarketDataProvider:
         related_stocks = related_stocks or {}
         cache_key = f"information-differential|{target_date}|{','.join(sorted(related_stocks))}"
         if not force_refresh:
-            cached = _get_response_cache(cache_key)
+            cached = _get_response_cache(cache_key, allow_stale=True) if cache_only else _get_response_cache(cache_key)
             if cached is not None:
                 return cached
+        if cache_only:
+            return InformationDifferentialOut(
+                source="cache-unavailable",
+                date=target_date,
+                updated_at=datetime.utcnow(),
+                items=[],
+                watchlist=[],
+                data_notes=["尚无行业要闻缓存，请点击刷新或等待后台采集。"],
+            )
         raw_items: list[dict[str, object]] = []
         notes: list[str] = []
         sources: list[str] = []

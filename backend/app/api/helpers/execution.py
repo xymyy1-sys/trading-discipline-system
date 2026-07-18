@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import math
 import re
 from datetime import datetime, time, timedelta, timezone
@@ -8,7 +9,6 @@ from typing import Any, Mapping
 
 from sqlalchemy.orm import Session
 
-from app.api.helpers.holdings_calc import _account_total_asset
 from app.api.helpers.quotes import (
     _QUOTE_META_CACHE,
     _estimated_vwap,
@@ -20,6 +20,7 @@ from app.api.helpers.quotes import (
 )
 from app.api.helpers.seesaw import _market_seesaw_monitor
 from app.models.trading import (
+    AccountState,
     ActionRecommendation,
     ActionRecommendationRevision,
     ExpectationSnapshot,
@@ -31,6 +32,7 @@ from app.models.trading import (
     PositionExecutionState,
     PositionStateHistory,
     ProfitProtectionSnapshot,
+    RecommendationFeedback,
     TradeLog,
     TimeStopRule,
     VolumePriceSnapshot,
@@ -50,6 +52,7 @@ from app.services.global_market import global_market_service
 
 WEAK_EXPECTATION_RESULTS = {"WEAKER", "INVALID", "SLIGHTLY_WEAKER"}
 STRONG_EXPECTATION_RESULTS = {"STRONGER", "SLIGHTLY_STRONGER"}
+EXECUTION_RULE_VERSION = "execution-v2"
 
 
 DEFAULT_TIME_STOP_RULES: dict[str, dict[str, Any]] = {
@@ -87,6 +90,42 @@ def _json_dumps(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False)
 
 
+def _recommendation_target_key(holding: Holding) -> str:
+    return f"holding:{int(holding.id)}" if holding.id is not None else f"code:{_normalize_code(holding.code)}"
+
+
+def _material_decision_hash(
+    *,
+    level: str,
+    state: str,
+    action: str,
+    recommended_ratio: float,
+    trigger_events: list[str],
+    invalid_conditions: list[str],
+    recovery_conditions: list[str],
+) -> str:
+    """Hash only material decision semantics, never minute-by-minute prose.
+
+    Evidence text contains current prices and therefore changes on virtually
+    every sample.  Including it in the identity would recreate the old
+    recommendation-inflation problem.  Trigger classes, action size and the
+    conditions that invalidate/recover a decision are the stable semantics.
+    """
+
+    payload = {
+        "level": str(level or "INFO"),
+        "state": str(state or ""),
+        "action": str(action or ""),
+        "recommended_ratio": round(float(recommended_ratio or 0), 4),
+        "trigger_events": sorted({str(item) for item in trigger_events if str(item)}),
+        "invalid_conditions": sorted({str(item) for item in invalid_conditions if str(item)}),
+        "recovery_conditions": sorted({str(item) for item in recovery_conditions if str(item)}),
+        "rule_version": EXECUTION_RULE_VERSION,
+    }
+    raw = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
 def _json_list(raw: str | None) -> list[str]:
     try:
         value = json.loads(raw or "[]")
@@ -121,6 +160,19 @@ def _utc_storage_bounds_for_local_trade_day() -> tuple[datetime, datetime]:
     local_end = datetime.combine(shanghai_date, time.max)
     china_offset = timedelta(hours=8)
     return local_start - china_offset, local_end - china_offset
+
+
+def _shanghai_naive_to_utc_naive(value: datetime) -> datetime:
+    """Convert a persisted Shanghai wall-clock value to UTC-naive storage.
+
+    ``PositionExecutionState.updated_at`` and recommendation revisions are
+    intentionally recorded as China-market wall time, while profit snapshots
+    use UTC-naive storage.  Comparing the two values directly can select a
+    snapshot created up to eight hours *after* the state being rendered.
+    """
+    if value.tzinfo is not None:
+        return value.astimezone(timezone.utc).replace(tzinfo=None)
+    return value - timedelta(hours=8)
 
 
 def _latest_market_regime(db: Session) -> MarketRegimeSnapshot | None:
@@ -1594,7 +1646,16 @@ def build_position_execution_state(
     high = _safe_float(quote.get("high")) or max(current, float(holding.current_price or 0))
     low = _safe_float(quote.get("low"))
     vwap = _estimated_vwap(quote)
-    total_asset = _account_total_asset(db) or float(holding.total_asset or 0)
+    # Execution calculation is also used by read-only decision cards.  Do not
+    # seed AccountState merely because a page was opened; use the persisted
+    # account value when it exists and otherwise fall back to the holding's
+    # imported total-asset reference.
+    account_state = db.get(AccountState, 1)
+    total_asset = (
+        float(account_state.total_asset or 0)
+        if account_state is not None
+        else float(holding.total_asset or 0)
+    )
     market_value = current * int(holding.quantity or 0)
     position_ratio = market_value / total_asset if total_asset else 0.0
     current_profit_pct = ((current - holding.cost_price) / holding.cost_price * 100) if holding.cost_price else 0.0
@@ -2099,43 +2160,95 @@ def build_position_execution_state(
         triggered=protection_level != "NONE",
         recommended_action=action,
     )
-    recommendation = (
+    target_key = _recommendation_target_key(holding)
+    persisted_recommendation = (
         db.query(ActionRecommendation)
         .filter(
-            ActionRecommendation.holding_id == int(holding.id),
             ActionRecommendation.trade_date == _trade_date(),
+            ActionRecommendation.target_key == target_key,
         )
         .order_by(ActionRecommendation.id.desc())
         .first()
     )
-    if recommendation is None:
-        recommendation = ActionRecommendation(
-            trade_date=_trade_date(), holding_id=int(holding.id), code=holding.code, name=holding.name,
+    if persisted_recommendation is None:
+        # Compatibility for rows created before ``target_key`` existed.  The
+        # first persisted refresh promotes the latest legacy row to the
+        # canonical key instead of creating another recommendation episode.
+        persisted_recommendation = (
+            db.query(ActionRecommendation)
+            .filter(
+                ActionRecommendation.holding_id == int(holding.id),
+                ActionRecommendation.trade_date == _trade_date(),
+            )
+            .order_by(ActionRecommendation.id.desc())
+            .first()
         )
-    changed = (recommendation.level, recommendation.state, recommendation.action) != (level, state, action)
-    recommendation.created_at = now
+    if persisted_recommendation is None:
+        recommendation = ActionRecommendation(
+            trade_date=_trade_date(), target_key=target_key,
+            holding_id=int(holding.id), code=holding.code, name=holding.name,
+            created_at=now, updated_at=now,
+        )
+    elif persist:
+        recommendation = persisted_recommendation
+    else:
+        # Pure calculations must not dirty the ORM identity already attached
+        # to this request's session.  A transient copy keeps the current
+        # recommendation/revision identity available to the response while
+        # making every field update below side-effect free.
+        recommendation = ActionRecommendation(
+            id=persisted_recommendation.id,
+            trade_date=persisted_recommendation.trade_date,
+            target_key=persisted_recommendation.target_key,
+            holding_id=persisted_recommendation.holding_id,
+            code=persisted_recommendation.code,
+            name=persisted_recommendation.name,
+            created_at=persisted_recommendation.created_at,
+            updated_at=persisted_recommendation.updated_at,
+            current_revision_id=persisted_recommendation.current_revision_id,
+            current_decision_hash=persisted_recommendation.current_decision_hash,
+            acknowledged_at=persisted_recommendation.acknowledged_at,
+            expires_at=persisted_recommendation.expires_at,
+        )
+    trigger_event_types = [str(event["event_type"]) for event in events]
+    decision_hash = _material_decision_hash(
+        level=level,
+        state=state,
+        action=action,
+        recommended_ratio=reduce_ratio,
+        trigger_events=trigger_event_types,
+        invalid_conditions=invalid_conditions,
+        recovery_conditions=recovery_conditions,
+    )
+    changed = str(recommendation.current_decision_hash or "") != decision_hash
+    recommendation.target_key = target_key
+    recommendation.updated_at = now
     recommendation.level = level
     recommendation.state = state
     recommendation.action = action
     recommendation.recommended_ratio = reduce_ratio
-    recommendation.trigger_events_json = _json_dumps([event["event_type"] for event in events])
+    recommendation.trigger_events_json = _json_dumps(trigger_event_types)
     recommendation.evidence_json = _json_dumps(evidence)
     recommendation.counter_evidence_json = _json_dumps(counter_evidence)
     recommendation.invalid_conditions_json = _json_dumps(invalid_conditions)
     recommendation.recovery_conditions_json = _json_dumps(recovery_conditions)
+    recommendation.current_decision_hash = decision_hash
     recommendation.expires_at = now + timedelta(minutes=15)
     if changed:
         recommendation.acknowledged_at = None
-        recommendation.feedback_status = ""
-    state_row = (
+    persisted_state = (
         db.query(PositionExecutionState)
         .filter(PositionExecutionState.holding_id == int(holding.id), PositionExecutionState.trade_date == _trade_date())
         .first()
     )
-    created_state = state_row is None
-    if state_row is None:
+    created_state = persisted_state is None
+    previous_state = "" if created_state else str(persisted_state.state or "")
+    if persisted_state is None or not persist:
         state_row = PositionExecutionState(holding_id=int(holding.id), code=holding.code, name=holding.name, trade_date=_trade_date())
-    previous_state = "" if created_state else str(state_row.state or "")
+        if persisted_state is not None:
+            state_row.id = persisted_state.id
+    else:
+        state_row = persisted_state
     state_row.state = state
     state_row.expectation_state = (
         expectation_result
@@ -2179,17 +2292,50 @@ def build_position_execution_state(
                 .order_by(ActionRecommendationRevision.version.desc(), ActionRecommendationRevision.id.desc())
                 .first()
             )
-            db.add(ActionRecommendationRevision(
+            if latest_revision is not None and latest_revision.effective_until is None:
+                latest_revision.effective_until = now
+                db.add(latest_revision)
+            context = {
+                "holding_id": int(holding.id),
+                # Freeze the executable position facts with the immutable
+                # decision.  Reading the mutable Holding row later cannot tell
+                # us whether a 25% reduction was actually completed.
+                "current_quantity": int(holding.quantity or 0),
+                "sellable_quantity": int(sellable_quantity or 0),
+                "recommended_sell_quantity": min(
+                    int(sellable_quantity or 0),
+                    max(0, int(round(float(sellable_quantity or 0) * float(reduce_ratio or 0)))),
+                ),
+                "expectation_snapshot_id": getattr(expectation, "id", None),
+                "volume_price_snapshot_id": getattr(volume_price, "id", None),
+                "expectation_result": expectation_result,
+                "volume_price_state": volume_price_state,
+                "sector_state": sector_state,
+                "data_quality": data_quality,
+                "data_time": data_time,
+                "price": round(current, 4),
+                "vwap": round(vwap, 4),
+            }
+            revision = ActionRecommendationRevision(
                 recommendation_id=recommendation.id,
+                previous_revision_id=latest_revision.id if latest_revision else None,
                 version=(latest_revision.version + 1) if latest_revision else 1,
+                decision_hash=decision_hash,
                 level=recommendation.level, state=recommendation.state,
                 action=recommendation.action, recommended_ratio=recommendation.recommended_ratio,
+                trigger_events_json=recommendation.trigger_events_json,
                 evidence_json=recommendation.evidence_json,
                 counter_evidence_json=recommendation.counter_evidence_json,
                 invalid_conditions_json=recommendation.invalid_conditions_json,
                 recovery_conditions_json=recommendation.recovery_conditions_json,
+                decision_context_json=_json_dumps(context),
+                rule_version=EXECUTION_RULE_VERSION,
                 created_at=now,
-            ))
+            )
+            db.add(revision)
+            db.flush()
+            recommendation.current_revision_id = revision.id
+            db.add(recommendation)
         if previous_state != state:
             history = PositionStateHistory(
                 holding_id=int(holding.id),
@@ -2255,6 +2401,29 @@ def _execution_state_out(
         HoldingExecutionSignalOut,
     ] | None = None,
 ) -> PositionExecutionStateOut:
+    current_revision = None
+    latest_feedback = None
+    if db is not None and recommendation.id:
+        if recommendation.current_revision_id:
+            current_revision = db.get(ActionRecommendationRevision, recommendation.current_revision_id)
+        if current_revision is None:
+            current_revision = (
+                db.query(ActionRecommendationRevision)
+                .filter(ActionRecommendationRevision.recommendation_id == recommendation.id)
+                .order_by(ActionRecommendationRevision.version.desc(), ActionRecommendationRevision.id.desc())
+                .first()
+            )
+        feedback_query = db.query(RecommendationFeedback).filter(
+            RecommendationFeedback.recommendation_id == recommendation.id,
+        )
+        if current_revision is not None:
+            feedback_query = feedback_query.filter(
+                RecommendationFeedback.recommendation_revision_id == current_revision.id,
+            )
+        latest_feedback = feedback_query.order_by(
+            RecommendationFeedback.created_at.desc(),
+            RecommendationFeedback.id.desc(),
+        ).first()
     event_out: list[IntradayEvidenceEventOut] = []
     for event in events:
         if isinstance(event, dict):
@@ -2314,6 +2483,14 @@ def _execution_state_out(
         events=event_out,
         recommendation=ActionRecommendationOut(
             id=recommendation.id,
+            revision_id=current_revision.id if current_revision else None,
+            revision_version=int(current_revision.version or 0) if current_revision else 0,
+            decision_hash=str(current_revision.decision_hash or recommendation.current_decision_hash or "") if current_revision else str(recommendation.current_decision_hash or ""),
+            trade_date=recommendation.trade_date,
+            target_key=recommendation.target_key or "",
+            holding_id=recommendation.holding_id,
+            code=recommendation.code,
+            name=recommendation.name,
             level=recommendation.level,
             state=recommendation.state,
             action=recommendation.action,
@@ -2323,8 +2500,10 @@ def _execution_state_out(
             invalid_conditions=_json_list(recommendation.invalid_conditions_json),
             recovery_conditions=_json_list(recommendation.recovery_conditions_json),
             created_at=recommendation.created_at,
+            updated_at=recommendation.updated_at,
             expires_at=recommendation.expires_at,
             acknowledged_at=recommendation.acknowledged_at,
+            feedback_status=latest_feedback.status if latest_feedback else "",
         ),
         profit_snapshot=ProfitProtectionSnapshotOut(
             id=snapshot.id,
@@ -2351,6 +2530,219 @@ def _execution_state_out(
         data_time=state.data_time,
         updated_at=state.updated_at,
     )
+
+
+def read_persisted_execution_state(
+    db: Session,
+    holding: Holding,
+) -> PositionExecutionStateOut:
+    """Return the collector's latest committed state without recomputation.
+
+    HTTP GET routes use this function so page navigation cannot create profit
+    snapshots, recommendation revisions or evidence events.  The scheduler and
+    explicit collection POST remain the only normal writers.
+    """
+
+    today = _trade_date()
+    state = (
+        db.query(PositionExecutionState)
+        .filter(
+            PositionExecutionState.holding_id == int(holding.id),
+            PositionExecutionState.trade_date == today,
+        )
+        .order_by(PositionExecutionState.updated_at.desc(), PositionExecutionState.id.desc())
+        .first()
+    )
+    is_historical = False
+    if state is None:
+        # Weekends, pre-market and collector outages must not make a holding
+        # disappear from the UI.  Fall back to the last committed session and
+        # mark it stale in the response; never recompute or persist from GET.
+        state = (
+            db.query(PositionExecutionState)
+            .filter(PositionExecutionState.holding_id == int(holding.id))
+            .order_by(
+                PositionExecutionState.trade_date.desc(),
+                PositionExecutionState.updated_at.desc(),
+                PositionExecutionState.id.desc(),
+            )
+            .first()
+        )
+        is_historical = state is not None
+
+    if state is None:
+        now = _shanghai_now_naive()
+        quantity = int(holding.quantity or 0)
+        current = float(holding.current_price or 0)
+        cost = float(holding.cost_price or 0)
+        profit_pct = ((current / cost - 1) * 100) if current > 0 and cost > 0 else 0.0
+        placeholder_state = PositionExecutionState(
+            holding_id=int(holding.id),
+            code=holding.code,
+            name=holding.name,
+            trade_date=today,
+            state="NO_SNAPSHOT",
+            expectation_state="PENDING",
+            volume_price_state="尚无采样",
+            sector_state="尚无采样",
+            current_quantity=quantity,
+            sellable_quantity=quantity,
+            today_buy_quantity=0,
+            yesterday_quantity=quantity,
+            current_position_ratio=0,
+            recommended_position_ratio=0,
+            recommended_action="等待首次盘中采样",
+            recommended_reduce_ratio=0,
+            structure_stop_price=0,
+            hard_stop_price=0,
+            stop_source="missing_snapshot",
+            stop_source_detail="尚无持久化采样，GET 不会自动生成交易结论。",
+            trailing_stop_price=0,
+            profit_protection_price=0,
+            t_eligible=False,
+            t_type="NO_T",
+            evidence_json=_json_dumps(["尚无盘中采样；请运行盘中采集器后刷新。"]),
+            counter_evidence_json="[]",
+            invalid_conditions_json=_json_dumps(["缺少真实盘中量价证据，不生成确定性操作建议。"]),
+            recovery_conditions_json=_json_dumps(["采集器成功生成首个持久化快照。"]),
+            data_quality="missing",
+            data_time="尚无持久化盘中采样",
+            updated_at=holding.updated_at or now,
+        )
+        placeholder_recommendation = ActionRecommendation(
+            trade_date=today,
+            target_key=_recommendation_target_key(holding),
+            holding_id=int(holding.id),
+            code=holding.code,
+            name=holding.name,
+            created_at=holding.updated_at or now,
+            updated_at=holding.updated_at or now,
+            level="INFO",
+            state="NO_SNAPSHOT",
+            action="等待首次盘中采样",
+            recommended_ratio=0,
+            trigger_events_json="[]",
+            evidence_json=placeholder_state.evidence_json,
+            counter_evidence_json="[]",
+            invalid_conditions_json=placeholder_state.invalid_conditions_json,
+            recovery_conditions_json=placeholder_state.recovery_conditions_json,
+        )
+        placeholder_snapshot = ProfitProtectionSnapshot(
+            holding_id=int(holding.id),
+            code=holding.code,
+            captured_at=holding.updated_at or now,
+            current_profit_pct=round(profit_pct, 2),
+            maximum_profit_pct=round(profit_pct, 2),
+            profit_drawdown_pct=0,
+            maximum_price=current,
+            protection_level="NONE",
+            protection_floor=0,
+            triggered=False,
+            recommended_action="等待首次盘中采样",
+        )
+        return _execution_state_out(
+            placeholder_state,
+            placeholder_snapshot,
+            placeholder_recommendation,
+            [],
+            db=db,
+        )
+
+    trade_date = state.trade_date
+    recommendation = (
+        db.query(ActionRecommendation)
+        .filter(
+            ActionRecommendation.trade_date == trade_date,
+            ActionRecommendation.target_key == _recommendation_target_key(holding),
+        )
+        .order_by(ActionRecommendation.updated_at.desc(), ActionRecommendation.id.desc())
+        .first()
+    )
+    if recommendation is None:
+        recommendation = (
+            db.query(ActionRecommendation)
+            .filter(
+                ActionRecommendation.trade_date == trade_date,
+                ActionRecommendation.holding_id == int(holding.id),
+            )
+            .order_by(ActionRecommendation.updated_at.desc(), ActionRecommendation.id.desc())
+            .first()
+        )
+    state_snapshot_cutoff = _shanghai_naive_to_utc_naive(state.updated_at)
+    snapshot = (
+        db.query(ProfitProtectionSnapshot)
+        .filter(
+            ProfitProtectionSnapshot.holding_id == int(holding.id),
+            ProfitProtectionSnapshot.captured_at <= state_snapshot_cutoff,
+        )
+        .order_by(ProfitProtectionSnapshot.captured_at.desc(), ProfitProtectionSnapshot.id.desc())
+        .first()
+    )
+    if snapshot is None:
+        snapshot = (
+            db.query(ProfitProtectionSnapshot)
+            .filter(ProfitProtectionSnapshot.holding_id == int(holding.id))
+            .order_by(ProfitProtectionSnapshot.captured_at.desc(), ProfitProtectionSnapshot.id.desc())
+            .first()
+        )
+    if recommendation is None:
+        recommendation = ActionRecommendation(
+            trade_date=trade_date,
+            target_key=_recommendation_target_key(holding),
+            holding_id=int(holding.id),
+            code=holding.code,
+            name=holding.name,
+            created_at=state.updated_at,
+            updated_at=state.updated_at,
+            level="INFO",
+            state=state.state,
+            action=state.recommended_action,
+            recommended_ratio=state.recommended_reduce_ratio,
+            trigger_events_json="[]",
+            evidence_json=state.evidence_json,
+            counter_evidence_json=state.counter_evidence_json,
+            invalid_conditions_json=state.invalid_conditions_json,
+            recovery_conditions_json=state.recovery_conditions_json,
+        )
+    if snapshot is None:
+        snapshot = ProfitProtectionSnapshot(
+            holding_id=int(holding.id),
+            code=holding.code,
+            captured_at=state.updated_at,
+            current_profit_pct=0,
+            maximum_profit_pct=0,
+            profit_drawdown_pct=0,
+            maximum_price=float(holding.current_price or 0),
+            protection_level="NONE",
+            protection_floor=0,
+            triggered=False,
+            recommended_action=state.recommended_action,
+        )
+    events = (
+        db.query(IntradayEvidenceEvent)
+        .filter(
+            IntradayEvidenceEvent.trade_date == trade_date,
+            IntradayEvidenceEvent.target_code == holding.code,
+        )
+        .order_by(IntradayEvidenceEvent.captured_at.desc(), IntradayEvidenceEvent.id.desc())
+        .limit(20)
+        .all()
+    )
+    output = _execution_state_out(state, snapshot, recommendation, events, db=db)
+    if is_historical:
+        history_label = f"历史快照 {trade_date}"
+        output = output.model_copy(update={
+            "data_quality": "stale",
+            "data_time": f"{history_label} · {state.data_time or '非当前交易日'}",
+        })
+    return output
+
+
+def read_persisted_execution_states(
+    db: Session,
+    holdings: list[Holding],
+) -> list[PositionExecutionStateOut]:
+    return [read_persisted_execution_state(db, holding) for holding in holdings]
 
 
 def build_execution_states(db: Session, holdings: list[Holding], force_refresh: bool = False) -> list[PositionExecutionStateOut]:

@@ -161,7 +161,11 @@ class IntradayEvidenceEventOut(BaseModel):
 
 class ActionRecommendationOut(BaseModel):
     id: int | None = None
+    revision_id: int | None = None
+    revision_version: int = 0
+    decision_hash: str = ""
     trade_date: str = ""
+    target_key: str = ""
     holding_id: int | None = None
     code: str = ""
     name: str = ""
@@ -174,6 +178,7 @@ class ActionRecommendationOut(BaseModel):
     invalid_conditions: list[str] = Field(default_factory=list)
     recovery_conditions: list[str] = Field(default_factory=list)
     created_at: datetime
+    updated_at: datetime | None = None
     expires_at: datetime | None = None
     acknowledged_at: datetime | None = None
     feedback_status: str = ""
@@ -233,6 +238,10 @@ class RecommendationOutcomeOut(BaseModel):
 
 class RecommendationOutcomeSummaryOut(BaseModel):
     total: int
+    price_outcome_sample_count: int = 0
+    calibration_eligible_sample_count: int = 0
+    eligible_sample_count: int = 0
+    minimum_calibration_samples: int = 30
     status_counts: dict[str, int] = Field(default_factory=dict)
     quality_counts: dict[str, int] = Field(default_factory=dict)
     complete_coverage_pct: float = 0
@@ -345,16 +354,28 @@ class PositionExecutionStateOut(BaseModel):
 class RecommendationFeedbackIn(BaseModel):
     status: str
     reason: str = ""
+    revision_id: int | None = None
+    client_event_id: str | None = None
+    executed_quantity: int | None = Field(default=None, ge=0)
+    executed_ratio: float | None = Field(default=None, ge=0, le=1)
+    executed_price: float | None = Field(default=None, ge=0)
 
 
 class RecommendationFeedbackOut(BaseModel):
     id: int
     recommendation_id: int
+    recommendation_revision_id: int | None = None
     status: str
+    status_code: str = ""
     reason: str
+    client_event_id: str | None = None
     trade_id: int | None = None
     result: str = "待匹配成交"
+    executed_quantity: int = 0
+    executed_ratio: float = 0
+    executed_price: float = 0
     created_at: datetime
+    updated_at: datetime | None = None
 
     class Config:
         from_attributes = True

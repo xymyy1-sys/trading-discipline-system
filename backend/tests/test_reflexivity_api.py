@@ -139,27 +139,32 @@ def test_market_reflexivity_endpoint_uses_previous_fund_snapshot(
         market_main_net_inflow_yi=-220.0,
     ))
     db_session.commit()
-    calls: list[bool] = []
+    calls: list[str] = []
 
-    def fake_regime(db, force_refresh=False):
-        calls.append(force_refresh)
+    def fake_regime(db):
+        calls.append("read")
         return _regime()
 
-    monkeypatch.setattr(market_routes, "get_market_regime", fake_regime)
+    monkeypatch.setattr(market_routes, "read_market_regime", fake_regime)
+    monkeypatch.setattr(
+        market_routes,
+        "get_market_regime",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("GET reflexivity must not collect a market regime")
+        ),
+    )
     monkeypatch.setattr(
         market_routes.market_provider,
         "sector_opening_breadth",
-        lambda **_kwargs: {
-            "trade_date": "2026-07-14",
-            "data_quality": "missing",
-            "sample_count": 0,
-        },
+        lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError("GET reflexivity must not call a market-data provider")
+        ),
     )
     response = client.get("/api/market/reflexivity?force_refresh=true")
 
     assert response.status_code == 200
     payload = response.json()
-    assert calls == [True]
+    assert calls == ["read"]
     assert payload["level"] == "MARKET"
     assert payload["current_scenario"] == "REBOUND_ABSORPTION"
     assert any("较前一快照改善" in item for item in payload["current_evidence"])
@@ -306,22 +311,22 @@ def test_consensus_high_open_fade_returns_data_gap_without_prior_session(db_sess
     assert result["input_evidence"]["previous_reversal"]["previous_trade_date"] is None
 
 
-def test_stock_reflexivity_endpoint_accepts_force_refresh_without_network(
+def test_stock_reflexivity_endpoint_reads_persisted_regime_without_network(
     client, monkeypatch
 ):
-    calls: list[bool] = []
+    calls: list[str] = []
     monkeypatch.setattr(stock_routes, "decision_card", lambda db, code: _card())
 
-    def fake_regime(db, force_refresh=False):
-        calls.append(force_refresh)
+    def fake_regime(db):
+        calls.append("read")
         return _regime()
 
-    monkeypatch.setattr(stock_routes, "get_market_regime", fake_regime)
+    monkeypatch.setattr(stock_routes, "read_market_regime", fake_regime)
     response = client.get("/api/stocks/600879/reflexivity?force_refresh=true")
 
     assert response.status_code == 200
     payload = response.json()
-    assert calls == [True]
+    assert calls == ["read"]
     assert payload["level"] == "STOCK"
     assert payload["code"] == "600879"
     assert "个股相对板块强弱" in payload["missing_fields"]
@@ -333,12 +338,13 @@ def test_stock_reflexivity_endpoint_injects_matched_holding_sector_evidence(
 ):
     now = datetime.now(timezone(timedelta(hours=8))).replace(tzinfo=None)
     monkeypatch.setattr(stock_routes, "decision_card", lambda db, code: _card())
-    monkeypatch.setattr(stock_routes, "get_market_regime", lambda db, force_refresh=False: _regime())
+    monkeypatch.setattr(stock_routes, "read_market_regime", lambda db: _regime())
     monkeypatch.setattr(stock_routes, "_find_holding_by_code", lambda db, code: object())
-    monkeypatch.setattr(
-        stock_routes,
-        "_cached_holding_theme_flow_profile",
-        lambda holding: {
+    network_flags: list[bool] = []
+
+    def cached_profile(holding, *, allow_network=False):
+        network_flags.append(allow_network)
+        return {
             "matched": True,
             "data_quality": "cached_source_timestamped",
             "source": "eastmoney-sector-flow",
@@ -350,12 +356,18 @@ def test_stock_reflexivity_endpoint_injects_matched_holding_sector_evidence(
             "flow_acceleration": -0.08,
             "flow_turning": "TURN_TO_OUTFLOW",
             "flow_kinetics_reliable": True,
-        },
+        }
+
+    monkeypatch.setattr(
+        stock_routes,
+        "_cached_holding_theme_flow_profile",
+        cached_profile,
     )
 
     response = client.get("/api/stocks/600879/reflexivity")
 
     assert response.status_code == 200
+    assert network_flags == [False]
     payload = response.json()
     assert "个股相对板块强弱" not in payload["missing_fields"]
     scenarios = {item["code"]: item for item in payload["scenarios"]}

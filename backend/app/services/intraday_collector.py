@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import sys
 import threading
@@ -17,6 +18,7 @@ from app.api.helpers.seesaw import _market_seesaw_monitor
 from app.core.database import SessionLocal
 from app.core.trading_clock import shanghai_now_naive
 from app.models.trading import (
+    DataCaptureSnapshot,
     Holding,
     IntradayCollectionRun,
     IntradayEvidenceEvent,
@@ -52,6 +54,7 @@ COLLECTOR_ENABLED = True
 _collector_task: asyncio.Task | None = None
 _market_regime_task: asyncio.Task | None = None
 _collector_running = False
+_collector_guard = threading.Lock()
 _collector_last_success_at: datetime | None = None
 _collector_last_error = ""
 _market_regime_running = False
@@ -72,7 +75,7 @@ _simulation_shadow_equity_last_success_at: datetime | None = None
 _simulation_shadow_equity_last_error = ""
 _close_expectation_date: str | None = None
 _close_shadow_equity_date: str | None = None
-_notified_recommendations: set[int] = set()
+_notified_recommendations: set[str] = set()
 _failure_counts: dict[str, int] = {}
 _circuit_until: dict[str, float] = {}
 _queue_depth = 0
@@ -85,6 +88,55 @@ opportunity_sector_expansion_service = SectorExpansionRadarService()
 SHADOW_ACCOUNT_AUTOMATION_KEY = "system-shadow-forward-v1"
 SHADOW_ACCOUNT_NAME = "系统影子验证账户"
 SHADOW_ACCOUNT_INITIAL_CASH = 1_000_000
+
+
+def _persist_opportunity_radar_snapshot(
+    db,
+    radar: dict[str, object],
+    *,
+    trade_date: str,
+    captured_at: datetime,
+) -> DataCaptureSnapshot:
+    """Upsert the page read model produced by the background collector."""
+
+    payload = json.dumps(radar, ensure_ascii=False, sort_keys=True, default=str)
+    row = (
+        db.query(DataCaptureSnapshot)
+        .filter(
+            DataCaptureSnapshot.trade_date == trade_date,
+            DataCaptureSnapshot.data_type == "opportunity_radar",
+            DataCaptureSnapshot.target_code == "market",
+        )
+        .order_by(DataCaptureSnapshot.captured_at.desc(), DataCaptureSnapshot.id.desc())
+        .first()
+    )
+    if row is None:
+        row = DataCaptureSnapshot(
+            trade_date=trade_date,
+            data_type="opportunity_radar",
+            target_code="market",
+            target_name="全市场机会雷达",
+        )
+    sources = radar.get("source") or []
+    if not isinstance(sources, list):
+        sources = [str(sources)]
+    quality = str(radar.get("data_quality") or "missing")
+    row.captured_at = captured_at
+    row.source = "+".join(str(item) for item in sources if str(item)) or "opportunity-radar-collector"
+    row.raw_value_json = "{}"
+    row.normalized_value_json = payload
+    row.quality = quality
+    row.is_stale = False
+    row.is_degraded = quality not in {"ok", "complete", "realtime"}
+    row.is_estimated = False
+    row.is_complete = quality in {"ok", "complete", "realtime"}
+    row.status = "available" if quality != "missing" else "missing"
+    row.error_message = ""
+    row.raw_payload_hash = hashlib.sha256(payload.encode("utf-8")).hexdigest()
+    db.add(row)
+    db.commit()
+    db.refresh(row)
+    return row
 
 
 def _shanghai_now_naive() -> datetime:
@@ -376,6 +428,19 @@ def run_market_regime_collection_once(
         if not force and _recent_market_regime_exists(db, collected_at):
             return None
         result = get_market_regime(db, force_refresh=force)
+        # Warm the read-only page caches in the same low-frequency background
+        # loop.  Failures are isolated: overseas or theme data must never make
+        # the domestic market-regime snapshot fail.
+        try:
+            from app.services.global_market import global_market_service
+
+            global_market_service.snapshot(force_refresh=force)
+        except Exception:
+            pass
+        try:
+            opportunity_market_provider.theme_radar(force_refresh=force)
+        except Exception:
+            pass
         _failure_counts.pop(key, None)
         _circuit_until.pop(key, None)
         _market_regime_last_error = ""
@@ -570,7 +635,7 @@ def run_opportunity_radar_collection_once(
     if trade_date != evaluated_at.date().isoformat():
         result["skipped"] = "historical_read_only"
         return result
-    if not _is_market_watch_time(evaluated_at):
+    if not force_refresh and not _is_market_watch_time(evaluated_at):
         result["skipped"] = "outside_market_watch_time"
         return result
     if not _opportunity_radar_guard.acquire(blocking=False):
@@ -593,7 +658,14 @@ def run_opportunity_radar_collection_once(
             holdings,
             now=evaluated_at,
         )
+        snapshot = _persist_opportunity_radar_snapshot(
+            db,
+            radar,
+            trade_date=trade_date,
+            captured_at=evaluated_at,
+        )
         result["persisted_count"] = len(emitted)
+        result["snapshot_id"] = snapshot.id
         result["data_quality"] = str(radar.get("data_quality") or "missing")
         result["notes"] = list(radar.get("notes") or [])
         _opportunity_radar_last_error = ""
@@ -609,7 +681,39 @@ def run_opportunity_radar_collection_once(
     return result
 
 
+def _record_skipped_collection_run(trigger: str) -> IntradayCollectionRun:
+    """Return a transient skip result without competing for SQLite's writer lock.
+
+    The active collector already owns the only useful persistence transaction.
+    Recording a second, skipped request in another session can itself raise
+    ``database is locked`` and turn a harmless duplicate click into an error.
+    """
+    now = _shanghai_now_naive()
+    return IntradayCollectionRun(
+        started_at=now,
+        finished_at=now,
+        trigger=trigger,
+        status="skipped",
+        holding_count=0,
+        snapshot_count=0,
+        event_count=0,
+        notes_json=_json_dumps(["已有一轮盘中采集正在运行，本次请求已跳过，未重复写入证据。"]),
+        error_message="already_running",
+    )
+
+
 def run_intraday_collection_once(trigger: str = "manual") -> IntradayCollectionRun:
+    """Run one writer at a time across manual and scheduler entry points."""
+
+    if not _collector_guard.acquire(blocking=False):
+        return _record_skipped_collection_run(trigger)
+    try:
+        return _run_intraday_collection_once_locked(trigger)
+    finally:
+        _collector_guard.release()
+
+
+def _run_intraday_collection_once_locked(trigger: str = "manual") -> IntradayCollectionRun:
     global _queue_depth
     db = SessionLocal()
     started = _shanghai_now_naive()
@@ -697,14 +801,21 @@ def run_intraday_collection_once(trigger: str = "manual") -> IntradayCollectionR
             snapshot_count += 1
             notes.append(f"{holding.code} {holding.name} 已采集 {stage}。")
             recommendation = state.recommendation
-            if recommendation and recommendation.id and recommendation.id not in _notified_recommendations and recommendation.level in {"WARNING", "CRITICAL"}:
+            notification_key = (
+                f"revision:{int(recommendation.revision_id)}"
+                if recommendation and recommendation.revision_id
+                else f"recommendation:{int(recommendation.id)}"
+                if recommendation and recommendation.id
+                else None
+            )
+            if recommendation and notification_key and notification_key not in _notified_recommendations and recommendation.level in {"WARNING", "CRITICAL"}:
                 try:
                     from app.services.dingtalk import send_dingtalk_markdown
                     send_dingtalk_markdown(
                         f"{holding.name} 风险提醒",
                         f"### {holding.name}（{holding.code}）\n\n- 风险级别：{recommendation.level}\n- 操作建议：{recommendation.action}\n- 当前状态：{recommendation.state}\n\n请登录知行交易驾驶舱核对完整证据。",
                     )
-                    _notified_recommendations.add(recommendation.id)
+                    _notified_recommendations.add(notification_key)
                 except RuntimeError:
                     pass
                 except Exception as notify_exc:

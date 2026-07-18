@@ -271,6 +271,33 @@ def _ensure_outcomes(
     source_limit: int,
 ) -> int:
     cutoff = (now.date() - timedelta(days=max(1, lookback_days))).isoformat()
+    # A legacy base row may have been evaluated before immutable revisions
+    # were introduced.  Once a recommendation owns revisions, retaining that
+    # base row as a valid sample counts the same signal twice.  Preserve it for
+    # audit, but explicitly supersede it before creating/reusing revision rows.
+    revision_recommendation_ids = {
+        int(row[0])
+        for row in db.query(ActionRecommendationRevision.recommendation_id).distinct().all()
+    }
+    if revision_recommendation_ids:
+        legacy_rows = (
+            db.query(RecommendationOutcome)
+            .filter(
+                RecommendationOutcome.recommendation_id.in_(revision_recommendation_ids),
+                RecommendationOutcome.recommendation_revision_id.is_(None),
+            )
+            .all()
+        )
+        for row in legacy_rows:
+            if row.status == "invalid" and row.data_quality == "superseded":
+                continue
+            row.status = "invalid"
+            row.data_quality = "superseded"
+            row.invalid_reason = "已由不可变建议版本替代；保留本行仅用于审计。"
+            row.updated_at = now
+            db.add(row)
+        if legacy_rows:
+            db.flush()
     sources = _signal_sources(db, cutoff_date=cutoff, source_limit=source_limit)
     if not sources:
         return 0
@@ -580,6 +607,14 @@ def recommendation_outcome_summary(db: Session) -> dict[str, Any]:
     valid_total = len(rows) - status_counts.get("invalid", 0)
     return {
         "total": len(rows),
+        # Complete/reliable rows are objective *price* outcomes only.  They are
+        # not yet action-direction-adjusted or de-correlated by decision
+        # episode, so they must never unlock model-effectiveness claims.
+        "price_outcome_sample_count": len(eligible),
+        "calibration_eligible_sample_count": 0,
+        # Backward-compatible alias for older clients.
+        "eligible_sample_count": len(eligible),
+        "minimum_calibration_samples": 30,
         "status_counts": status_counts,
         "quality_counts": dict(sorted(quality_counts.items())),
         "complete_coverage_pct": round(status_counts.get("complete", 0) / valid_total * 100, 2)
@@ -597,7 +632,8 @@ def recommendation_outcome_summary(db: Session) -> dict[str, Any]:
         },
         "note": (
             "收益率是建议时点后的客观价格变化；mfe/mae 兼容字段分别表示"
-            "采样区间最高涨幅和最低跌幅，未按建议动作方向解释，不等同于规则胜率。"
+            "采样区间最高涨幅和最低跌幅，未按建议动作方向解释，也未按标的日/"
+            "决策事件去相关，因此当前校准合格样本固定为0，不等同于规则胜率。"
         ),
     }
 

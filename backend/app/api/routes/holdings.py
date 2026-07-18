@@ -4,13 +4,15 @@ import io
 import json
 import re
 from datetime import datetime
+from uuid import uuid4
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from sqlalchemy import and_, or_
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from app.core.database import DemoSessionLocal, SessionLocal, get_db
 from app.core.config import get_settings
-from app.models.trading import Holding, TradeLog
+from app.models.trading import AccountState, Holding, TradeLog
 from app.schemas.trading import (
     HoldingCreate,
     HoldingUpdate,
@@ -47,14 +49,14 @@ from app.services.account_risk import account_risk
 from app.api.helpers.holdings_calc import (
     _account_state,
     _account_total_asset,
+    _read_account_total_asset,
     _holding_out,
     _refresh_holding_prices,
     _rebuild_holdings_from_trades,
     _holding_account_summary
 )
-from app.api.helpers.execution import build_execution_states, build_position_execution_state
+from app.api.helpers.execution import read_persisted_execution_state, read_persisted_execution_states
 from app.api.helpers.seesaw import _holding_theme_profile, _sector_family
-from app.api.helpers.quotes import _latest_a_share_quotes, _quote_lookup_code
 from app.api.helpers.decision import (
     _event_in_trade_session,
     build_t_eligibility,
@@ -80,9 +82,57 @@ from app.services.intraday_collector import (
     collector_status,
     run_intraday_collection_once,
 )
-from app.core.trading_clock import shanghai_today
+from app.services.recommendation_feedback import (
+    rematch_execution_feedback_for_codes,
+    resolve_feedback_execution,
+)
+from app.core.trading_clock import shanghai_now_naive, shanghai_today
 
 router = APIRouter()
+
+
+FEEDBACK_STATUS_CODES = {
+    "已执行": "executed",
+    "部分执行": "partially_executed",
+    "不同意": "rejected",
+    "忽略": "rejected",
+    "暂不执行": "rejected",
+    "未成交": "not_filled",
+    "没看到": "not_seen",
+    "纪律违背": "discipline_breach",
+}
+
+
+def _feedback_event_matches(
+    row: RecommendationFeedback,
+    *,
+    recommendation_id: int,
+    revision_id: int | None,
+    status_code: str,
+    payload: RecommendationFeedbackIn,
+) -> bool:
+    return (
+        row.recommendation_id == recommendation_id
+        and row.recommendation_revision_id == revision_id
+        and _feedback_status_code(row) == status_code
+        and str(row.reason or "") == str(payload.reason or "")
+        and (
+            payload.executed_quantity is None
+            or int(row.executed_quantity or 0) == int(payload.executed_quantity)
+        )
+        and (
+            payload.executed_ratio is None
+            or abs(float(row.executed_ratio or 0) - float(payload.executed_ratio)) < 1e-9
+        )
+        and (
+            payload.executed_price is None
+            or abs(float(row.executed_price or 0) - float(payload.executed_price)) < 1e-9
+        )
+    )
+
+
+def _feedback_status_code(row: RecommendationFeedback) -> str:
+    return str(row.status_code or FEEDBACK_STATUS_CODES.get(str(row.status or ""), "legacy_unknown"))
 
 
 @router.get("/data-quality/health", response_model=DataQualityHealthOut)
@@ -172,10 +222,32 @@ def _collection_run_out(row: IntradayCollectionRun | None) -> CollectionRunOut |
 
 
 def _recommendation_out(row: ActionRecommendation, db: Session) -> ActionRecommendationOut:
-    feedback = db.query(RecommendationFeedback).filter(RecommendationFeedback.recommendation_id == row.id).order_by(RecommendationFeedback.created_at.desc()).first()
+    revision = db.get(ActionRecommendationRevision, row.current_revision_id) if row.current_revision_id else None
+    if revision is None:
+        revision = (
+            db.query(ActionRecommendationRevision)
+            .filter(ActionRecommendationRevision.recommendation_id == row.id)
+            .order_by(ActionRecommendationRevision.version.desc(), ActionRecommendationRevision.id.desc())
+            .first()
+        )
+    feedback_query = db.query(RecommendationFeedback).filter(
+        RecommendationFeedback.recommendation_id == row.id,
+    )
+    if revision is not None:
+        feedback_query = feedback_query.filter(
+            RecommendationFeedback.recommendation_revision_id == revision.id,
+        )
+    feedback = feedback_query.order_by(
+        RecommendationFeedback.created_at.desc(),
+        RecommendationFeedback.id.desc(),
+    ).first()
     return ActionRecommendationOut(
         id=row.id,
+        revision_id=revision.id if revision else None,
+        revision_version=int(revision.version or 0) if revision else 0,
+        decision_hash=str(revision.decision_hash or row.current_decision_hash or "") if revision else str(row.current_decision_hash or ""),
         trade_date=row.trade_date,
+        target_key=row.target_key or "",
         holding_id=row.holding_id,
         code=row.code,
         name=row.name,
@@ -188,6 +260,7 @@ def _recommendation_out(row: ActionRecommendation, db: Session) -> ActionRecomme
         invalid_conditions=json.loads(row.invalid_conditions_json or "[]"),
         recovery_conditions=json.loads(row.recovery_conditions_json or "[]"),
         created_at=row.created_at,
+        updated_at=row.updated_at,
         expires_at=row.expires_at,
         acknowledged_at=row.acknowledged_at,
         feedback_status=feedback.status if feedback else "",
@@ -196,8 +269,17 @@ def _recommendation_out(row: ActionRecommendation, db: Session) -> ActionRecomme
 
 @router.get("/alerts/active", response_model=list[ActionRecommendationOut])
 def list_active_alerts(include_acknowledged: bool = False, db: Session = Depends(get_db)) -> list[ActionRecommendationOut]:
-    now = datetime.now()
-    rows = db.query(ActionRecommendation).filter(ActionRecommendation.expires_at.is_not(None), ActionRecommendation.expires_at >= now).order_by(ActionRecommendation.created_at.desc()).limit(500).all()
+    now = shanghai_now_naive()
+    rows = (
+        db.query(ActionRecommendation)
+        .filter(
+            ActionRecommendation.expires_at.is_not(None),
+            ActionRecommendation.expires_at >= now,
+        )
+        .order_by(ActionRecommendation.updated_at.desc(), ActionRecommendation.id.desc())
+        .limit(500)
+        .all()
+    )
     latest_by_target: dict[str, ActionRecommendation] = {}
     for row in rows:
         if not include_acknowledged and row.acknowledged_at is not None:
@@ -212,7 +294,7 @@ def acknowledge_alert(recommendation_id: int, db: Session = Depends(get_db)) -> 
     row = db.get(ActionRecommendation, recommendation_id)
     if row is None:
         raise HTTPException(status_code=404, detail="recommendation not found")
-    row.acknowledged_at = datetime.now()
+    row.acknowledged_at = shanghai_now_naive()
     db.commit()
     db.refresh(row)
     return _recommendation_out(row, db)
@@ -240,10 +322,46 @@ def _ensure_time_stop_rules(db: Session) -> list[TimeStopRule]:
         db.commit()
     return db.query(TimeStopRule).order_by(TimeStopRule.id.asc()).all()
 
+
+def _read_time_stop_rules(db: Session) -> list[TimeStopRule | TimeStopRuleOut]:
+    """Return persisted rules plus transient built-in defaults.
+
+    Seeding belongs to the explicit update path.  This keeps a first visit to
+    the execution page from inserting three rows and advancing database
+    timestamps before the user has changed any setting.
+    """
+    persisted = db.query(TimeStopRule).order_by(TimeStopRule.id.asc()).all()
+    by_type = {row.script_type: row for row in persisted}
+    outputs: list[TimeStopRule | TimeStopRuleOut] = []
+    default_types: set[str] = set()
+    for script_type, display_name, deadline, minutes, bars, window, reseal_pct in DEFAULT_TIME_STOP_RULE_ROWS:
+        default_types.add(script_type)
+        row = by_type.get(script_type)
+        if row is not None:
+            outputs.append(row)
+            continue
+        outputs.append(TimeStopRuleOut(
+            id=None,
+            script_type=script_type,
+            display_name=display_name,
+            confirmation_deadline=deadline,
+            below_vwap_minutes=minutes,
+            below_vwap_min_bars=bars,
+            recent_window_minutes=window,
+            failed_limit_reseal_pct=reseal_pct,
+            enabled=True,
+            updated_at=datetime(1970, 1, 1),
+        ))
+    outputs.extend(row for row in persisted if row.script_type not in default_types)
+    return outputs
+
 @router.get("/account/asset", response_model=AccountAssetOut)
 def get_account_asset(db: Session = Depends(get_db)) -> AccountAssetOut:
-    state = _account_state(db)
-    return AccountAssetOut(total_asset=state.total_asset, updated_at=state.updated_at)
+    state = db.get(AccountState, 1)
+    return AccountAssetOut(
+        total_asset=_read_account_total_asset(db),
+        updated_at=state.updated_at if state is not None else None,
+    )
 
 @router.put("/account/asset", response_model=AccountAssetOut)
 def update_account_asset(
@@ -282,13 +400,12 @@ def create_holding(payload: HoldingCreate, db: Session = Depends(get_db)) -> Hol
 @router.get("/holdings", response_model=list[HoldingOut])
 def list_holdings(db: Session = Depends(get_db)) -> list[HoldingOut]:
     holdings = db.query(Holding).order_by(Holding.updated_at.desc()).all()
-    account_total_asset = _account_total_asset(db)
-    price_notes = _refresh_holding_prices(holdings, db)
+    account_total_asset = _read_account_total_asset(db)
     return [
         _holding_out(
             item,
             account_total_asset=account_total_asset,
-            price_note=price_notes.get(item.code, ""),
+            price_note="持久化行情；点击“采集并刷新行情”获取最新价格。",
         )
         for item in holdings
     ]
@@ -297,7 +414,7 @@ def list_holdings(db: Session = Depends(get_db)) -> list[HoldingOut]:
 @router.get("/holdings/summary", response_model=HoldingAccountSummaryOut)
 def holding_account_summary(db: Session = Depends(get_db)) -> HoldingAccountSummaryOut:
     holdings = db.query(Holding).order_by(Holding.updated_at.desc()).all()
-    account_total_asset = _account_total_asset(db)
+    account_total_asset = _read_account_total_asset(db)
     outputs = [_holding_out(item, account_total_asset=account_total_asset) for item in holdings]
     return HoldingAccountSummaryOut(
         **_holding_account_summary(outputs, account_total_asset, db),
@@ -364,7 +481,7 @@ def _csv_download(filename: str, headers: list[str], rows: list[list[object]]) -
 @router.get("/exports/holdings.csv")
 def export_holdings(db: Session = Depends(get_db)) -> StreamingResponse:
     holdings = db.query(Holding).order_by(Holding.code.asc()).all()
-    total_asset = _account_total_asset(db)
+    total_asset = _read_account_total_asset(db)
     outputs = [_holding_out(item, account_total_asset=total_asset) for item in holdings]
     return _csv_download(
         f"holdings-{datetime.now().date().isoformat()}.csv",
@@ -420,8 +537,12 @@ def list_holding_execution_states(
     force_refresh: bool = False,
     db: Session = Depends(get_db),
 ) -> list[PositionExecutionStateOut]:
+    # Kept only for old clients.  GET is deliberately side-effect free even
+    # when ``force_refresh=true``; callers that need a fresh persisted sample
+    # must POST /api/intraday-collector/run first.
+    _ = force_refresh
     holdings = db.query(Holding).order_by(Holding.updated_at.desc()).all()
-    return build_execution_states(db, holdings, force_refresh=force_refresh)
+    return read_persisted_execution_states(db, holdings)
 
 @router.get("/holdings/{holding_id}/execution-state", response_model=PositionExecutionStateOut)
 def get_holding_execution_state(
@@ -431,12 +552,7 @@ def get_holding_execution_state(
     holding = db.get(Holding, holding_id)
     if holding is None:
         raise HTTPException(status_code=404, detail="holding not found")
-    try:
-        quotes = _latest_a_share_quotes([holding.code])
-    except Exception:
-        quotes = {}
-    quote = quotes.get(_quote_lookup_code(holding.code, quotes), {})
-    return build_position_execution_state(db, holding, quote=quote)
+    return read_persisted_execution_state(db, holding)
 
 
 @router.get("/holdings/{holding_id}/state-history", response_model=list[PositionStateHistoryOut])
@@ -580,8 +696,8 @@ def trigger_intraday_collector() -> CollectionRunOut:
 
 
 @router.get("/time-stop-rules", response_model=list[TimeStopRuleOut])
-def list_time_stop_rules(db: Session = Depends(get_db)) -> list[TimeStopRuleOut]:
-    return _ensure_time_stop_rules(db)
+def list_time_stop_rules(db: Session = Depends(get_db)) -> list[TimeStopRule | TimeStopRuleOut]:
+    return _read_time_stop_rules(db)
 
 
 @router.put("/time-stop-rules/{script_type}", response_model=TimeStopRuleOut)
@@ -767,26 +883,95 @@ def create_recommendation_feedback(
     recommendation = db.get(ActionRecommendation, recommendation_id)
     if recommendation is None:
         raise HTTPException(status_code=404, detail="recommendation not found")
-    allowed_statuses = {"已执行", "部分执行", "不同意", "未成交", "没看到", "纪律违背"}
-    if payload.status not in allowed_statuses:
+    status_code = FEEDBACK_STATUS_CODES.get(payload.status)
+    if status_code is None:
         raise HTTPException(status_code=422, detail="unsupported feedback status")
-    matched_trade = None
-    if payload.status in {"已执行", "部分执行", "未成交"}:
-        matched_trade = (
-            db.query(TradeLog)
-            .filter(TradeLog.code == recommendation.code, TradeLog.traded_at >= recommendation.created_at)
-            .order_by(TradeLog.traded_at.desc(), TradeLog.id.desc())
-            .first()
+
+    revision = None
+    if payload.revision_id is not None:
+        revision = db.get(ActionRecommendationRevision, payload.revision_id)
+        if revision is None or revision.recommendation_id != recommendation_id:
+            raise HTTPException(status_code=422, detail="revision does not belong to recommendation")
+    else:
+        compatible_revisions = (
+            db.query(ActionRecommendationRevision)
+            .filter(ActionRecommendationRevision.recommendation_id == recommendation_id)
+            .order_by(ActionRecommendationRevision.version.desc(), ActionRecommendationRevision.id.desc())
+            .limit(2)
+            .all()
         )
+        if len(compatible_revisions) > 1:
+            raise HTTPException(
+                status_code=422,
+                detail="recommendation has multiple revisions; revision_id is required",
+            )
+        revision = compatible_revisions[0] if compatible_revisions else None
+
+    client_event_id = (payload.client_event_id or "").strip() or str(uuid4())
+    existing = (
+        db.query(RecommendationFeedback)
+        .filter(RecommendationFeedback.client_event_id == client_event_id)
+        .first()
+    )
+    revision_id = revision.id if revision else None
+    if existing is not None:
+        if not _feedback_event_matches(
+            existing,
+            recommendation_id=recommendation_id,
+            revision_id=revision_id,
+            status_code=status_code,
+            payload=payload,
+        ):
+            raise HTTPException(status_code=409, detail="client_event_id already used for different feedback")
+        return existing
+
+    now = shanghai_now_naive()
+    resolution = resolve_feedback_execution(
+        db,
+        recommendation,
+        revision,
+        status_code,
+        executed_quantity=payload.executed_quantity,
+        executed_ratio=payload.executed_ratio,
+        executed_price=payload.executed_price,
+    )
     feedback = RecommendationFeedback(
         recommendation_id=recommendation_id,
+        recommendation_revision_id=revision_id,
         status=payload.status,
+        status_code=status_code,
         reason=payload.reason,
-        trade_id=matched_trade.id if matched_trade else None,
-        result="已匹配成交" if matched_trade else ("明确未成交" if payload.status == "未成交" else "待匹配成交"),
+        client_event_id=client_event_id,
+        trade_id=resolution.trade_id,
+        result=resolution.result,
+        executed_quantity=resolution.executed_quantity,
+        executed_ratio=resolution.executed_ratio,
+        executed_price=resolution.executed_price,
+        created_at=now,
+        updated_at=now,
     )
     db.add(feedback)
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError:
+        # Concurrent retries with the same event id race between the initial
+        # lookup and INSERT.  The unique key is authoritative: return the row
+        # created by the winner when the payload is identical.
+        db.rollback()
+        concurrent = (
+            db.query(RecommendationFeedback)
+            .filter(RecommendationFeedback.client_event_id == client_event_id)
+            .first()
+        )
+        if concurrent is not None and _feedback_event_matches(
+            concurrent,
+            recommendation_id=recommendation_id,
+            revision_id=revision_id,
+            status_code=status_code,
+            payload=payload,
+        ):
+            return concurrent
+        raise HTTPException(status_code=409, detail="client_event_id already used for different feedback")
     db.refresh(feedback)
     return feedback
 
@@ -803,16 +988,24 @@ def recommendation_history(recommendation_id: int, db: Session = Depends(get_db)
         .all()
     )
     return [{
+        "id": row.id,
         "version": row.version,
+        "previous_revision_id": row.previous_revision_id,
+        "decision_hash": row.decision_hash,
         "level": row.level,
         "state": row.state,
         "action": row.action,
         "recommended_ratio": row.recommended_ratio,
+        "trigger_events": json.loads(row.trigger_events_json or "[]"),
         "evidence": json.loads(row.evidence_json or "[]"),
         "counter_evidence": json.loads(row.counter_evidence_json or "[]"),
         "invalid_conditions": json.loads(row.invalid_conditions_json or "[]"),
         "recovery_conditions": json.loads(row.recovery_conditions_json or "[]"),
+        "decision_context": json.loads(row.decision_context_json or "{}"),
+        "rule_version": row.rule_version,
         "created_at": row.created_at.isoformat(),
+        "effective_until": row.effective_until.isoformat() if row.effective_until else None,
+        "is_current": row.id == recommendation.current_revision_id,
     } for row in rows]
 
 @router.get("/holdings/{holding_id}/t-eligibility", response_model=TEligibilityOut)
@@ -865,6 +1058,10 @@ def update_holding_t_plan(
 def sync_holdings_from_trades(db: Session = Depends(get_db)) -> HoldingSyncOut:
     trades = db.query(TradeLog).order_by(TradeLog.traded_at.asc(), TradeLog.id.asc()).all()
     notes = _rebuild_holdings_from_trades(trades, db)
+    rematched = rematch_execution_feedback_for_codes(db, {trade.code for trade in trades})
+    if rematched:
+        db.commit()
+        notes.append(f"已同步重匹配 {rematched} 条执行反馈。")
     holdings = db.query(Holding).order_by(Holding.updated_at.desc()).all()
     account_total_asset = _account_total_asset(db)
     price_notes = _refresh_holding_prices(holdings, db)

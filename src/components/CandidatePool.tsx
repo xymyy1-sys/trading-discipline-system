@@ -33,6 +33,27 @@ export default function CandidatePool() {
         setError(error instanceof Error ? error.message : '自动观察池行情源不可用')
       }).finally(() => setLoading(false))
   }
+  const refresh = () => {
+    setLoading(true)
+    setError('')
+    setNotice('正在获取最新收盘证据并更新观察池…')
+    fetch(`${API_BASE}/api/watchlist-recommendations/refresh`, { method: 'POST' })
+      .then(async response => {
+        if (!response.ok) throw new Error((await response.json()).detail || `重新分析失败（${response.status}）`)
+        return response.json()
+      })
+      .then(data => {
+        const rows = Array.isArray(data) ? data : []
+        setRecommendations(rows)
+        setNotice(`观察池已更新，共 ${rows.length} 只；手动标的继续保留。`)
+        window.dispatchEvent(new CustomEvent('watchlist-updated', { detail: rows }))
+      })
+      .catch(error => {
+        setNotice('')
+        setError(error instanceof Error ? error.message : '自动观察池重新分析失败')
+      })
+      .finally(() => setLoading(false))
+  }
   useEffect(load, [])
   const addManual = () => {
     const code = manual.code.trim()
@@ -50,7 +71,7 @@ export default function CandidatePool() {
       .catch(() => setError('剔除观察标的失败'))
   }
   return <section className="candidate-pool">
-    <header className="pos-header"><div><h2>自动观察池</h2><p>从主线题材核心股和涨停梯队中自动发现，不再只给已有持仓打分。</p></div><button className="refresh-btn inline" onClick={load} disabled={loading}><RefreshCcw size={14} />{loading ? '分析中' : '重新分析'}</button></header>
+    <header className="pos-header"><div><h2>自动观察池</h2><p>从主线题材核心股和涨停梯队中自动发现，不再只给已有持仓打分。</p></div><button className="refresh-btn inline" onClick={refresh} disabled={loading}><RefreshCcw size={14} />{loading ? '分析中' : '重新分析'}</button></header>
     <div className="watchlist-editor panel"><input value={manual.code} onChange={e => setManual(value => ({ ...value, code: e.target.value.replace(/\D/g, '').slice(0, 6) }))} placeholder="6位股票代码"/><input value={manual.name} onChange={e => setManual(value => ({ ...value, name: e.target.value }))} placeholder="股票名称（可选）"/><button type="button" className="grade-btn" onClick={addManual}><Plus size={14}/>加入观察池</button><span>系统每日盘后按当日数据换届10只；剔除后当日不递补，手动加入永久保留。</span></div>
     <p className="entry-discipline-banner">纪律底线：没有盘前计划、交易模式不匹配、直线冲高未回踩，任意一项成立都禁止下单。宁可错过，不做模式外交易。</p>
     {notice && <p className="refresh-note">{notice}</p>}

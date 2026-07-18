@@ -26,8 +26,14 @@ export default function NextDayPlans({ mode = 'holding' }: { mode?: 'holding' | 
   const loadPlans = useCallback((refresh = false) => {
     setLoading(true)
     setStatusText('')
-    fetch(`${API_BASE}/api/next-day-plans${refresh ? '?refresh=true' : ''}`)
-      .then(r => r.json())
+    fetch(
+      `${API_BASE}/api/next-day-plans${refresh ? '/refresh' : ''}`,
+      refresh ? { method: 'POST' } : undefined,
+    )
+      .then(async response => {
+        if (!response.ok) throw new Error(await response.text())
+        return response.json()
+      })
       .then((data: Plan[]) => {
         const scoped = data.filter(item => mode === 'limit' ? item.plan_type === 'limit_up_auction' : item.plan_type === 'holding')
         setPlans(scoped)
@@ -43,13 +49,12 @@ export default function NextDayPlans({ mode = 'holding' }: { mode?: 'holding' | 
           if (refreshed) setDraft(refreshed)
         }
       })
+      .catch(() => setStatusText(refresh ? '刷新失败，继续保留原计划' : '计划读取失败，请稍后重试'))
       .finally(() => setLoading(false))
   }, [mode])
 
   useEffect(() => {
-    if (mode === 'limit') {
-      fetch(`${API_BASE}/api/next-day-plans/generate`, { method: 'POST' }).finally(() => loadPlans())
-    } else loadPlans()
+    loadPlans()
     const loadSeesaw = () => {
       fetch(`${API_BASE}/api/market/seesaw-monitor`)
         .then(r => r.json())

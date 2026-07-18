@@ -93,7 +93,12 @@ def _display_flow_signal(value: str | None) -> str:
         .replace("资金转弱", "订单流方向转弱")
     )
 
-def _market_seesaw_monitor(holdings: list[Holding], force_refresh: bool = False) -> MarketSeesawOut:
+def _market_seesaw_monitor(
+    holdings: list[Holding],
+    force_refresh: bool = False,
+    *,
+    cache_only: bool = False,
+) -> MarketSeesawOut:
     if not holdings:
         return MarketSeesawOut(
             source="empty",
@@ -109,28 +114,39 @@ def _market_seesaw_monitor(holdings: list[Holding], force_refresh: bool = False)
     industry_flows: list[Any] = []
     concept_flows: list[Any] = []
     sources: list[str] = []
-    cached_concept = None if force_refresh else _get_response_cache("sector-flow|概念资金流|今日")
-    cached_industry = None if force_refresh else _get_response_cache("sector-flow|行业资金流|今日")
+    cached_concept = None if force_refresh else _get_response_cache(
+        "sector-flow|概念资金流|今日",
+        allow_stale=cache_only,
+    )
+    cached_industry = None if force_refresh else _get_response_cache(
+        "sector-flow|行业资金流|今日",
+        allow_stale=cache_only,
+    )
     try:
-        concept_flow = cached_concept or market_provider.sector_flow(
+        concept_flow = cached_concept or (None if cache_only else market_provider.sector_flow(
             flow_type="概念资金流",
             period="今日",
             force_refresh=force_refresh,
-        )
-        concept_flows.extend(concept_flow.inflow + concept_flow.outflow)
-        sources.append(f"概念订单流算法/{concept_flow.source}")
+        ))
+        if concept_flow is not None:
+            concept_flows.extend(concept_flow.inflow + concept_flow.outflow)
+            sources.append(f"概念订单流算法/{concept_flow.source}")
     except Exception as exc:
         notes.append(f"概念订单流算法不可用：{exc}")
     try:
-        industry_flow = cached_industry or market_provider.sector_flow(
+        industry_flow = cached_industry or (None if cache_only else market_provider.sector_flow(
             flow_type="行业资金流",
             period="今日",
             force_refresh=force_refresh,
-        )
-        industry_flows.extend(industry_flow.inflow + industry_flow.outflow)
-        sources.append(f"行业订单流算法/{industry_flow.source}")
+        ))
+        if industry_flow is not None:
+            industry_flows.extend(industry_flow.inflow + industry_flow.outflow)
+            sources.append(f"行业订单流算法/{industry_flow.source}")
     except Exception as exc:
         notes.append(f"行业订单流算法不可用：{exc}")
+
+    if cache_only and cached_concept is None and cached_industry is None:
+        notes.append("尚无板块订单流缓存，请点击刷新或等待后台采集。")
 
     unique_industry_flows = _dedupe_sector_flows(industry_flows)
     unique_concept_flows = _dedupe_sector_flows(concept_flows)
@@ -138,7 +154,7 @@ def _market_seesaw_monitor(holdings: list[Holding], force_refresh: bool = False)
     ranked_concept = sorted(unique_concept_flows, key=lambda item: (item.net_inflow, item.main_inflow, item.change_pct), reverse=True)
     industry_rank_map = {item.name: idx for idx, item in enumerate(ranked_industry, start=1)}
     concept_rank_map = {item.name: idx for idx, item in enumerate(ranked_concept, start=1)}
-    limit_counts = _sector_limit_up_counts()
+    limit_counts = {} if cache_only else _sector_limit_up_counts()
 
     inflow_targets = [
         _sector_rotation_item(item, industry_rank_map.get(item.name, 0), limit_counts)
@@ -151,7 +167,7 @@ def _market_seesaw_monitor(holdings: list[Holding], force_refresh: bool = False)
         if item.net_inflow < 0 or item.main_inflow < 0
     ]
 
-    quotes = _latest_quotes_for_holdings(holdings)
+    quotes = {} if cache_only else _latest_quotes_for_holdings(holdings)
     holding_alerts = [
         _holding_seesaw_item(
             holding,
@@ -161,6 +177,7 @@ def _market_seesaw_monitor(holdings: list[Holding], force_refresh: bool = False)
             ranked_concept,
             concept_rank_map,
             inflow_targets,
+            allow_network=not cache_only,
         )
         for holding in holdings
     ]
@@ -286,6 +303,8 @@ def _holding_seesaw_item(
     ranked_concept_flows: list[Any],
     concept_rank_map: dict[str, int],
     inflow_targets: list[SectorRotationItem],
+    *,
+    allow_network: bool = True,
 ) -> HoldingSeesawItem:
     current = _safe_float(quote.get("price")) or holding.current_price
     prev_close = _safe_float(quote.get("prev_close"))
@@ -295,7 +314,7 @@ def _holding_seesaw_item(
     pullback = max(0.0, high_change_pct - change_pct)
     estimated_vwap = _estimated_vwap(quote)
     below_vwap = bool(estimated_vwap and current < estimated_vwap)
-    theme_profile = _holding_theme_profile(holding)
+    theme_profile = _holding_theme_profile(holding, allow_network=allow_network)
     holding_theme = str(theme_profile["primary"])
     theme_tags = list(theme_profile["tags"])
     theme_flow = _holding_theme_flow_profile(
@@ -304,6 +323,7 @@ def _holding_seesaw_item(
         industry_rank_map,
         ranked_concept_flows,
         concept_rank_map,
+        allow_network=allow_network,
     )
     matched_flow = theme_flow["primary_flow"]
     theme_flow_sectors = list(theme_flow["sectors"])
@@ -610,12 +630,17 @@ def _holding_theme_flow_profile(
     industry_rank_map: dict[str, int],
     ranked_concept_flows: list[Any] | None = None,
     concept_rank_map: dict[str, int] | None = None,
+    *,
+    allow_network: bool = True,
 ) -> dict[str, Any]:
-    theme_profile = _holding_theme_profile(holding)
-    preferred_flow = _preferred_industry_board_flow(holding)
+    theme_profile = _holding_theme_profile(holding, allow_network=allow_network)
+    preferred_flow = _preferred_industry_board_flow(
+        holding,
+        allow_network=allow_network,
+    )
     matched_industry: list[tuple[int, Any]] = []
     for flow in ranked_industry_flows:
-        score = _holding_flow_match_score(holding, flow)
+        score = _holding_flow_match_score(holding, flow, allow_network=allow_network)
         if score > 0:
             matched_industry.append((score, flow))
     matched_industry.sort(
@@ -641,7 +666,7 @@ def _holding_theme_flow_profile(
     pullback_pct = pullback / abs(peak) * 100 if peak else 0.0
     concept_matched: list[tuple[int, Any]] = []
     for flow in ranked_concept_flows or []:
-        score = _holding_flow_match_score(holding, flow)
+        score = _holding_flow_match_score(holding, flow, allow_network=allow_network)
         if score > 0:
             concept_matched.append((score, flow))
     concept_matched.sort(
@@ -782,17 +807,21 @@ def _timeline_points_with_current(timeline: dict[str, float], current: float) ->
         points[-1]["value"] = final
     return points
 
-def _cached_holding_theme_flow_profile(holding: Holding) -> dict[str, Any]:
+def _cached_holding_theme_flow_profile(
+    holding: Holding,
+    *,
+    allow_network: bool = False,
+) -> dict[str, Any]:
     industry_flows = []
     concept_flows = []
     cached_industry = _get_response_cache("sector-flow|行业资金流|今日")
     cached_concept = _get_response_cache("sector-flow|概念资金流|今日")
-    if cached_industry is None:
+    if allow_network and cached_industry is None:
         try:
             cached_industry = market_provider.sector_flow(flow_type="行业资金流", period="今日")
         except Exception:
             pass
-    if cached_concept is None:
+    if allow_network and cached_concept is None:
         try:
             cached_concept = market_provider.sector_flow(flow_type="概念资金流", period="今日")
         except Exception:
@@ -812,7 +841,8 @@ def _cached_holding_theme_flow_profile(holding: Holding) -> dict[str, Any]:
         ranked_industry,
         industry_rank_map,
         ranked_concept,
-        concept_rank_map
+        concept_rank_map,
+        allow_network=allow_network,
     )
     primary_flow = profile.get("primary_flow")
     # Expose the *matched* board observation rather than asking downstream
@@ -905,8 +935,14 @@ def _broader_industry_timeline(
                 best = (match_score, tl)
     return best[1] if best else None
 
-def _preferred_industry_board_flow(holding: Holding) -> Any | None:
-    theme_profile = _holding_theme_profile(holding)
+def _preferred_industry_board_flow(
+    holding: Holding,
+    *,
+    allow_network: bool = True,
+) -> Any | None:
+    theme_profile = _holding_theme_profile(holding, allow_network=allow_network)
+    if not allow_network:
+        return None
     for secid, display_name in theme_profile.get("preferred_industry_boards", []) or []:
         try:
             flow = _fetch_eastmoney_h5_board_flow(str(secid), str(display_name))
@@ -978,8 +1014,13 @@ def _eastmoney_h5_board_timeline(secid: str, current: float) -> list[Any]:
     now_label = shanghai_now_naive().strftime("%H:%M")
     return [SimpleNamespace(time=now_label, value=current)]
 
-def _holding_flow_match_score(holding: Holding, flow: Any) -> int:
-    theme_profile = _holding_theme_profile(holding)
+def _holding_flow_match_score(
+    holding: Holding,
+    flow: Any,
+    *,
+    allow_network: bool = True,
+) -> int:
+    theme_profile = _holding_theme_profile(holding, allow_network=allow_network)
     target_text = (
         f"{holding.name} {holding.code} {holding.position_type} {holding.next_discipline} "
         f"{theme_profile['primary']} {' '.join(theme_profile['tags'])} "
@@ -1016,7 +1057,11 @@ def _aggregate_flow_timeline(flows: list[Any]) -> dict[str, float]:
             totals[time_key] += float(getattr(point, "value", 0) or 0)
     return dict(totals)
 
-def _holding_stock_board_profile(holding: Holding) -> dict[str, Any]:
+def _holding_stock_board_profile(
+    holding: Holding,
+    *,
+    allow_network: bool = True,
+) -> dict[str, Any]:
     code = str(holding.code or "").strip()
     cache_key = f"stock-board-profile|{code}"
     cached = _get_response_cache(cache_key)
@@ -1029,6 +1074,8 @@ def _holding_stock_board_profile(holding: Holding) -> dict[str, Any]:
         "source": "",
     }
     if not re.fullmatch(r"\d{6}", code):
+        return profile
+    if not allow_network:
         return profile
 
     try:
@@ -1135,10 +1182,14 @@ def _fetch_em_stock_board(code: str) -> dict[str, Any]:
 def _holding_theme_prefers_concept_flow(theme_profile: dict[str, Any]) -> bool:
     return bool(theme_profile.get("prefer_concept"))
 
-def _holding_theme_profile(holding: Holding) -> dict[str, Any]:
+def _holding_theme_profile(
+    holding: Holding,
+    *,
+    allow_network: bool = True,
+) -> dict[str, Any]:
     code = str(holding.code or "").strip()
     name = str(holding.name or "")
-    board_profile = _holding_stock_board_profile(holding)
+    board_profile = _holding_stock_board_profile(holding, allow_network=allow_network)
     industry = str(board_profile.get("industry") or "")
     concepts = [
         str(item)

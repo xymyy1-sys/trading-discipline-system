@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 from datetime import datetime
+import json
 from types import SimpleNamespace
 
 import pytest
 
-from app.models.trading import WatchlistEntry
+from app.models.trading import DataCaptureSnapshot, WatchlistEntry
 from app.schemas.trading import LimitUpGroupOut, LimitUpLadderOut, LimitUpStockOut
 
 
@@ -57,9 +58,16 @@ def test_daily_auto_rotation_preserves_manual_and_does_not_refill_same_day(clien
     added = client.post("/api/watchlist", json={"code": "600999", "name": "永久手动标的"})
     assert added.status_code == 200
 
-    first = client.get("/api/watchlist-recommendations")
+    first = client.post("/api/watchlist-recommendations/refresh")
     assert first.status_code == 200
     assert {item["code"] for item in first.json()} == {"600101", "600102", "600103", "600999"}
+
+    persisted = client.get("/api/watchlist-recommendations")
+    assert persisted.status_code == 200
+    assert persisted.json() == first.json()
+    assert db_session.query(DataCaptureSnapshot).filter(
+        DataCaptureSnapshot.data_type == "watchlist_recommendation",
+    ).count() == 4
 
     removed = client.delete("/api/watchlist/600101?exit_reason=当天手动剔除")
     assert removed.status_code == 200
@@ -72,7 +80,7 @@ def test_daily_auto_rotation_preserves_manual_and_does_not_refill_same_day(clien
     assert "600104" not in same_day_codes  # deletion must not be back-filled
 
     state["ladder"] = _ladder("2026-07-14", "600101", "600104")
-    next_day = client.get("/api/watchlist-recommendations")
+    next_day = client.post("/api/watchlist-recommendations/refresh")
     assert next_day.status_code == 200
     assert {item["code"] for item in next_day.json()} == {"600101", "600104", "600999"}
 
@@ -189,7 +197,7 @@ def test_older_provider_snapshot_never_rotates_persisted_pool_backwards(client, 
     ))
     db_session.commit()
 
-    response = client.get("/api/watchlist-recommendations")
+    response = client.post("/api/watchlist-recommendations/refresh")
     assert response.status_code == 200
     assert [item["code"] for item in response.json()] == ["600499"]
     current = db_session.query(WatchlistEntry).filter(WatchlistEntry.code == "600499").one()
@@ -226,3 +234,57 @@ def test_completed_trading_day_switches_only_after_close():
 
     assert _completed_trading_days(1, datetime(2026, 7, 14, 14, 59)) == ["2026-07-13"]
     assert _completed_trading_days(1, datetime(2026, 7, 14, 15, 0)) == ["2026-07-14"]
+
+
+def test_refresh_persists_complete_positive_and_negative_evidence(client, db_session, monkeypatch):
+    from app.services.market_data import MarketDataProvider
+
+    ladder = LimitUpLadderOut(
+        source="东方财富涨停池",
+        trade_date="2026-07-14",
+        updated_at=datetime(2026, 7, 14, 15, 1),
+        groups=[LimitUpGroupOut(
+            level=1,
+            label="首板",
+            stocks=[LimitUpStockOut(
+                code="600501",
+                name="证据持久化标的",
+                price=12.5,
+                turnover=35.0,
+                sealed_amount=0.8,
+                break_count=1,
+                consecutive_limit_days=3,
+                concepts=["测试题材"],
+            )],
+        )],
+        clusters=[], summary=[], notes=[],
+    )
+    monkeypatch.setattr(MarketDataProvider, "theme_radar", lambda _self: (_ for _ in ()).throw(RuntimeError("unavailable")))
+    monkeypatch.setattr(MarketDataProvider, "limit_up_ladder", lambda _self, *_args: ladder)
+    monkeypatch.setattr(MarketDataProvider, "broken_limit_pool", lambda _self, *_args: [])
+
+    refreshed = client.post("/api/watchlist-recommendations/refresh")
+    assert refreshed.status_code == 200
+    refreshed_row = refreshed.json()[0]
+    assert refreshed_row["code"] == "600501"
+    assert refreshed_row["score"] > 0
+    assert refreshed_row["reasons"]
+    assert any("炸板" in value or "换手率" in value for value in refreshed_row["risks"])
+    assert refreshed_row["expectation_status"] != "等待建立预期"
+    assert refreshed_row["volume_price_status"]
+    assert refreshed_row["risk_reward_ratio"] is not None
+
+    persisted = client.get("/api/watchlist-recommendations")
+    assert persisted.status_code == 200
+    assert persisted.json() == refreshed.json()
+
+    capture = db_session.query(DataCaptureSnapshot).filter(
+        DataCaptureSnapshot.data_type == "watchlist_recommendation",
+        DataCaptureSnapshot.target_code == "600501",
+        DataCaptureSnapshot.trade_date == "2026-07-14",
+    ).one()
+    payload = json.loads(capture.normalized_value_json)
+    assert payload["reasons"] == refreshed_row["reasons"]
+    assert payload["risks"] == refreshed_row["risks"]
+    assert capture.is_complete is True
+    assert capture.status == "ok"

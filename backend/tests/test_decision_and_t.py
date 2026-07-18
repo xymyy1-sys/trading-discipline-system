@@ -13,7 +13,14 @@ from app.api.helpers.decision import (
 from app.core.trading_clock import shanghai_now_naive, shanghai_today
 from app.api.helpers.plan_calc import _default_next_day_plan, refresh_limit_expectation_stage
 from app.api.helpers.volume_price import _minute_reversal_signals, build_volume_price_snapshot
-from app.models.trading import ExpectationRule, Holding, MarketRegimeSnapshot, NextDayPlan, TTradePlan
+from app.models.trading import (
+    DataCaptureSnapshot,
+    ExpectationRule,
+    Holding,
+    MarketRegimeSnapshot,
+    NextDayPlan,
+    TTradePlan,
+)
 from app.schemas.trading import TTradePlanUpdate
 from app.services.t_trading_engine import update_t_plan
 
@@ -158,7 +165,7 @@ def test_market_entry_context_blocks_same_day_expired_snapshot(db_session):
     assert market["data_quality"] == "stale"
 
 
-def test_market_entry_context_builds_temperature_without_user_opening_tab(db_session, monkeypatch):
+def test_market_entry_context_does_not_build_temperature_on_cache_miss(db_session, monkeypatch):
     from app.api.helpers import decision
     from app.api.routes import market
 
@@ -196,10 +203,11 @@ def test_market_entry_context_builds_temperature_without_user_opening_tab(db_ses
         {"industry": "半导体", "concepts": []},
     )
 
-    assert calls == ["行业"]
-    assert sector["crowding_evaluated"] is True
-    assert sector["overheated"] is True
-    assert sector["flow_turning"] == "INFLOW_FADING"
+    assert calls == []
+    assert sector["crowding_evaluated"] is False
+    assert sector["temperature_data_quality"] == "missing"
+    assert sector.get("overheated") is not True
+    assert sector["flow_turning"] == "INFLOW_ACCELERATING"
 
 
 def test_expectation_snapshot_uses_editable_threshold_rule(db_session):
@@ -563,7 +571,37 @@ def test_volume_price_snapshot_calculates_minute_flow_metrics(db_session):
     assert any("上攻段成交额" in item for item in snapshot.evidence)
 
 
-def test_decision_card_includes_volume_price(client, monkeypatch):
+def _persist_quote_snapshot(
+    db_session,
+    code: str,
+    quote: dict,
+    *,
+    captured_at: datetime | None = None,
+) -> DataCaptureSnapshot:
+    trade_date = str(
+        quote.get("minute_bar_trade_date")
+        or (captured_at or datetime.now()).date().isoformat()
+    )
+    row = DataCaptureSnapshot(
+        trade_date=trade_date,
+        captured_at=captured_at or datetime.now(),
+        source="test-persisted-collector",
+        data_type="stock_minute",
+        target_code=code,
+        target_name=str(quote.get("name") or code),
+        raw_value_json=json.dumps(quote, ensure_ascii=False),
+        normalized_value_json="{}",
+        quality="realtime",
+        status="ok",
+        is_complete=True,
+    )
+    db_session.add(row)
+    db_session.commit()
+    db_session.refresh(row)
+    return row
+
+
+def test_decision_card_includes_volume_price(client, db_session):
     quote = {
         "price": 10.5,
         "change_pct": 2.0,
@@ -577,11 +615,13 @@ def test_decision_card_includes_volume_price(client, monkeypatch):
         "note": "东方财富实时行情",
     }
 
-    monkeypatch.setattr("app.api.helpers.decision.quote_for_code", lambda code: quote)
+    _persist_quote_snapshot(db_session, "600004", quote)
+    before = db_session.query(DataCaptureSnapshot).count()
 
     response = client.get("/api/stocks/600004/decision-card")
 
     assert response.status_code == 200
+    assert db_session.query(DataCaptureSnapshot).count() == before
     payload = response.json()
     assert payload["volume_price"]["code"] == "600004"
     assert payload["volume_price"]["pattern"]
@@ -671,15 +711,13 @@ def _deep_v_recovery_quote(trade_date: str):
     }
 
 
-def test_decision_card_maps_order_flow_units_and_provenance(client, monkeypatch):
+def test_decision_card_maps_order_flow_units_and_provenance(client, db_session, monkeypatch):
     from app.api.helpers import decision
-    from app.api.helpers import quotes
 
     now = datetime(2026, 7, 17, 10, 10)
     quote = _effective_flow_quote("2026-07-17")
+    _persist_quote_snapshot(db_session, "600040", quote, captured_at=now)
     monkeypatch.setattr(decision, "shanghai_now_naive", lambda *_args, **_kwargs: now)
-    monkeypatch.setattr(decision, "quote_for_code", lambda _code: quote)
-    monkeypatch.setattr(quotes, "_daily_history_metrics", lambda _code: {})
 
     response = client.get("/api/stocks/600040/decision-card")
 
@@ -701,7 +739,6 @@ def test_decision_card_maps_order_flow_units_and_provenance(client, monkeypatch)
 
 def test_decision_card_maps_deep_v_repair_to_watch_without_panic_sell_or_chase(client, db_session, monkeypatch):
     from app.api.helpers import decision
-    from app.api.helpers import quotes
 
     db_session.add(Holding(
         code="600043",
@@ -715,9 +752,8 @@ def test_decision_card_maps_deep_v_repair_to_watch_without_panic_sell_or_chase(c
     db_session.commit()
     now = datetime(2026, 7, 17, 10, 10)
     quote = _deep_v_recovery_quote("2026-07-17")
+    _persist_quote_snapshot(db_session, "600043", quote, captured_at=now)
     monkeypatch.setattr(decision, "shanghai_now_naive", lambda *_args, **_kwargs: now)
-    monkeypatch.setattr(decision, "quote_for_code", lambda _code: quote)
-    monkeypatch.setattr(quotes, "_daily_history_metrics", lambda _code: {})
 
     response = client.get("/api/stocks/600043/decision-card")
 
@@ -736,15 +772,13 @@ def test_decision_card_maps_deep_v_repair_to_watch_without_panic_sell_or_chase(c
     assert any("未站稳分时均价前禁止追高、补仓" in item for item in payload["forbidden_actions"])
 
 
-def test_decision_card_labels_prior_session_close_without_calling_it_live(client, monkeypatch):
+def test_decision_card_labels_prior_session_close_without_calling_it_live(client, db_session, monkeypatch):
     from app.api.helpers import decision
-    from app.api.helpers import quotes
 
     wall_clock = datetime(2026, 7, 18, 10, 10)
     quote = _effective_flow_quote("2026-07-17", start_hour=14, start_minute=51)
+    _persist_quote_snapshot(db_session, "600041", quote, captured_at=datetime(2026, 7, 17, 15, 0))
     monkeypatch.setattr(decision, "shanghai_now_naive", lambda *_args, **_kwargs: wall_clock)
-    monkeypatch.setattr(decision, "quote_for_code", lambda _code: quote)
-    monkeypatch.setattr(quotes, "_daily_history_metrics", lambda _code: {})
 
     response = client.get("/api/stocks/600041/decision-card")
 
@@ -756,15 +790,13 @@ def test_decision_card_labels_prior_session_close_without_calling_it_live(client
     assert any("不代表当前盘前或盘中的实时状态" in item for item in evidence["warnings"])
 
 
-def test_decision_card_rejects_future_trade_date_instead_of_replaying_it(client, monkeypatch):
+def test_decision_card_rejects_future_trade_date_instead_of_replaying_it(client, db_session, monkeypatch):
     from app.api.helpers import decision
-    from app.api.helpers import quotes
 
     wall_clock = datetime(2026, 7, 17, 10, 10)
     quote = _effective_flow_quote("2026-07-18")
+    _persist_quote_snapshot(db_session, "600042", quote, captured_at=datetime(2026, 7, 18, 10, 10))
     monkeypatch.setattr(decision, "shanghai_now_naive", lambda *_args, **_kwargs: wall_clock)
-    monkeypatch.setattr(decision, "quote_for_code", lambda _code: quote)
-    monkeypatch.setattr(quotes, "_daily_history_metrics", lambda _code: {})
 
     response = client.get("/api/stocks/600042/decision-card")
 

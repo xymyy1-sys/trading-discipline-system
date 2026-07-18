@@ -209,6 +209,17 @@ class GlobalMarketService:
     # Alias kept explicit for route authors and background collectors.
     get_snapshot = snapshot
 
+    def read_cached_snapshot(self) -> dict[str, Any]:
+        """Return the process cache without triggering any external loader."""
+        if self._cached is not None:
+            return self._cached.to_dict()
+        generated_at = _ensure_timezone(self.now_provider()).isoformat()
+        return GlobalMarketSnapshot(
+            generated_at=generated_at,
+            quality="missing",
+            notes=["尚无外围市场缓存，请点击刷新或等待后台采集。"],
+        ).to_dict()
+
     def _build_snapshot(self) -> GlobalMarketSnapshot:
         current = _ensure_timezone(self.now_provider())
         notes: list[str] = []

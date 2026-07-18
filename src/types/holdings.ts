@@ -170,6 +170,9 @@ export interface ActionRecommendation {
   expires_at: string | null;
   acknowledged_at: string | null;
   feedback_status: string;
+  revision_id?: number | null;
+  revision_version?: number | null;
+  decision_hash?: string | null;
 }
 
 export interface AccountRisk {

@@ -2169,6 +2169,17 @@ h4 {
   border-radius: 8px;
 }
 
+.execution-card.risk-high {
+  border-left: 5px solid #dc2626;
+  background: color-mix(in srgb, #dc2626 6%, var(--bg-surface));
+}
+
+.execution-card.risk-medium {
+  border-left: 5px solid #d97706;
+  background: color-mix(in srgb, #d97706 5%, var(--bg-surface));
+}
+
+
 .execution-card-head {
   display: flex;
   justify-content: space-between;
@@ -2366,6 +2377,24 @@ h4 {
 
 .execution-feedback button:hover {
   border-color: var(--info);
+  color: var(--ink);
+}
+
+.execution-feedback button:disabled {
+  cursor: not-allowed;
+  opacity: .45;
+}
+
+.execution-feedback-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: auto;
+  color: var(--ink-muted);
+  font-size: 12px;
+}
+
+.execution-feedback-status b {
   color: var(--ink);
 }
 
@@ -5585,7 +5614,6 @@ h3 {
 .command-list article.risk-high > span { color: #dc2626; font-weight: 800; }
 .command-list article.risk-medium { border-left: 4px solid #d97706; padding-left: 10px; background: color-mix(in srgb, #d97706 5%, transparent); }
 .command-list article.risk-medium > span { color: #b45309; font-weight: 700; }
-.command-list article.risk-low { border-left: 4px solid #eab308; padding-left: 10px; }
 .command-list article.opportunity-positive { border-left: 4px solid #059669; padding-left: 10px; background: color-mix(in srgb, #059669 6%, transparent); }
 .command-list article.opportunity-positive > span { color: #047857; font-weight: 800; }
 .command-list article.opportunity-watch { border-left: 4px solid #2563eb; padding-left: 10px; background: color-mix(in srgb, #2563eb 5%, transparent); }
@@ -5594,6 +5622,16 @@ h3 {
 .command-list article summary { cursor: pointer; color: var(--accent); }
 .decision-basis { display: grid; gap: 6px; margin-top: 8px; padding: 10px; border-radius: 7px; background: var(--surface); }
 .decision-basis p { margin: 0; color: var(--ink-muted); line-height: 1.5; }
+.decision-basis-view { display: grid; gap: 6px; min-width: 0; }
+.decision-basis-view > p { display: grid; grid-template-columns: 70px 12px minmax(0, 1fr); gap: 5px; margin: 0; color: var(--ink-muted); line-height: 1.5; }
+.decision-basis-view > p b { color: var(--ink); font-size: 12px; }
+.decision-basis-view > p span { color: var(--ink-dim); }
+.decision-basis-view .decision-basis-empty { display: block; color: var(--ink-muted); }
+.decision-basis-view footer { display: flex; justify-content: space-between; gap: 12px; padding-top: 7px; border-top: 1px dashed var(--line); color: var(--ink-dim); font-size: 11px; }
+.task-actions { grid-column: 2 / -1; display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin-top: 6px; }
+.task-actions button { min-height: 28px; padding: 0 10px; border-radius: 6px; cursor: pointer; }
+.task-actions .task-feedback-button { border: 1px solid #2563eb; background: color-mix(in srgb, #2563eb 8%, transparent); color: #1d4ed8; }
+.task-actions small { color: var(--ink-muted); }
 .market-evidence-link { width: fit-content; padding: 0; border: 0; background: transparent; color: var(--accent); cursor: pointer; text-align: left; }
 .market-evidence-panel { margin-top: 12px; padding: 14px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); }
 .market-evidence-panel h4 { margin: 0 0 8px; }

@@ -1,8 +1,8 @@
-import { useEffect, useMemo, useState } from 'react'
-import { X } from 'lucide-react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
+import { RefreshCcw, X } from 'lucide-react'
 import type { SectorFlowItem, SectorDetail } from '../../types'
 import { API_BASE } from '../../api'
-import { cachedJson } from '../../apiCache'
+import { cachedJson, setCachedJson } from '../../apiCache'
 import FlowKineticsEvidence from '../FlowKineticsEvidence'
 
 function MiniStat({ label, value, tone }: { label: string; value: string; tone?: 'up' | 'down' }) {
@@ -27,10 +27,12 @@ export default function SectorDetailDrawer({
 }) {
   const [detail, setDetail] = useState<SectorDetail | null>(null)
   const [loading, setLoading] = useState(true)
+  const [error, setError] = useState('')
   const [sortKey, setSortKey] = useState<'change_pct' | 'amount' | 'consecutive_limit_days'>('change_pct')
 
-  useEffect(() => {
+  const loadDetail = useCallback((force = false) => {
     setLoading(true)
+    setError('')
     const query = new URLSearchParams({
       name: item.name,
       flow_type: flowType,
@@ -38,13 +40,23 @@ export default function SectorDetailDrawer({
     })
     if (item.board_code) query.set('board_code', item.board_code)
     if (item.provider) query.set('provider', item.provider)
-    cachedJson<SectorDetail>(
-      `sector-detail:${flowType}:${period}:${item.name}:${item.board_code ?? ''}`,
-      `${API_BASE}/api/market/sector-detail?${query.toString()}`,
-    )
+    const cacheKey = `sector-detail:${flowType}:${period}:${item.name}:${item.board_code ?? ''}`
+    const basePath = `${API_BASE}/api/market/sector-detail`
+    const request = force
+      ? fetch(`${basePath}/refresh?${query.toString()}`, { method: 'POST' }).then(async response => {
+          if (!response.ok) throw new Error(`HTTP ${response.status}`)
+          return setCachedJson<SectorDetail>(cacheKey, await response.json())
+        })
+      : cachedJson<SectorDetail>(cacheKey, `${basePath}?${query.toString()}`)
+    request
       .then(({ data }) => setDetail(data))
+      .catch(() => setError('成分股刷新失败；保留上一份可用快照'))
       .finally(() => setLoading(false))
   }, [flowType, item, period])
+
+  useEffect(() => {
+    loadDetail()
+  }, [loadDetail])
 
   const rows = useMemo(() => {
     const source = detail?.constituents ?? []
@@ -107,7 +119,12 @@ export default function SectorDetailDrawer({
             <button className={sortKey === 'amount' ? 'selected' : ''} type="button" onClick={() => setSortKey('amount')}>成交额</button>
             <button className={sortKey === 'consecutive_limit_days' ? 'selected' : ''} type="button" onClick={() => setSortKey('consecutive_limit_days')}>连板</button>
           </div>
-          <span>{loading ? '加载中' : `${rows.length} 只成分股`}</span>
+          <div className="drawer-refresh-actions">
+            <span>{loading ? '加载中' : `${rows.length} 只成分股`}</span>
+            <button className="refresh-btn inline" type="button" onClick={() => loadDetail(true)} disabled={loading}>
+              <RefreshCcw size={14} />{loading ? '刷新中' : '刷新成分股'}
+            </button>
+          </div>
         </div>
 
         {detail?.limit_up_stocks.length ? (
@@ -148,10 +165,12 @@ export default function SectorDetailDrawer({
               ))}
             </tbody>
           </table>
-          {!loading && rows.length === 0 && <div className="empty-msg">暂无成分股数据</div>}
+          {!loading && rows.length === 0 && (
+            <div className="empty-msg">{error || detail?.notes?.[0] || '暂无成分股数据，请点击“刷新成分股”采集真实数据'}</div>
+          )}
         </div>
 
-        {detail?.notes.length ? <p className="plain-text">{detail.notes.join('；')}</p> : null}
+        {detail?.notes?.length ? <p className="plain-text">{detail.notes.join('；')}</p> : null}
       </aside>
     </div>
   )

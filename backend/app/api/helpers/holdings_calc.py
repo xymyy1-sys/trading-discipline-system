@@ -193,6 +193,25 @@ def _account_state(db: Session) -> AccountState:
         db.refresh(state)
     return state
 
+def _read_account_total_asset(db: Session) -> float:
+    """Read the account total without seeding ``account_state``.
+
+    Page loads must not mutate the database.  Before the user explicitly
+    saves an account asset, keep the historical fallback to the latest
+    positive total carried by a holding, but return it as a transient value.
+    """
+    state = db.get(AccountState, 1)
+    if state is not None:
+        return float(state.total_asset or 0.0)
+    inferred_total_asset = (
+        db.query(Holding.total_asset)
+        .filter(Holding.total_asset > 0)
+        .order_by(Holding.updated_at.desc())
+        .limit(1)
+        .scalar()
+    )
+    return float(inferred_total_asset or 0.0)
+
 def _account_total_asset(db: Session) -> float:
     return _account_state(db).total_asset
 

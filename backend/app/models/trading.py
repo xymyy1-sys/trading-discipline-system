@@ -372,13 +372,20 @@ class IntradayEvidenceEvent(Base):
 
 class ActionRecommendation(Base):
     __tablename__ = "action_recommendations"
+    __table_args__ = (
+        UniqueConstraint("trade_date", "target_key", name="uq_action_recommendations_trade_target"),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
     trade_date: Mapped[str] = mapped_column(String(16), index=True)
+    target_key: Mapped[str] = mapped_column(String(64), default="", index=True)
     holding_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
     code: Mapped[str] = mapped_column(String(16), index=True)
     name: Mapped[str] = mapped_column(String(64), default="")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc), index=True)
+    updated_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, index=True)
+    current_revision_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
+    current_decision_hash: Mapped[str] = mapped_column(String(64), default="", index=True)
     level: Mapped[str] = mapped_column(String(24), default="INFO")
     state: Mapped[str] = mapped_column(String(48), default="")
     action: Mapped[str] = mapped_column(String(64), default="")
@@ -394,19 +401,28 @@ class ActionRecommendation(Base):
 
 class ActionRecommendationRevision(Base):
     __tablename__ = "action_recommendation_revisions"
+    __table_args__ = (
+        UniqueConstraint("recommendation_id", "version", name="uq_action_recommendation_revision_version"),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
     recommendation_id: Mapped[int] = mapped_column(Integer, index=True)
+    previous_revision_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
     version: Mapped[int] = mapped_column(Integer, default=1)
+    decision_hash: Mapped[str] = mapped_column(String(64), default="", index=True)
     level: Mapped[str] = mapped_column(String(24), default="INFO")
     state: Mapped[str] = mapped_column(String(48), default="")
     action: Mapped[str] = mapped_column(String(64), default="")
     recommended_ratio: Mapped[float] = mapped_column(Float, default=0)
+    trigger_events_json: Mapped[str] = mapped_column(Text, default="[]")
     evidence_json: Mapped[str] = mapped_column(Text, default="[]")
     counter_evidence_json: Mapped[str] = mapped_column(Text, default="[]")
     invalid_conditions_json: Mapped[str] = mapped_column(Text, default="[]")
     recovery_conditions_json: Mapped[str] = mapped_column(Text, default="[]")
+    decision_context_json: Mapped[str] = mapped_column(Text, default="{}")
+    rule_version: Mapped[str] = mapped_column(String(32), default="execution-v2")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc), index=True)
+    effective_until: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, index=True)
 
 
 class RecommendationOutcome(Base):
@@ -474,11 +490,18 @@ class RecommendationFeedback(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
     recommendation_id: Mapped[int] = mapped_column(Integer, index=True)
+    recommendation_revision_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
     status: Mapped[str] = mapped_column(String(24), default="暂不执行")
+    status_code: Mapped[str] = mapped_column(String(32), default="", index=True)
     reason: Mapped[str] = mapped_column(Text, default="")
+    client_event_id: Mapped[str | None] = mapped_column(String(64), nullable=True, unique=True, index=True)
     trade_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
     result: Mapped[str] = mapped_column(String(32), default="待匹配成交")
+    executed_quantity: Mapped[int] = mapped_column(Integer, default=0)
+    executed_ratio: Mapped[float] = mapped_column(Float, default=0)
+    executed_price: Mapped[float] = mapped_column(Float, default=0)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc))
+    updated_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, index=True)
 
 
 class ExpectationSnapshot(Base):

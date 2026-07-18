@@ -39,6 +39,22 @@ from app.api.helpers.quotes import (
     _normalize_code
 )
 
+
+_LEGACY_FEEDBACK_CODES = {
+    "已执行": "executed",
+    "部分执行": "partially_executed",
+    "不同意": "rejected",
+    "忽略": "rejected",
+    "暂不执行": "rejected",
+    "未成交": "not_filled",
+    "没看到": "not_seen",
+    "纪律违背": "discipline_breach",
+}
+
+
+def _feedback_status_code(row: RecommendationFeedback) -> str:
+    return str(row.status_code or _LEGACY_FEEDBACK_CODES.get(str(row.status or ""), "legacy_unknown"))
+
 def _json_obj(raw: str) -> dict[str, Any]:
     try:
         value = json.loads(raw or "{}")
@@ -88,23 +104,49 @@ def _review_calibration_summary(db: Session) -> ReviewCalibrationSummaryOut:
     trades = db.query(TradeLog).order_by(TradeLog.traded_at.desc()).limit(100).all()
     reviews = db.query(TradeReview).order_by(TradeReview.created_at.desc()).limit(100).all()
     plans = db.query(NextDayPlan).order_by(NextDayPlan.plan_date.desc(), NextDayPlan.updated_at.desc()).limit(100).all()
-    feedback = db.query(RecommendationFeedback).order_by(RecommendationFeedback.created_at.desc()).limit(100).all()
-    feedback_by_recommendation = {item.recommendation_id: item for item in feedback}
+    feedback = db.query(RecommendationFeedback).order_by(
+        RecommendationFeedback.created_at.desc(), RecommendationFeedback.id.desc(),
+    ).limit(200).all()
+    feedback_by_signal: dict[tuple[str, int], RecommendationFeedback] = {}
+    for item in feedback:
+        signal_key = (
+            ("revision", int(item.recommendation_revision_id))
+            if item.recommendation_revision_id is not None
+            else ("legacy", int(item.recommendation_id))
+        )
+        feedback_by_signal.setdefault(signal_key, item)
+    current_feedback = list(feedback_by_signal.values())
     recommendations = db.query(ActionRecommendation).order_by(ActionRecommendation.created_at.desc()).limit(100).all()
+    feedback_by_recommendation: dict[int, RecommendationFeedback] = {}
+    for recommendation in recommendations:
+        candidates = [
+            item for item in current_feedback
+            if item.recommendation_id == recommendation.id
+            and (
+                recommendation.current_revision_id is None
+                or item.recommendation_revision_id == recommendation.current_revision_id
+            )
+        ]
+        if candidates:
+            feedback_by_recommendation[recommendation.id] = max(
+                candidates, key=lambda row: (row.created_at, row.id),
+            )
 
     done_reviews = [item for item in reviews if item.status == "done"]
     pending_review_count = sum(1 for item in reviews if item.status in {"pending", "failed"})
     avg_score = round(sum(item.discipline_score for item in done_reviews) / len(done_reviews)) if done_reviews else 0
     plan_reviews = [item for item in plans if item.review_expectation or item.review_execution or item.review_deviation]
     missing_plan_reviews = [item for item in plans if not (item.review_expectation or item.review_execution or item.review_deviation)]
-    feedback_counter: Counter[str] = Counter(item.status for item in feedback)
+    feedback_counter: Counter[str] = Counter(item.status for item in current_feedback)
     ignored_recommendation_count = sum(
         1
         for item in recommendations
         if feedback_by_recommendation.get(item.id)
-        and feedback_by_recommendation[item.id].status in {"忽略", "暂不执行"}
+        and _feedback_status_code(feedback_by_recommendation[item.id]) in {
+            "rejected", "not_filled", "not_seen", "discipline_breach",
+        }
     )
-    model_metrics, calibration_suggestions = _model_calibration_metrics(db, plan_reviews, feedback, recommendations)
+    model_metrics, calibration_suggestions = _model_calibration_metrics(db, plan_reviews, current_feedback, recommendations)
     issues: list[CalibrationIssueOut] = []
 
     if pending_review_count:
@@ -176,7 +218,7 @@ def _review_calibration_summary(db: Session) -> ReviewCalibrationSummaryOut:
         review_count=len(reviews),
         plan_review_count=len(plan_reviews),
         missing_plan_review_count=len(missing_plan_reviews),
-        execution_feedback_count=len(feedback),
+        execution_feedback_count=len(current_feedback),
         ignored_recommendation_count=ignored_recommendation_count,
         pending_review_count=pending_review_count,
         avg_discipline_score=avg_score,
@@ -311,15 +353,24 @@ def _model_calibration_metrics(
             sample_count=len(completed_t),
         ))
 
-    feedback_by_recommendation = {item.recommendation_id: item for item in feedback}
-    feedback_samples = [item for item in recommendations if item.id in feedback_by_recommendation]
+    feedback_by_signal: dict[tuple[str, int], RecommendationFeedback] = {}
+    for item in sorted(feedback, key=lambda row: (row.created_at, row.id), reverse=True):
+        signal_key = (
+            ("revision", int(item.recommendation_revision_id))
+            if item.recommendation_revision_id is not None
+            else ("legacy", int(item.recommendation_id))
+        )
+        feedback_by_signal.setdefault(signal_key, item)
+    feedback_samples = list(feedback_by_signal.values())
     executed = [
         item for item in feedback_samples
-        if feedback_by_recommendation[item.id].status in {"已执行", "部分执行"}
+        if _feedback_status_code(item) in {"executed", "partially_executed"}
     ]
     ignored = [
         item for item in feedback_samples
-        if feedback_by_recommendation[item.id].status in {"忽略", "暂不执行"}
+        if _feedback_status_code(item) in {
+            "rejected", "not_filled", "not_seen", "discipline_breach",
+        }
     ]
     metrics.append(_metric(
         key="execution_adoption",

@@ -34,7 +34,10 @@ def test_expectation_chain_is_append_only_and_has_scenarios(client, monkeypatch)
         "name": "预期链测试", "price": 10.5, "prev_close": 10, "open": 10.2,
         "open_pct": 2.0, "change_pct": 5.0, "note": "实时行情",
     })
-    first = client.get("/api/stocks/600003/expectation")
+    first = client.post("/api/expectations", json={
+        "code": "600003", "name": "预期链测试", "stage": "盘前预期",
+        "base_hint": "强预期", "actual_open_pct": 2, "actual_change_pct": 5,
+    })
     assert first.status_code == 200
     second = client.post("/api/expectations", json={
         "code": "600003", "name": "预期链测试", "stage": "午后确认",
@@ -152,7 +155,7 @@ def test_watchlist_recommendations_combine_theme_and_limit_quality(client, monke
     monkeypatch.setattr(MarketDataProvider, "theme_radar", lambda self: radar)
     monkeypatch.setattr(MarketDataProvider, "limit_up_ladder", lambda self: ladder)
 
-    response = client.get("/api/watchlist-recommendations")
+    response = client.post("/api/watchlist-recommendations/refresh")
     assert response.status_code == 200
     data = response.json()
     assert data[0]["code"] == "600001"
@@ -465,9 +468,10 @@ def test_calibration_apply_requires_gate_and_explicit_confirmation(client):
 
 
 def test_expectation_state_counts_cannot_apply_without_forward_outcomes(client, db_session):
+    from app.api.helpers.decision import ensure_expectation_rules
     from app.models.trading import ExpectationRule, ExpectationSnapshot
 
-    client.get("/api/expectation-rules")
+    ensure_expectation_rules(db_session)
     rule = db_session.query(ExpectationRule).order_by(ExpectationRule.id).first()
     original_under = rule.underperform_threshold
     original_outperform = rule.outperform_threshold

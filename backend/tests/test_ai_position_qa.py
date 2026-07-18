@@ -171,7 +171,7 @@ def _install_context_dependencies(monkeypatch, db_session) -> Holding:
     monkeypatch.setattr(service, "build_market_reflexivity", lambda *_args: {"current_scenario": "REBOUND_ABSORPTION"})
     monkeypatch.setattr(service, "build_stock_reflexivity", lambda *_args: {"as_of": str(now), "current_scenario": "REBOUND_ABSORPTION"})
     monkeypatch.setattr(service, "_holding_theme_profile", lambda *_args: {"industry": "半导体", "primary": "半导体", "concepts": ["芯片"]})
-    monkeypatch.setattr(service, "_cached_holding_theme_flow_profile", lambda *_args: {
+    monkeypatch.setattr(service, "_cached_holding_theme_flow_profile", lambda *_args, **_kwargs: {
         "sectors": ["半导体"], "concept_sectors": ["芯片"], "rank": 4,
         "current": 12.5, "main": 8.2, "peak": 20.0, "pullback": 7.5,
         "pullback_pct": 37.5, "acceleration": -2.1,

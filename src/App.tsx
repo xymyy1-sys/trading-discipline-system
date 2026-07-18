@@ -196,12 +196,12 @@ export default function App() {
           </div>
         </header>
 
-        {visitedWorkspaces.has('/今日决策') && <div hidden={normalizedWorkspacePath !== '/今日决策'}><TodayDecisionWorkspace /></div>}
-        {visitedWorkspaces.has('/选股中心') && <div hidden={normalizedWorkspacePath !== '/选股中心'}><StockSelectionWorkspace /></div>}
-        {visitedWorkspaces.has('/打板预期') && <div hidden={normalizedWorkspacePath !== '/打板预期'}><LimitExpectationWorkspace /></div>}
-        {visitedWorkspaces.has('/持仓执行') && <div hidden={normalizedWorkspacePath !== '/持仓执行'}><PositionExecutionWorkspace /></div>}
-        {visitedWorkspaces.has('/模拟盘') && <div hidden={normalizedWorkspacePath !== '/模拟盘'}><SimulationWorkspace /></div>}
-        {visitedWorkspaces.has('/复盘校准') && <div hidden={normalizedWorkspacePath !== '/复盘校准'}><ReviewCalibrationWorkspace /></div>}
+        {(visitedWorkspaces.has('/今日决策') || normalizedWorkspacePath === '/今日决策') && <div hidden={normalizedWorkspacePath !== '/今日决策'}><TodayDecisionWorkspace /></div>}
+        {(visitedWorkspaces.has('/选股中心') || normalizedWorkspacePath === '/选股中心') && <div hidden={normalizedWorkspacePath !== '/选股中心'}><StockSelectionWorkspace /></div>}
+        {(visitedWorkspaces.has('/打板预期') || normalizedWorkspacePath === '/打板预期') && <div hidden={normalizedWorkspacePath !== '/打板预期'}><LimitExpectationWorkspace /></div>}
+        {(visitedWorkspaces.has('/持仓执行') || normalizedWorkspacePath === '/持仓执行') && <div hidden={normalizedWorkspacePath !== '/持仓执行'}><PositionExecutionWorkspace /></div>}
+        {(visitedWorkspaces.has('/模拟盘') || normalizedWorkspacePath === '/模拟盘') && <div hidden={normalizedWorkspacePath !== '/模拟盘'}><SimulationWorkspace /></div>}
+        {(visitedWorkspaces.has('/复盘校准') || normalizedWorkspacePath === '/复盘校准') && <div hidden={normalizedWorkspacePath !== '/复盘校准'}><ReviewCalibrationWorkspace /></div>}
       </section>
     </main>
     </PrivacyModeProvider>

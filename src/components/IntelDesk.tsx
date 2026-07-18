@@ -23,7 +23,10 @@ export default function IntelDesk() {
   const load = (force = false) => {
     setLoading(true)
     setError('')
-    fetch(`${API_BASE}/api/intel/daily${force ? '?force_refresh=true' : ''}`)
+    fetch(
+      `${API_BASE}/api/intel/daily${force ? '/refresh' : ''}`,
+      force ? { method: 'POST' } : undefined,
+    )
       .then(async r => {
         if (!r.ok) throw new Error(`资讯接口返回 ${r.status}`)
         return r.json()

@@ -272,7 +272,7 @@ def build_position_context(db: Session, code: str) -> dict[str, Any]:
     missing: list[str] = []
 
     try:
-        sector_flow = _cached_holding_theme_flow_profile(holding)
+        sector_flow = _cached_holding_theme_flow_profile(holding, allow_network=True)
     except Exception as exc:
         sector_flow = {}
         missing.append(f"sector_funds:{exc.__class__.__name__}")

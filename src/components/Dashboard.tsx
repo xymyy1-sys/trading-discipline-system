@@ -41,8 +41,13 @@ export default function Dashboard() {
 
   const loadRadar = (force = false) => {
     setLoading(true)
-    const forceParam = force ? '?force_refresh=true' : ''
-    cachedJson<ThemeRadar>('theme-radar', `${API_BASE}/api/market/theme-radar${forceParam}`, force)
+    const request = force
+      ? fetch(`${API_BASE}/api/market/theme-radar/refresh`, { method: 'POST' }).then(async response => {
+          if (!response.ok) throw new Error(`HTTP ${response.status}`)
+          return { data: await response.json() as ThemeRadar, fetchedAt: new Date().toISOString() }
+        })
+      : cachedJson<ThemeRadar>('theme-radar', `${API_BASE}/api/market/theme-radar`)
+    request
       .then(({ data, fetchedAt }) => {
         setRadar(data)
         setSelectedName(data.strongest_theme?.name ?? data.themes[0]?.name ?? null)

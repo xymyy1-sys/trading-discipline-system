@@ -9,6 +9,11 @@ export default function ReviewCalibration() {
   const [loading, setLoading] = useState(false)
   const [status, setStatus] = useState('')
   const [proposal, setProposal] = useState<CalibrationProposal | null>(null)
+  const [outcomeSummary, setOutcomeSummary] = useState<{
+    price_outcome_sample_count: number
+    calibration_eligible_sample_count: number
+    minimum_calibration_samples: number
+  } | null>(null)
   const [calibrationRun, setCalibrationRun] = useState<CalibrationRun | null>(null)
   const [dataHealth, setDataHealth] = useState<Array<{ source: string; data_type: string; sample_count: number; missing_rate: number; degraded_count: number; stale_count: number; average_latency_ms: number; latest_status: string; latest_at: string; latest_trade_date: string; trade_date_consistent: boolean; degraded_source: string }>>([])
   const [environmentStats, setEnvironmentStats] = useState<Array<{ market_grade: string; expectation_samples: number; expectation_hit_rate: number; recommendation_samples: number; execution_adoption_rate: number; average_adverse_move: number; data_quality: string }>>([])
@@ -30,6 +35,14 @@ export default function ReviewCalibration() {
       .then(r => r.ok ? r.json() : Promise.reject())
       .then(setProposal)
       .catch(() => setProposal(null))
+    fetch(`${API_BASE}/api/reviews/recommendation-outcomes/summary`)
+      .then(r => r.ok ? r.json() : Promise.reject())
+      .then(data => setOutcomeSummary({
+        price_outcome_sample_count: Number(data?.price_outcome_sample_count ?? data?.eligible_sample_count) || 0,
+        calibration_eligible_sample_count: Number(data?.calibration_eligible_sample_count) || 0,
+        minimum_calibration_samples: Number(data?.minimum_calibration_samples) || 0,
+      }))
+      .catch(() => setOutcomeSummary(null))
     fetch(`${API_BASE}/api/data-quality/health`)
       .then(r => r.ok ? r.json() : Promise.reject())
       .then(data => setDataHealth(data.providers || []))
@@ -80,6 +93,12 @@ export default function ReviewCalibration() {
     )
   }
 
+  const reliableOutcomeReady = Boolean(
+    outcomeSummary
+    && outcomeSummary.minimum_calibration_samples > 0
+    && outcomeSummary.calibration_eligible_sample_count >= outcomeSummary.minimum_calibration_samples,
+  )
+
   return (
     <section className="calibration-dashboard">
       <header className="env-hero">
@@ -119,9 +138,9 @@ export default function ReviewCalibration() {
           </tbody></table></div>
         </section>
         <section className="panel calibration-panel data-health-matrix">
-          <h3><Activity size={16} />按市场环境分层校准</h3>
-          <p className="plain-text">只使用同日真实市场快照、预期验证、执行反馈和量价快照统计；缺少环境快照时单列为“未评级”。</p>
-          <div className="health-table-wrap"><table><thead><tr><th>环境</th><th>预期样本</th><th>命中率</th><th>建议样本</th><th>采纳率</th><th>平均不利波动</th><th>质量</th></tr></thead><tbody>
+          <h3><Activity size={16} />按市场环境查看闭环状态</h3>
+          <p className="plain-text">这里仅分层展示已有样本和反馈覆盖率，不把小样本的状态符合率解释为模型有效性。</p>
+          <div className="health-table-wrap"><table><thead><tr><th>环境</th><th>预期样本</th><th>状态符合率</th><th>建议样本</th><th>反馈采纳率</th><th>平均不利波动</th><th>质量</th></tr></thead><tbody>
             {environmentStats.map(item => <tr key={item.market_grade}>
               <td><b>{item.market_grade}</b></td><td>{item.expectation_samples}</td><td>{item.expectation_hit_rate.toFixed(1)}%</td>
               <td>{item.recommendation_samples}</td><td>{item.execution_adoption_rate.toFixed(1)}%</td><td>{item.average_adverse_move.toFixed(2)}%</td><td>{item.data_quality}</td>
@@ -129,56 +148,55 @@ export default function ReviewCalibration() {
             {!environmentStats.length && <tr><td colSpan={7}>暂无足够的跨日环境校准样本。</td></tr>}
           </tbody></table></div>
         </section>
-        <section className="panel calibration-panel">
-          <h3><Activity size={16} />模型有效性</h3>
-          <div className="model-metric-list">
-            {summary.model_metrics.map(item => (
-              <article className="model-metric" key={item.key}>
-                <div>
-                  <b>{item.label}</b>
-                  <span>{item.verdict}</span>
-                </div>
-                <strong>{item.sample_count ? `${item.success_rate.toFixed(1)}%` : '--'}</strong>
-                <p>样本 {item.sample_count} · 通过 {item.success_count} · 偏差 {item.fail_count}</p>
-                {!!item.average_value && <small>均值 {item.average_value.toFixed(4)}</small>}
-                <div className="evidence-inline">
-                  {item.evidence.map(evidence => <em key={evidence}>{evidence}</em>)}
-                </div>
-              </article>
-            ))}
-          </div>
-        </section>
-
-        <section className="panel calibration-panel">
-          <h3><SlidersHorizontal size={16} />参数建议</h3>
-          <div className="suggestion-list">
-            {summary.calibration_suggestions.map(item => (
-              <article className={`calibration-suggestion level-${item.level}`} key={`${item.target}-${item.suggestion}`}>
-                <div>
-                  <b>{item.target}</b>
-                  <span>{chineseLabel(item.level)}</span>
-                </div>
-                <p>{item.suggestion}</p>
-                <small>{item.reason} · 样本 {item.sample_count}</small>
-              </article>
-            ))}
-            {proposal && (
-              <article className={`calibration-suggestion level-${proposal.eligible ? '中' : '观察'}`}>
+        {reliableOutcomeReady ? <>
+          <section className="panel calibration-panel">
+            <h3><Activity size={16} />模型有效性</h3>
+            <div className="model-metric-list">
+              {summary.model_metrics.map(item => (
+                <article className="model-metric" key={item.key}>
+                  <div><b>{item.label}</b><span>{item.verdict}</span></div>
+                  <strong>{item.sample_count ? `${item.success_rate.toFixed(1)}%` : '--'}</strong>
+                  <p>样本 {item.sample_count} · 通过 {item.success_count} · 偏差 {item.fail_count}</p>
+                  {!!item.average_value && <small>均值 {item.average_value.toFixed(4)}</small>}
+                  <div className="evidence-inline">{item.evidence.map(evidence => <em key={evidence}>{evidence}</em>)}</div>
+                </article>
+              ))}
+            </div>
+          </section>
+          <section className="panel calibration-panel">
+            <h3><SlidersHorizontal size={16} />经可靠样本验证的参数建议</h3>
+            <div className="suggestion-list">
+              {summary.calibration_suggestions.map(item => (
+                <article className={`calibration-suggestion level-${item.level}`} key={`${item.target}-${item.suggestion}`}>
+                  <div><b>{item.target}</b><span>{chineseLabel(item.level)}</span></div>
+                  <p>{item.suggestion}</p><small>{item.reason} · 样本 {item.sample_count}</small>
+                </article>
+              ))}
+              {proposal && <article className="calibration-suggestion level-中">
                 <div><b>预期阈值校准方案</b><span>{proposal.sample_count}/{proposal.minimum_samples} 样本</span></div>
                 <p>{proposal.rationale}</p>
                 {!!proposal.changes.length && <small>拟变更 {proposal.changes.length} 项；应用前保存完整快照，不会静默改写。</small>}
                 <div className="header-actions">
-                  <button className="refresh-btn inline" type="button" disabled={!proposal.eligible || loading} onClick={applyCalibration}>
-                    <SlidersHorizontal size={13} />审阅并应用
-                  </button>
-                  {calibrationRun?.status === 'applied' && (
-                    <button className="refresh-btn inline" type="button" onClick={rollbackCalibration}><RotateCcw size={13} />回滚本次</button>
-                  )}
+                  <button className="refresh-btn inline" type="button" disabled={!proposal.eligible || loading} onClick={applyCalibration}><SlidersHorizontal size={13} />审阅并应用</button>
+                  {calibrationRun?.status === 'applied' && <button className="refresh-btn inline" type="button" onClick={rollbackCalibration}><RotateCcw size={13} />回滚本次</button>}
                 </div>
-              </article>
-            )}
-          </div>
-        </section>
+              </article>}
+            </div>
+          </section>
+        </> : (
+          <section className="panel calibration-panel calibration-closure-diagnostic">
+            <h3><AlertTriangle size={16} />结果闭环诊断</h3>
+            <p className="plain-text">完整价格结果尚未完成动作方向调整与同标的去相关，因此不计入校准样本；暂不展示“模型有效性”和参数建议，也不会开放参数应用。</p>
+            <div className="calibration-metrics compact">
+              <Metric label="完整价格结果" value={`${outcomeSummary?.price_outcome_sample_count ?? 0}`} />
+              <Metric label="校准合格样本" value={`${outcomeSummary?.calibration_eligible_sample_count ?? 0}`} tone="warn" />
+              <Metric label="最低门槛" value={`${outcomeSummary?.minimum_calibration_samples || '--'}`} />
+              <Metric label="执行反馈" value={`${summary.execution_feedback_count}`} />
+              <Metric label="待补计划复盘" value={`${summary.missing_plan_review_count}`} tone={summary.missing_plan_review_count ? 'bad' : 'good'} />
+            </div>
+            <p>{proposal?.rationale || '校准方案接口尚未返回可靠样本口径；先补齐建议版本、执行反馈和后续行情结果。'}</p>
+          </section>
+        )}
       </div>
 
       <div className="calibration-grid">

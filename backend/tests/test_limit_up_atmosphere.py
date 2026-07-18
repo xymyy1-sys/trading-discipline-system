@@ -302,6 +302,8 @@ def test_limit_up_atmosphere_never_allows_when_historical_quotes_are_missing(mon
 
 
 def test_limit_up_atmosphere_api_returns_explicit_decision(client, monkeypatch):
+    from app.api.routes import market as market_routes
+
     result = LimitUpAtmosphereOut(
         source="eastmoney-test",
         trade_date="2026-07-14",
@@ -324,13 +326,9 @@ def test_limit_up_atmosphere_api_returns_explicit_decision(client, monkeypatch):
         missing_data=[],
         notes=[],
     )
-    monkeypatch.setattr(
-        MarketDataProvider,
-        "limit_up_atmosphere",
-        lambda self, **_: result,
-    )
+    monkeypatch.setattr(market_routes.market_provider, "limit_up_atmosphere", lambda **_: result)
 
-    response = client.get("/api/market/limit-up-atmosphere")
+    response = client.post("/api/market/limit-up-atmosphere/refresh")
 
     assert response.status_code == 200
     payload = response.json()

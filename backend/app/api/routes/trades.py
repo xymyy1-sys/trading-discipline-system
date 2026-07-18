@@ -25,6 +25,7 @@ from app.schemas.trading import (
 )
 from app.api.helpers.quotes import _normalize_code
 from app.api.helpers.holdings_calc import _account_total_asset, _rebuild_holdings_from_trades
+from app.services.recommendation_feedback import rematch_execution_feedback_for_codes
 from app.api.helpers.trade_review import (
     _trade_out,
     _trade_review_out,
@@ -34,7 +35,8 @@ from app.api.helpers.trade_review import (
     _expectation_calibration_proposal,
     _apply_expectation_calibration,
     _rollback_calibration_run,
-    _json_list
+    _json_list,
+    _feedback_status_code,
 )
 
 router = APIRouter()
@@ -61,6 +63,7 @@ def create_trade(
     from app.api.helpers.holdings_calc import _ensure_holding_sync_baselines, _apply_trade_to_holding
     _ensure_holding_sync_baselines(db, {_normalize_code(trade.code)})
     _apply_trade_to_holding(trade, db)
+    rematch_execution_feedback_for_codes(db, {trade.code})
     db.commit()
     db.refresh(trade)
     review = _create_pending_trade_review(trade, db)
@@ -106,6 +109,7 @@ def update_trade(
     trade.stop_loss_price = round(trade.cost_price * 0.96, 2)
     
     affected_codes.add(_normalize_code(trade.code))
+    rematch_execution_feedback_for_codes(db, affected_codes)
     db.commit()
     _rebuild_holdings_from_trades(
         db.query(TradeLog).order_by(TradeLog.traded_at.asc(), TradeLog.id.asc()).all(),
@@ -127,6 +131,8 @@ def delete_trade(trade_id: int, db: Session = Depends(get_db)) -> dict[str, str]
     affected_codes = {_normalize_code(trade.code)}
     db.query(TradeReview).filter(TradeReview.trade_id == trade.id).delete()
     db.delete(trade)
+    db.flush()
+    rematch_execution_feedback_for_codes(db, affected_codes)
     db.commit()
     _rebuild_holdings_from_trades(
         db.query(TradeLog).order_by(TradeLog.traded_at.asc(), TradeLog.id.asc()).all(),
@@ -137,8 +143,11 @@ def delete_trade(trade_id: int, db: Session = Depends(get_db)) -> dict[str, str]
 
 @router.delete("/trades")
 def clear_trades(db: Session = Depends(get_db)) -> dict[str, int]:
+    affected_codes = {item[0] for item in db.query(TradeLog.code).distinct().all()}
     review_count = db.query(TradeReview).delete()
     trade_count = db.query(TradeLog).delete()
+    db.flush()
+    rematch_execution_feedback_for_codes(db, affected_codes)
     db.commit()
     return {"deleted_trades": trade_count, "deleted_reviews": review_count}
 
@@ -262,13 +271,25 @@ def environment_effectiveness(db: Session = Depends(get_db)) -> list[dict]:
     for row in recommendations:
         grade = latest_grade_by_date.get(row.trade_date, (None, "未评级", "missing"))[1]
         buckets[grade]["recommendation_samples"] += 1
-    for row in db.query(RecommendationFeedback).all():
+    latest_feedback_by_signal: dict[tuple[str, int], RecommendationFeedback] = {}
+    for row in (
+        db.query(RecommendationFeedback)
+        .order_by(RecommendationFeedback.created_at.desc(), RecommendationFeedback.id.desc())
+        .all()
+    ):
+        signal_key = (
+            ("revision", int(row.recommendation_revision_id))
+            if row.recommendation_revision_id is not None
+            else ("legacy", int(row.recommendation_id))
+        )
+        latest_feedback_by_signal.setdefault(signal_key, row)
+    for row in latest_feedback_by_signal.values():
         recommendation = recommendation_by_id.get(row.recommendation_id)
         if not recommendation:
             continue
         grade = latest_grade_by_date.get(recommendation.trade_date, (None, "未评级", "missing"))[1]
         buckets[grade]["feedback_samples"] += 1
-        if row.status in {"已执行", "部分执行"}:
+        if _feedback_status_code(row) in {"executed", "partially_executed"}:
             buckets[grade]["executed_feedback"] += 1
     # high_drawdown is cumulative within a session.  Counting every minute
     # snapshot heavily overweights stocks with denser collection.  Reduce each

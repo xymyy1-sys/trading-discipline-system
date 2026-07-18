@@ -9,6 +9,12 @@ import type {
   LimitUpLadder as LimitUpLadderData,
 } from '../types'
 
+async function refreshJson<T>(url: string): Promise<{ data: T; fetchedAt: string }> {
+  const response = await fetch(url, { method: 'POST' })
+  if (!response.ok) throw new Error(`HTTP ${response.status}`)
+  return { data: await response.json() as T, fetchedAt: new Date().toISOString() }
+}
+
 export default function LimitUpLadder() {
   const [data, setData] = useState<LimitUpLadderData | null>(null)
   const [loading, setLoading] = useState(true)
@@ -23,17 +29,15 @@ export default function LimitUpLadder() {
     setLoading(true)
     setError('')
     setAtmosphereError('')
+    const ladderPath = `${API_BASE}/api/market/limit-up-ladder`
+    const atmospherePath = `${API_BASE}/api/market/limit-up-atmosphere`
     Promise.allSettled([
-      cachedJson<LimitUpLadderData>(
-        'limit-up-ladder',
-        `${API_BASE}/api/market/limit-up-ladder${force ? '?force_refresh=true' : ''}`,
-        force,
-      ),
-      cachedJson<LimitUpAtmosphere>(
-        'limit-up-atmosphere',
-        `${API_BASE}/api/market/limit-up-atmosphere${force ? '?force_refresh=true' : ''}`,
-        force,
-      ),
+      force
+        ? refreshJson<LimitUpLadderData>(`${ladderPath}/refresh`)
+        : cachedJson<LimitUpLadderData>('limit-up-ladder', ladderPath),
+      force
+        ? refreshJson<LimitUpAtmosphere>(`${atmospherePath}/refresh`)
+        : cachedJson<LimitUpAtmosphere>('limit-up-atmosphere', atmospherePath),
     ])
       .then(([ladderResult, atmosphereResult]) => {
         if (ladderResult.status === 'fulfilled') setData(ladderResult.value.data)

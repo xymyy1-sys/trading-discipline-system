@@ -33,6 +33,7 @@ import type {
 } from '../../types'
 import FlowKineticsEvidence from '../FlowKineticsEvidence'
 import PositionAiAssistant from '../PositionAiAssistant'
+import DecisionBasisView from '../DecisionBasisView'
 import { holdingFlowKineticsFields } from '../../flowKinetics'
 
 type WorkspaceModule = {
@@ -145,7 +146,7 @@ export function WorkspacePage({
       </nav>
 
       <section className="workspace-module">
-        {modules.map(module => visitedModules.has(module.key) ? (
+        {modules.map(module => (visitedModules.has(module.key) || module.key === selected?.key) ? (
           <div key={module.key} hidden={module.key !== selected?.key}>
             <WorkspaceModuleErrorBoundary moduleName={module.label}>
               <module.Component />
@@ -186,32 +187,28 @@ export function TodayDecisionSummary() {
   const [holdingNews, setHoldingNews] = useState<InformationItem[]>([])
   const [showMarketEvidence, setShowMarketEvidence] = useState(false)
 
-  const load = (forceRefresh = false) => {
+  const load = () => {
     setLoading(true)
-    const refreshQuery = forceRefresh ? '?force_refresh=true' : ''
-    const marketPromise = fetchJsonWithTimeout(`${API_BASE}/api/market/regime${refreshQuery}`, 45000)
+    const marketPromise = fetchJsonWithTimeout(`${API_BASE}/api/market/regime`, 45000)
       .then(value => {
         setMarketRegime(value as MarketRegime)
-        // 反身性接口复用刚完成的市场快照。串行调用可避免两个全市场
-        // 强制刷新请求并发采集、重复写入同一时点快照。
         return fetchJsonWithTimeout(`${API_BASE}/api/market/reflexivity`, 12000)
       })
       .then(value => {
         setMarketReflexivity(value as ReflexivityAssessment)
         marketReflexivityLoadedAt.current = Date.now()
-        if (forceRefresh && selectedCode) loadStockReflexivity(selectedCode, true)
       })
-    const globalPromise = fetchJsonWithTimeout(`${API_BASE}/api/market/global-cues${refreshQuery}`, 45000)
+    const globalPromise = fetchJsonWithTimeout(`${API_BASE}/api/market/global-cues`, 45000)
       .then(value => setGlobalCues(value as GlobalMarketCues))
-    const opportunityPromise = fetchJsonWithTimeout(`${API_BASE}/api/intel/opportunity-radar${refreshQuery}`, 45000)
+    const opportunityPromise = fetchJsonWithTimeout(`${API_BASE}/api/intel/opportunity-radar`, 45000)
       .then(value => setOpportunityRadar(value as OpportunityRadar))
     const workspacePromise = Promise.allSettled([
       fetchJsonWithTimeout(`${API_BASE}/api/holdings`),
       fetchJsonWithTimeout(`${API_BASE}/api/holdings/execution-states`),
-      fetchJsonWithTimeout(`${API_BASE}/api/market/seesaw-monitor${refreshQuery}`, 12000),
-      fetchJsonWithTimeout(`${API_BASE}/api/market/theme-radar${refreshQuery}`, 12000),
+      fetchJsonWithTimeout(`${API_BASE}/api/market/seesaw-monitor`, 12000),
+      fetchJsonWithTimeout(`${API_BASE}/api/market/theme-radar`, 12000),
       fetchJsonWithTimeout(`${API_BASE}/api/alerts/active`),
-      fetchJsonWithTimeout(`${API_BASE}/api/intel/daily${refreshQuery}`, 15000),
+      fetchJsonWithTimeout(`${API_BASE}/api/intel/daily`, 15000),
     ]).then(results => {
       const [holdingRes, executionRes, seesawRes, themeRes, alertRes, intelRes] = results
       if (holdingRes.status === 'fulfilled' && Array.isArray(holdingRes.value)) {
@@ -252,19 +249,49 @@ export function TodayDecisionSummary() {
       .finally(() => setLoading(false))
   }
 
+  const collectAndReload = () => {
+    if (loading) return
+    setLoading(true)
+    setStreamNotice('正在显式采集盘中快照；完成后读取最新已保存状态。')
+    const controller = new AbortController()
+    const timeout = window.setTimeout(() => controller.abort(), 60_000)
+    fetch(`${API_BASE}/api/intraday-collector/run`, { method: 'POST', signal: controller.signal })
+      .then(async response => {
+        if (!response.ok) throw new Error(await response.text())
+        const refreshResponses = await Promise.all([
+          '/api/market/regime/refresh',
+          '/api/market/global-cues/refresh',
+          '/api/market/seesaw-monitor/refresh',
+          '/api/market/theme-radar/refresh',
+          '/api/intel/daily/refresh',
+          '/api/intel/opportunity-radar/refresh',
+        ].map(path => fetch(`${API_BASE}${path}`, { method: 'POST', signal: controller.signal })))
+        const failedRefreshes = refreshResponses.filter(response => !response.ok)
+        if (failedRefreshes.length) {
+          throw new Error(`${failedRefreshes.length} 个快照刷新接口失败`)
+        }
+        setStreamNotice('盘中快照已采集，正在读取最新状态。')
+      })
+      .catch(() => setStreamNotice('盘中采集未完成，以下继续读取最近一次已保存快照。'))
+      .finally(() => {
+        window.clearTimeout(timeout)
+        load()
+      })
+  }
+
   const loadRef = useRef(load)
   loadRef.current = load
 
   // 初次装载一次；后续刷新由按钮、SSE 与独立定时器触发。
   useEffect(() => {
-    loadRef.current(false)
+    loadRef.current()
   }, [])
 
   useEffect(() => {
     if (!selectedCode) return
     const loadedAt = stockReflexivityLoadedAt.current[selectedCode] ?? 0
     if (stockReflexivity[selectedCode] && Date.now() - loadedAt < 5 * 60_000) return
-    loadStockReflexivity(selectedCode, false)
+    loadStockReflexivity(selectedCode)
   }, [selectedCode, stockReflexivity])
 
   useEffect(() => {
@@ -279,7 +306,7 @@ export function TodayDecisionSummary() {
           .catch(() => undefined)
       }
       if (selectedCode && Date.now() - (stockReflexivityLoadedAt.current[selectedCode] ?? 0) >= 5 * 60_000) {
-        loadStockReflexivity(selectedCode, true)
+        loadStockReflexivity(selectedCode)
       }
     }
     const timer = window.setInterval(refreshReflexivity, 60_000)
@@ -425,10 +452,21 @@ export function TodayDecisionSummary() {
     && !riskStateTaskCodes.has(item.code)
     && items.findIndex(candidate => candidate.code === item.code) === index,
   )
-  const riskTargetCount = new Set([...riskStates.map(item => item.code), ...expectationRisks.map(item => item.holding.code), ...effectiveCapitalRisks.map(item => item.holding.code), ...highRiskAlerts.map(item => item.code), ...urgentHoldingSignals.map(item => item.execution.code)]).size
+  const handledTaskCodes = new Set([
+    ...urgentHoldingSignals.map(item => item.execution.code),
+    ...expectationTaskRisks.map(item => item.holding.code),
+    ...effectiveCapitalTaskRisks.map(item => item.holding.code),
+    ...riskStateTasks.map(item => item.code),
+    ...highRiskAlertTasks.map(item => item.code),
+  ])
+  const orphanAlertTasks = activeAlerts.filter((item, index, items) => (
+    !handledTaskCodes.has(item.code)
+    && items.findIndex(candidate => candidate.code === item.code) === index
+  ))
+  const activeAlertByCode = new Map(activeAlerts.map(item => [item.code, item]))
+  const riskTargetCount = new Set([...riskStates.map(item => item.code), ...expectationRisks.map(item => item.holding.code), ...effectiveCapitalRisks.map(item => item.holding.code), ...highRiskAlerts.map(item => item.code), ...urgentHoldingSignals.map(item => item.execution.code), ...activeAlerts.map(item => item.code)]).size
   const totalMarketValue = holdings.reduce((sum, item) => sum + item.market_value, 0)
   const totalProfit = holdings.reduce((sum, item) => sum + item.profit_amount, 0)
-  const trackedReviews = holdings.map(holding => ({ holding, review: intradayReviews[holding.code] }))
   const selectedHolding = holdings.find(item => item.code === selectedCode) ?? holdings[0]
   const selectedExecution = executionStates.find(item => item.code === selectedHolding?.code) ?? null
   const selectedCard = selectedHolding ? decisionCards[selectedHolding.code] ?? null : null
@@ -443,6 +481,23 @@ export function TodayDecisionSummary() {
   const intradayExpansion = opportunityRadar?.intraday_expansion ?? null
   const expansionQuality = String(intradayExpansion?.data_quality || '').toLowerCase()
   const expansionUnavailable = !intradayExpansion || ['missing', 'degraded', 'unavailable', 'error'].includes(expansionQuality)
+
+  const openExecutionFeedback = (code: string) => {
+    sessionStorage.setItem('position-feedback-code', code)
+    window.dispatchEvent(new CustomEvent('nav', { detail: '持仓执行' }))
+    window.setTimeout(() => window.dispatchEvent(new CustomEvent('workspace-module', { detail: 'discipline' })), 0)
+  }
+
+  const taskActions = (code: string) => {
+    const alert = activeAlertByCode.get(code)
+    const execution = executionStates.find(item => item.code === code)
+    if (!alert && !execution?.recommendation?.id) return null
+    return <div className="task-actions">
+      {alert && <button type="button" className="alert-ack-button" disabled={!alert.id} title={alert.id ? '仅记录已读，不代表已经执行' : '该提醒缺少可追溯编号'} onClick={() => acknowledgeAlert(alert)}>仅标记已读</button>}
+      {(execution?.recommendation?.id || alert?.id) && <button type="button" className="task-feedback-button" onClick={() => openExecutionFeedback(code)}>去持仓执行反馈</button>}
+      {execution?.recommendation?.feedback_status && <small>当前反馈：{execution.recommendation.feedback_status}</small>}
+    </div>
+  }
 
   return (
     <section className="decision-command">
@@ -472,13 +527,13 @@ export function TodayDecisionSummary() {
       <div className="panel command-list">
         <header>
           <h3><ListTodo size={16} />当前操作任务</h3>
-          <button className="refresh-btn inline" type="button" onClick={() => load(true)} disabled={loading}>
-            <RefreshCcw size={14} />刷新
+          <button className="refresh-btn inline" type="button" onClick={collectAndReload} disabled={loading}>
+            <RefreshCcw size={14} />{loading ? '采集中' : '采集并读取最新快照'}
           </button>
         </header>
-        {marketRiskActive || expectationTaskRisks.length || effectiveCapitalTaskRisks.length || riskStateTasks.length || highRiskAlertTasks.length || urgentHoldingSignals.length ? (
+        {marketRiskActive || expectationTaskRisks.length || effectiveCapitalTaskRisks.length || riskStateTasks.length || highRiskAlertTasks.length || urgentHoldingSignals.length || orphanAlertTasks.length ? (
           <>
-            {urgentHoldingSignals.slice(0, 8).map(({ execution, signal, relatedSignals }) => {
+            {urgentHoldingSignals.map(({ execution, signal, relatedSignals }) => {
               const expectationRisk = expectationRisks.find(item => item.holding.code === execution.code)
               const effectiveCapitalRisk = effectiveCapitalRisks.find(item => item.holding.code === execution.code)
               const executionRisk = riskStates.find(item => item.code === execution.code)
@@ -489,15 +544,13 @@ export function TodayDecisionSummary() {
                   <span>{signal.action}</span>
                   <small className="sensitive-evidence">{signal.evidence[0] || signal.missing_conditions[0] || '等待下一份真实量价快照确认。'}</small>
                   <details><summary>查看全部触发依据、关联风险与撤销条件</summary><div className="decision-basis">
-                    {signal.evidence.slice(0, 5).map(item => <p className="sensitive-evidence" key={`primary-${item}`}>依据：{chineseEvidence(item)}</p>)}
-                    {signal.cancel_conditions.slice(0, 3).map(item => <p key={`cancel-${item}`}>撤销/升级：{chineseEvidence(item)}</p>)}
-                    {signal.recovery_conditions.slice(0, 2).map(item => <p key={`recovery-${item}`}>后续复核：{chineseEvidence(item)}</p>)}
+                    <DecisionBasisView evidence={signal.evidence} invalidConditions={signal.cancel_conditions} recoveryConditions={signal.recovery_conditions} dataQuality={execution.data_quality} asOf={execution.data_time || execution.updated_at} />
                     {relatedSignals.map(related => <p key={`related-${related.code}`}>关联信号：{related.title} · {related.action}（{holdingSignalStatus(related.status)}）</p>)}
                     {expectationRisk && <p className="sensitive-evidence">预期风险：{expectationRisk.card.expectation.expectation_result === 'INVALID' ? '预期证伪' : '弱于预期'}，预期差 {expectationRisk.card.expectation.expectation_gap_score}；{chineseEvidence(expectationRisk.execution?.recommended_action || expectationRisk.card.expectation.suggestion)}</p>}
                     {effectiveCapitalRisk && <p className="sensitive-evidence">订单流风险：{effectiveCapitalRisk.evidence.state_label}；{effectiveCapitalRisk.evidence.evidence[0] || effectiveCapitalRisk.evidence.discipline[0]}</p>}
                     {executionRisk && <p className="sensitive-evidence">执行状态：{chineseEvidence(executionRisk.recommended_action)}；{chineseEvidence(executionRisk.evidence[0] || chineseLabel(executionRisk.volume_price_state))}</p>}
                     {flowAlert && <p className="sensitive-evidence">板块联动：{flowAlert.risk_level}风险；{flowAlert.advice || flowAlert.signal}</p>}
-                  </div></details>
+                  </div></details>{taskActions(execution.code)}
                 </article>
               )
             })}
@@ -506,10 +559,10 @@ export function TodayDecisionSummary() {
                 <b>全市场执行闸门</b>
                 <span>{marketRegime.regime_name} · {marketRegime.risk_level}风险</span>
                 <small>{(marketRegime.forbidden_actions ?? []).join('；') || '市场证据不足，禁止主动扩大风险。'}</small>
-                <details><summary>查看真实数据依据</summary><div className="decision-basis">{(marketRegime.evidence ?? []).map(item => <p key={item}>依据：{item}</p>)}{(marketRegime.allowed_actions ?? []).map(item => <p key={item}>允许：{item}</p>)}</div></details>
+                <details><summary>查看真实数据依据</summary><DecisionBasisView evidence={marketRegime.evidence} recoveryConditions={marketRegime.allowed_actions} dataQuality={marketRegime.data_quality} asOf={marketRegime.captured_at} /></details>
               </article>
             )}
-            {expectationTaskRisks.slice(0, 5).map(({ holding, card, execution }) => {
+            {expectationTaskRisks.map(({ holding, card, execution }) => {
               const effectiveCapitalRisk = effectiveCapitalRisks.find(item => item.holding.code === holding.code)
               const flowAlert = highRiskAlerts.find(item => item.code === holding.code)
               return (
@@ -524,11 +577,11 @@ export function TodayDecisionSummary() {
                       {effectiveCapitalRisk.evidence.invalidation.slice(0, 2).map(item => <p key={`flow-invalid-${item}`}>订单流失效：{item}</p>)}
                     </>}
                     {flowAlert && <p className="sensitive-evidence">板块联动：{flowAlert.risk_level}风险；{flowAlert.advice || flowAlert.signal}</p>}
-                  </div></details>
+                  </div></details>{taskActions(holding.code)}
                 </article>
               )
             })}
-            {effectiveCapitalTaskRisks.slice(0, 5).map(({ holding, evidence }) => {
+            {effectiveCapitalTaskRisks.map(({ holding, evidence }) => {
               const executionRisk = riskStates.find(item => item.code === holding.code)
               const flowAlert = highRiskAlerts.find(item => item.code === holding.code)
               return (
@@ -537,16 +590,14 @@ export function TodayDecisionSummary() {
                   <span>{evidence.discipline[0] || '订单流方向、价格响应和持续性已形成新的联合证据。'}</span>
                   <small className="sensitive-evidence">{evidence.evidence[0] || '等待下一分钟窗口继续验证。'}</small>
                   <details><summary>查看全部订单流依据、关联风险与失效条件</summary><div className="decision-basis">
-                    {evidence.evidence.slice(0, 4).map(item => <p key={`flow-evidence-${item}`}>依据：{item}</p>)}
-                    {evidence.invalidation.slice(0, 3).map(item => <p key={`flow-invalidation-${item}`}>失效：{item}</p>)}
-                    {evidence.warnings.slice(0, 3).map(item => <p key={`flow-warning-${item}`}>边界：{item}</p>)}
+                    <DecisionBasisView evidence={evidence.evidence} counterEvidence={evidence.warnings} invalidConditions={evidence.invalidation} dataQuality={evidence.data_quality} asOf={evidence.as_of} />
                     {executionRisk && <p className="sensitive-evidence">执行状态：{chineseEvidence(executionRisk.recommended_action)}；{chineseEvidence(executionRisk.evidence[0] || chineseLabel(executionRisk.volume_price_state))}</p>}
                     {flowAlert && <p className="sensitive-evidence">板块联动：{flowAlert.risk_level}风险；{flowAlert.advice || flowAlert.signal}</p>}
-                  </div></details>
+                  </div></details>{taskActions(holding.code)}
                 </article>
               )
             })}
-            {riskStateTasks.slice(0, 4).map(item => {
+            {riskStateTasks.map(item => {
               const flowAlert = highRiskAlerts.find(alert => alert.code === item.code)
               return (
                 <article key={`exec-${item.holding_id}`} className={riskTone(item.recommendation?.level || item.state)}>
@@ -556,19 +607,35 @@ export function TodayDecisionSummary() {
                   <details><summary>查看全部决策依据与关联风险</summary><div className="decision-basis">
                     <DecisionBasis execution={item} />
                     {flowAlert && <p className="sensitive-evidence">板块联动：{flowAlert.risk_level}风险；{flowAlert.advice || flowAlert.signal}</p>}
-                  </div></details>
+                  </div></details>{taskActions(item.code)}
                 </article>
               )
             })}
-            {highRiskAlertTasks.slice(0, 4).map(item => (
+            {highRiskAlertTasks.map(item => (
               <article key={`risk-${item.code}`} className={riskTone(item.risk_level)}>
                 <b>{item.name}</b>
                 <span>{item.risk_level}风险</span>
                 <small className="sensitive-evidence">{item.advice || item.signal}</small>
                 <details><summary>查看板块与个股联动依据</summary><div className="decision-basis">
-                  {item.evidence.slice(0, 5).map(evidence => <p className="sensitive-evidence" key={evidence}>依据：{evidence}</p>)}
-                  {!item.evidence.length && <p className="sensitive-evidence">{item.signal || '等待下一份板块订单流和量价证据。'}</p>}
-                </div></details>
+                  <DecisionBasisView evidence={item.evidence} emptyText={item.signal || '等待下一份板块订单流和量价证据。'} dataQuality={item.sector_flow_kinetics_reliable ? 'realtime' : 'degraded'} asOf={item.sector_flow_as_of} />
+                </div></details>{taskActions(item.code)}
+              </article>
+            ))}
+            {orphanAlertTasks.map(alert => (
+              <article key={`active-alert-${alert.id ?? alert.code}`} className={riskTone(alert.level || alert.state)}>
+                <b>{alert.name || alert.code}</b>
+                <span>{chineseLabel(alert.level)} · {chineseEvidence(alert.action)}</span>
+                <small className="sensitive-evidence">{chineseEvidence(alert.evidence[0] || chineseLabel(alert.state))}</small>
+                <details><summary>查看建议依据与动态复核条件</summary>
+                  <DecisionBasisView
+                    evidence={alert.evidence}
+                    counterEvidence={alert.counter_evidence}
+                    invalidConditions={alert.invalid_conditions}
+                    recoveryConditions={alert.recovery_conditions}
+                    asOf={alert.created_at}
+                  />
+                </details>
+                {taskActions(alert.code)}
               </article>
             ))}
           </>
@@ -893,9 +960,14 @@ export function TodayDecisionSummary() {
             </article>
             <article className="cockpit-evidence-card">
               <h4>证据、反向证据与恢复条件</h4>
-              <div><b>支持证据</b>{(selectedExecution?.evidence ?? selectedCard?.evidence ?? []).slice(0, 3).map(item => <p className="sensitive-evidence" key={item}>+ {chineseEvidence(item)}</p>)}</div>
-              <div><b>反向证据</b>{(selectedExecution?.counter_evidence ?? selectedCard?.counter_evidence ?? []).slice(0, 3).map(item => <p className="sensitive-evidence" key={item}>- {chineseEvidence(item)}</p>)}</div>
-              <div><b>恢复条件</b>{(selectedExecution?.recovery_conditions ?? []).slice(0, 3).map(item => <p className="sensitive-evidence" key={item}>· {chineseEvidence(item)}</p>)}</div>
+              <DecisionBasisView
+                evidence={selectedExecution?.evidence ?? selectedCard?.evidence}
+                counterEvidence={selectedExecution?.counter_evidence ?? selectedCard?.counter_evidence}
+                invalidConditions={selectedExecution?.invalid_conditions}
+                recoveryConditions={selectedExecution?.recovery_conditions}
+                dataQuality={selectedExecution?.data_quality ?? selectedCard?.data_quality}
+                asOf={selectedExecution?.data_time || selectedExecution?.updated_at}
+              />
             </article>
             <article className="cockpit-timeline-card">
               <h4>盘中事件时间线</h4>
@@ -910,18 +982,6 @@ export function TodayDecisionSummary() {
         )}
       </section>
 
-      <div className="panel command-list active-recommendations">
-        <header><h3><CheckCircle2 size={16} />待确认操作建议</h3><span className="stream-state">{activeAlerts.length} 条</span></header>
-        {activeAlerts.length ? activeAlerts.map(alert => (
-          <article key={alert.id ?? `${alert.code}-${alert.created_at}`}>
-            <b>{alert.name || alert.code}</b>
-            <span>{chineseLabel(alert.level)} · {chineseEvidence(alert.action)}</span>
-            <small>{decisionCards[alert.code] ? `预期：${chineseLabel(decisionCards[alert.code].expectation.expectation_result)} · 预期差 ${decisionCards[alert.code].expectation.expectation_gap_score.toFixed(1)}；` : ''}{chineseEvidence(alert.evidence[0] || chineseLabel(alert.state))}</small>
-            <button type="button" className="alert-ack-button" onClick={() => acknowledgeAlert(alert)}>已阅读并确认</button>
-          </article>
-        )) : <p className="plain-text">当前没有待确认操作建议。</p>}
-      </div>
-
       <div className="panel command-list holding-news-alerts">
         <header><h3><AlertTriangle size={16} />持仓资讯提醒</h3><span className="stream-state">公告、突发新闻与政策关联</span></header>
         {holdingNews.length ? holdingNews.map(item => <article key={item.id}>
@@ -931,30 +991,6 @@ export function TodayDecisionSummary() {
         </article>) : <p className="plain-text">暂未发现与当前持仓直接关联的新公告或突发新闻。</p>}
       </div>
 
-      <div className="panel command-list evidence-trajectory">
-        <header>
-          <h3><Activity size={16} />全持仓证据摘要</h3>
-          <span className="stream-state">点击持仓切换上方完整时间线 · {holdings.length} 只</span>
-        </header>
-        {trackedReviews.length ? (
-          trackedReviews.map(({ holding, review }) => (
-            <button type="button" className={`trajectory-card trajectory-summary ${review ? '' : 'trajectory-empty'}`} key={holding.code} onClick={() => setSelectedCode(holding.code)}>
-              <div className="trajectory-head">
-                <b>{holding.name || holding.code}</b>
-                <span>{review ? chineseEvidence(review.latest_action || chineseLabel(review.latest_state)) : '等待盘中采样'}</span>
-                <small>{review ? chineseLabel(review.data_quality) : `${holding.code} · 当前无证据快照`}</small>
-              </div>
-              <div className={`trajectory-summary-latest ${review?.timeline[0] ? intradayEventSemantics(review.timeline[0].event_type, review.timeline[0].severity).toneClass : ''}`}>
-                <strong>{review?.timeline[0] ? chineseLabel(review.timeline[0].event_type) : '暂无事件'}</strong>
-                <span>{review?.timeline[0] ? formatEventTime(review.timeline[0].captured_at) : '--:--'}</span>
-                <small>{review ? `共 ${review.timeline.length} 个关键证据点` : '等待行情源'}</small>
-              </div>
-            </button>
-          ))
-        ) : (
-          <p className="plain-text">暂无盘中证据轨迹。后台采集器运行后会展示价格、分时均价、预期状态和动作建议的时间线。</p>
-        )}
-      </div>
     </section>
   )
 
@@ -1004,9 +1040,8 @@ export function TodayDecisionSummary() {
       .catch(() => undefined)
   }
 
-  function loadStockReflexivity(code: string, forceRefresh: boolean) {
-    const refreshQuery = forceRefresh ? '?force_refresh=true' : ''
-    fetchJsonWithTimeout(`${API_BASE}/api/stocks/${code}/reflexivity${refreshQuery}`, 45000)
+  function loadStockReflexivity(code: string) {
+    fetchJsonWithTimeout(`${API_BASE}/api/stocks/${code}/reflexivity`, 45000)
       .then(value => {
         stockReflexivityLoadedAt.current[code] = Date.now()
         setStockReflexivity(previous => ({ ...previous, [code]: value as ReflexivityAssessment }))
@@ -1019,7 +1054,7 @@ export function TodayDecisionSummary() {
     if (now - (holdingDecisionRefreshedAt.current[code] ?? 0) < 10_000) return
     holdingDecisionRefreshedAt.current[code] = now
     loadSingleIntradayReview(code)
-    loadStockReflexivity(code, true)
+    loadStockReflexivity(code)
     fetchJsonWithTimeout(`${API_BASE}/api/stocks/${code}/decision-card`, 12000)
       .then(value => setDecisionCards(previous => ({ ...previous, [code]: value as StockDecisionCard })))
       .catch(() => undefined)
@@ -1217,7 +1252,6 @@ function riskTone(value?: string) {
   if (!value) return ''
   if (/EXIT|CRITICAL|HIGH|高|INVALID/.test(value)) return 'risk-high'
   if (/REDUCE|WARNING|中高|中|PROTECT/.test(value)) return 'risk-medium'
-  if (/WATCH|观察|LOW|低/.test(value)) return 'risk-low'
   return ''
 }
 
@@ -1253,12 +1287,14 @@ function holdingSignalStatus(status: string) {
 
 function DecisionBasis({ execution, fallback = [] }: { execution?: PositionExecutionState; fallback?: string[] }) {
   const evidence = execution?.evidence?.length ? execution.evidence : fallback
-  return <div className="decision-basis">
-    {evidence.slice(0, 6).map(item => <p className="sensitive-evidence" key={item}>依据：{chineseEvidence(item)}</p>)}
-    {(execution?.invalid_conditions ?? []).slice(0, 3).map(item => <p className="sensitive-evidence" key={item}>升级/退出条件：{chineseEvidence(item)}</p>)}
-    {(execution?.recovery_conditions ?? []).slice(0, 3).map(item => <p className="sensitive-evidence" key={item}>保留/恢复条件：{chineseEvidence(item)}</p>)}
-    {!evidence.length && <p>等待下一次量价和执行状态采样补充依据。</p>}
-  </div>
+  return <DecisionBasisView
+    evidence={evidence}
+    counterEvidence={execution?.counter_evidence}
+    invalidConditions={execution?.invalid_conditions}
+    recoveryConditions={execution?.recovery_conditions}
+    dataQuality={execution?.data_quality}
+    asOf={execution?.data_time || execution?.updated_at}
+  />
 }
 
 function ConsensusHighOpenFadeCard({ signal }: { signal: ConsensusHighOpenFade }) {

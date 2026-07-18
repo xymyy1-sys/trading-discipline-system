@@ -21,7 +21,11 @@ export default function StrategyTemplates() {
     if (!current) return
     fetch(`${API_BASE}/api/strategies/templates/${current.id}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(current) })
       .then(async response => { if (!response.ok) throw new Error(await response.text()); return response.json() })
-      .then((saved: Template) => { setItems(rows => rows.map(row => row.id === saved.id ? saved : row)); setMessage(`${saved.name} 草稿已保存为 v${saved.version}`) })
+      .then((saved: Template) => {
+        setItems(rows => rows.map(row => row.id === current.id ? saved : row))
+        setSelected(saved.id)
+        setMessage(`${saved.name} 草稿已保存为 v${saved.version}`)
+      })
       .catch(() => setMessage('交易规则草稿保存失败'))
   }
   return <section className="strategy-template-page">

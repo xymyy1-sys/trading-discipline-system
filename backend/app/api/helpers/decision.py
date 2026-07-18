@@ -8,12 +8,13 @@ from typing import Any
 from sqlalchemy.orm import Session
 
 from app.api.helpers.execution import build_position_execution_state
-from app.api.helpers.holdings_calc import _account_total_asset, _find_holding_by_code
+from app.api.helpers.holdings_calc import _find_holding_by_code, _read_account_total_asset
 from app.api.helpers.quotes import _latest_a_share_quotes, _quote_lookup_code, _safe_float
 from app.api.helpers.seesaw import _holding_theme_profile
-from app.api.helpers.volume_price import build_volume_price_snapshot
+from app.api.helpers.volume_price import _snapshot_out, build_volume_price_snapshot
 from app.core.trading_clock import shanghai_now_naive, shanghai_today
 from app.models.trading import (
+    DataCaptureSnapshot,
     ExpectationRevision,
     ExpectationRule,
     ExpectationScenario,
@@ -547,8 +548,16 @@ def ensure_expectation_rules(db: Session) -> list[ExpectationRule]:
     return db.query(ExpectationRule).order_by(ExpectationRule.script_type, ExpectationRule.stage, ExpectationRule.base_expectation).all()
 
 
-def expectation_rule_for(db: Session, script_type: str, stage: str, base_expectation: str) -> ExpectationRule | None:
-    ensure_expectation_rules(db)
+def expectation_rule_for(
+    db: Session,
+    script_type: str,
+    stage: str,
+    base_expectation: str,
+    *,
+    seed_defaults: bool = True,
+) -> ExpectationRule | None:
+    if seed_defaults:
+        ensure_expectation_rules(db)
     for candidate_script, candidate_stage in ((script_type, stage), (script_type, "*"), ("default", stage), ("default", "*")):
         row = db.query(ExpectationRule).filter(
             ExpectationRule.script_type == candidate_script,
@@ -608,7 +617,13 @@ def build_expectation_snapshot(
     outperform = expected_high + 1.0
     underperform = expected_low - 1.0
     severe_under = min(underperform - 2.0, -3.0)
-    rule = expectation_rule_for(db, infer_script_type(base_hint), stage, base_expectation)
+    rule = expectation_rule_for(
+        db,
+        infer_script_type(base_hint),
+        stage,
+        base_expectation,
+        seed_defaults=persist,
+    )
     if rule:
         expected_low = rule.expected_open_low
         expected_high = rule.expected_open_high
@@ -1135,16 +1150,6 @@ def _market_entry_context(db: Session, theme: dict[str, Any]) -> tuple[dict[str,
         board_types.append("概念")
     for board_type in board_types:
         cached = _get_response_cache(f"sector-temperature|{board_type}")
-        if cached is None:
-            try:
-                # Build the shared five-minute snapshot on demand.  Entry
-                # discipline must not depend on whether the user happened to
-                # open the "冷热拥挤" tab first.
-                from app.api.routes.market import _sector_temperature_snapshot
-
-                cached = _sector_temperature_snapshot(board_type=board_type, force_refresh=False)
-            except Exception:
-                cached = None
         cached_items = cached.get("items") if isinstance(cached, dict) else getattr(cached, "items", None)
         for item in cached_items or []:
             data = item.model_dump() if hasattr(item, "model_dump") else item
@@ -1170,17 +1175,94 @@ def _market_entry_context(db: Session, theme: dict[str, Any]) -> tuple[dict[str,
     return market_context, sector_context
 
 
+def _persisted_quote_for_code(
+    db: Session,
+    code: str,
+) -> tuple[dict[str, Any], DataCaptureSnapshot | None]:
+    """Return the newest collector snapshot for a stock without provider I/O."""
+
+    normalized = code.zfill(6)
+    row = (
+        db.query(DataCaptureSnapshot)
+        .filter(
+            DataCaptureSnapshot.target_code.in_([code, normalized, normalized.lstrip("0")]),
+            DataCaptureSnapshot.data_type.in_(["stock_minute", "tracked_stock_minute"]),
+        )
+        .order_by(DataCaptureSnapshot.captured_at.desc(), DataCaptureSnapshot.id.desc())
+        .first()
+    )
+    if row is None:
+        return {}, None
+    try:
+        value = json.loads(row.raw_value_json or "{}")
+    except (TypeError, ValueError, json.JSONDecodeError):
+        value = {}
+    return (value if isinstance(value, dict) else {}), row
+
+
+def _persisted_volume_row(db: Session, code: str) -> VolumePriceSnapshot | None:
+    normalized = code.zfill(6)
+    return (
+        db.query(VolumePriceSnapshot)
+        .filter(VolumePriceSnapshot.code.in_([code, normalized, normalized.lstrip("0")]))
+        .order_by(VolumePriceSnapshot.captured_at.desc(), VolumePriceSnapshot.id.desc())
+        .first()
+    )
+
+
+def _persisted_expectation_row(
+    db: Session,
+    code: str,
+    stage: str,
+) -> ExpectationSnapshot | None:
+    normalized = code.zfill(6)
+    candidates = [code, normalized, normalized.lstrip("0")]
+    row = (
+        db.query(ExpectationSnapshot)
+        .filter(
+            ExpectationSnapshot.code.in_(candidates),
+            ExpectationSnapshot.stage == stage,
+        )
+        .order_by(ExpectationSnapshot.created_at.desc(), ExpectationSnapshot.id.desc())
+        .first()
+    )
+    if row is not None:
+        return row
+    return (
+        db.query(ExpectationSnapshot)
+        .filter(ExpectationSnapshot.code.in_(candidates))
+        .order_by(ExpectationSnapshot.created_at.desc(), ExpectationSnapshot.id.desc())
+        .first()
+    )
+
+
+def _daily_metrics_from_volume(row: VolumePriceSnapshot | None) -> dict[str, float]:
+    if row is None:
+        return {}
+    return {
+        "ma5": float(row.ma5 or 0),
+        "ma10": float(row.ma10 or 0),
+        "ma20": float(row.ma20 or 0),
+        "return_5d": float(row.return_5d or 0),
+        "return_10d": float(row.return_10d or 0),
+        "distance_recent_high_pct": float(row.distance_recent_high_pct or 0),
+        "historical_volume_ratio": float(row.historical_volume_ratio or 0),
+    }
+
+
 def decision_card(db: Session, code: str) -> StockDecisionCardOut:
-    from app.api.helpers.quotes import _daily_history_metrics
     from app.services.consensus_risk import build_consensus_risk
     holding = _find_holding_by_code(db, code)
-    quote = quote_for_code(code)
+    quote, capture = _persisted_quote_for_code(db, code)
     name = holding.name if holding else str(quote.get("name") or code)
-    theme = _holding_theme_profile(holding) if holding else {"industry": "", "concepts": [], "source": "quote-only"}
+    theme = (
+        _holding_theme_profile(holding, allow_network=False)
+        if holding
+        else {"industry": "", "concepts": [], "source": "quote-only"}
+    )
     base_hint = holding.position_type if holding else ""
     now = shanghai_now_naive()
     stage = current_expectation_stage(now)
-    during_market = now.weekday() < 5 and time(9, 15) <= now.time() <= time(15, 0)
     baseline = (
         db.query(ExpectationSnapshot)
         .filter(
@@ -1191,24 +1273,29 @@ def decision_card(db: Session, code: str) -> StockDecisionCardOut:
         .order_by(ExpectationSnapshot.trade_date.asc(), ExpectationSnapshot.created_at.desc())
         .first()
     )
-    # Persist the latest minute/volume structure before revising expectation so
-    # a newly confirmed V reversal is reflected in this response rather than
-    # one refresh later.
-    daily_metrics = _daily_history_metrics(code)
-    volume_price = build_volume_price_snapshot(
-        db, code, name=name, stage=stage, quote=quote,
-        daily_metrics=daily_metrics, persist=during_market,
-    )
-    if during_market:
-        expectation = build_expectation_snapshot(
+    # A decision card is a read model.  It may calculate from the newest quote,
+    # but opening or switching to the page must never append snapshots,
+    # revisions, evidence events or recommendations.  The scheduled collector
+    # and explicit collection POST own persistence.
+    volume_row = _persisted_volume_row(db, code)
+    daily_metrics = _daily_metrics_from_volume(volume_row)
+    volume_price = (
+        _snapshot_out(volume_row)
+        if volume_row is not None
+        else build_volume_price_snapshot(
             db, code, name=name, stage=stage, quote=quote,
-            base_hint=(baseline.base_expectation if baseline else base_hint), persist=True,
+            daily_metrics=daily_metrics, persist=False,
         )
+    )
+    expectation_row = _persisted_expectation_row(db, code, stage)
+    if expectation_row is not None:
+        expectation = _expectation_out(expectation_row)
     elif baseline:
         expectation = _expectation_out(baseline)
     else:
         expectation = build_expectation_snapshot(
-            db, code, name=name, stage=stage, quote=quote, base_hint=base_hint, persist=False,
+            db, code, name=name, stage=stage, quote=quote,
+            base_hint=base_hint, persist=False,
         )
     consensus_risk = build_consensus_risk(quote, expectation, volume_price, daily_metrics)
     cumulative_amount = 0.0
@@ -1228,7 +1315,14 @@ def decision_card(db: Session, code: str) -> StockDecisionCardOut:
             "amount": round(amount_value / 1e8, 4),
             "amount_estimated": bool(item.get("amount_estimated") or quote.get("minute_amount_estimated")),
         })
-    execution = build_position_execution_state(db, holding, quote=quote, expectation=expectation, volume_price=volume_price, persist=during_market) if holding else None
+    execution = build_position_execution_state(
+        db,
+        holding,
+        quote=quote,
+        expectation=expectation,
+        volume_price=volume_price,
+        persist=False,
+    ) if holding else None
     t_eligibility = build_t_eligibility(db, holding) if holding else None
     has_plan, mode_match, entry_plan = _entry_plan_context(db, code, is_holding=bool(holding))
     if entry_plan and not holding:
@@ -1249,7 +1343,7 @@ def decision_card(db: Session, code: str) -> StockDecisionCardOut:
         sector_context=sector_context,
         market_context=market_context,
         account_total_asset=(
-            float(holding.total_asset or 0) or _account_total_asset(db)
+            float(holding.total_asset or 0) or _read_account_total_asset(db)
             if holding
             else None
         ),
@@ -1481,7 +1575,11 @@ def decision_card(db: Session, code: str) -> StockDecisionCardOut:
         t_eligibility=t_eligibility,
         evidence=(execution.evidence if execution else expectation.evidence),
         counter_evidence=(execution.counter_evidence if execution else expectation.counter_evidence),
-        data_quality="realtime" if quote else "manual",
+        data_quality=(
+            "stale" if capture is not None and capture.is_stale
+            else str(capture.quality or "missing") if capture is not None
+            else "missing"
+        ),
         consensus_risk=consensus_risk,
         minute_chart=minute_chart,
         entry_discipline=entry_discipline,

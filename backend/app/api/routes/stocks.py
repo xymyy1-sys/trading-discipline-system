@@ -1,5 +1,6 @@
 from concurrent.futures import ThreadPoolExecutor, wait
 from datetime import datetime, time, timedelta
+import hashlib
 import json
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -9,6 +10,7 @@ from app.api.helpers.execution import build_position_execution_state
 from app.api.helpers.holdings_calc import _find_holding_by_code
 from app.api.helpers.decision import (
     _event_in_trade_session,
+    _expectation_out,
     _json_dict,
     _json_list,
     build_expectation_snapshot,
@@ -20,7 +22,7 @@ from app.api.helpers.decision import (
     ensure_expectation_rules,
     minute_evidence_timeline,
 )
-from app.api.helpers.volume_price import build_volume_price_snapshot
+from app.api.helpers.volume_price import _snapshot_out, build_volume_price_snapshot
 from app.api.helpers.reflexivity import build_market_reflexivity, build_stock_reflexivity
 from app.api.helpers.seesaw import _cached_holding_theme_flow_profile
 from app.core.trading_clock import shanghai_now_naive, shanghai_today
@@ -46,9 +48,138 @@ from app.schemas.trading import (
     ReplayReportOut,
     ReflexivityAssessmentOut,
 )
-from app.services.market_regime import get_market_regime
+from app.services.market_regime import read_market_regime
 
 router = APIRouter()
+
+
+_WATCHLIST_RECOMMENDATION_CAPTURE = "watchlist_recommendation"
+
+
+def _persist_watchlist_recommendations(
+    db: Session,
+    recommendations: list[WatchlistRecommendationOut],
+    entries: list[WatchlistEntry],
+    snapshot_date: str,
+) -> None:
+    """Persist the complete derived recommendation returned by a refresh.
+
+    ``WatchlistEntry`` deliberately only owns lifecycle state (manual/automatic,
+    rank, exclusion and conversion).  The score, evidence and derived gates are
+    a point-in-time analytical result, so the existing evidence snapshot table
+    is the appropriate durable read model.  Reusing that JSON payload also
+    avoids another schema migration solely for presentation fields.
+    """
+
+    entry_by_code = {entry.code: entry for entry in entries}
+    captured_at = shanghai_now_naive()
+    for recommendation in recommendations:
+        entry = entry_by_code.get(recommendation.code)
+        if entry is None:
+            continue
+        # Normalize lifecycle fields before both serializing and returning the
+        # POST response.  Newly-created automatic rows did not exist while the
+        # analytical candidates were first built, so this also prevents the
+        # POST/GET observation-day mismatch around UTC/Shanghai date boundaries.
+        recommendation.name = entry.name or recommendation.name
+        recommendation.category = (
+            "手动自选" if entry.source == "manual" else (recommendation.category or entry.category)
+        )
+        recommendation.entry_reason = entry.entry_reason or recommendation.entry_reason
+        recommendation.observation_days = max(
+            1,
+            (shanghai_today() - entry.created_at.date()).days + 1,
+        )
+        recommendation.converted = bool(entry.converted_at or recommendation.converted)
+        trade_date = entry.snapshot_date if entry.source == "auto" else snapshot_date
+        trade_date = trade_date or shanghai_today().isoformat()
+        payload = recommendation.model_dump(mode="json")
+        payload_json = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        capture = (
+            db.query(DataCaptureSnapshot)
+            .filter(
+                DataCaptureSnapshot.trade_date == trade_date,
+                DataCaptureSnapshot.data_type == _WATCHLIST_RECOMMENDATION_CAPTURE,
+                DataCaptureSnapshot.target_code == recommendation.code,
+            )
+            .order_by(DataCaptureSnapshot.captured_at.desc(), DataCaptureSnapshot.id.desc())
+            .first()
+        )
+        if capture is None:
+            capture = DataCaptureSnapshot(
+                trade_date=trade_date,
+                source="观察池显式刷新",
+                data_type=_WATCHLIST_RECOMMENDATION_CAPTURE,
+                target_code=recommendation.code,
+            )
+        capture.captured_at = captured_at
+        capture.target_name = recommendation.name
+        capture.raw_value_json = json.dumps(
+            {
+                "schema_version": 1,
+                "snapshot_date": trade_date,
+                "evidence_sources": recommendation.source,
+            },
+            ensure_ascii=False,
+        )
+        capture.normalized_value_json = payload_json
+        capture.quality = "derived"
+        capture.latency_ms = 0
+        capture.is_stale = False
+        capture.is_degraded = False
+        capture.is_estimated = True
+        capture.is_complete = True
+        capture.status = "ok"
+        capture.error_message = ""
+        capture.raw_payload_hash = hashlib.sha256(payload_json.encode("utf-8")).hexdigest()
+        db.add(capture)
+    db.commit()
+
+
+def _persisted_watchlist_recommendations(
+    db: Session,
+    entries: list[WatchlistEntry],
+) -> dict[str, WatchlistRecommendationOut]:
+    """Load the latest complete refresh payload for each active lifecycle row."""
+
+    if not entries:
+        return {}
+    entry_by_code = {entry.code: entry for entry in entries}
+    rows = (
+        db.query(DataCaptureSnapshot)
+        .filter(
+            DataCaptureSnapshot.data_type == _WATCHLIST_RECOMMENDATION_CAPTURE,
+            DataCaptureSnapshot.target_code.in_(list(entry_by_code)),
+            DataCaptureSnapshot.status == "ok",
+            DataCaptureSnapshot.is_complete.is_(True),
+        )
+        .order_by(DataCaptureSnapshot.captured_at.desc(), DataCaptureSnapshot.id.desc())
+        .all()
+    )
+    result: dict[str, WatchlistRecommendationOut] = {}
+    for row in rows:
+        entry = entry_by_code.get(row.target_code)
+        if entry is None or row.target_code in result:
+            continue
+        # An automatic row may qualify again on a later trading day.  Never
+        # show an earlier generation's score under the current generation.
+        if entry.source == "auto" and row.trade_date != entry.snapshot_date:
+            continue
+        try:
+            payload = json.loads(row.normalized_value_json or "{}")
+            recommendation = WatchlistRecommendationOut.model_validate(payload)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            continue
+        if recommendation.code != entry.code:
+            continue
+        result[entry.code] = recommendation.model_copy(update={
+            "name": entry.name or recommendation.name,
+            "category": "手动自选" if entry.source == "manual" else (recommendation.category or entry.category),
+            "entry_reason": entry.entry_reason or recommendation.entry_reason,
+            "observation_days": max(1, (shanghai_today() - entry.created_at.date()).days + 1),
+            "converted": bool(entry.converted_at),
+        })
+    return result
 
 
 def _completed_trading_days(count: int, now: datetime | None = None) -> list[str]:
@@ -96,8 +227,116 @@ def _expectation_revision_out(row: ExpectationRevision, scenarios: list[Expectat
     )
 
 
-@router.get("/watchlist-recommendations", response_model=list[WatchlistRecommendationOut])
-def watchlist_recommendations(db: Session = Depends(get_db)) -> list[WatchlistRecommendationOut]:
+def _read_watchlist_recommendations(db: Session) -> list[WatchlistRecommendationOut]:
+    """Build the current watchlist strictly from persisted lifecycle/evidence rows."""
+
+    entries = db.query(WatchlistEntry).filter(WatchlistEntry.status == "active").all()
+    latest_auto_date = max(
+        (entry.snapshot_date for entry in entries if entry.source == "auto" and entry.snapshot_date),
+        default="",
+    )
+    entries = [
+        entry for entry in entries
+        if entry.source == "manual" or entry.snapshot_date == latest_auto_date
+    ]
+    holding_codes = {row.code for row in db.query(Holding.code).all()}
+    persisted = _persisted_watchlist_recommendations(db, entries)
+    outputs: list[WatchlistRecommendationOut] = []
+    for entry in entries:
+        if entry.code in persisted:
+            saved = persisted[entry.code]
+            outputs.append(saved.model_copy(update={
+                "converted": bool(entry.converted_at or entry.code in holding_codes),
+            }))
+            continue
+        normalized = entry.code.zfill(6)
+        candidates = {entry.code, normalized, normalized.lstrip("0")}
+        expectation = (
+            db.query(ExpectationSnapshot)
+            .filter(ExpectationSnapshot.code.in_(list(candidates)))
+            .order_by(ExpectationSnapshot.created_at.desc(), ExpectationSnapshot.id.desc())
+            .first()
+        )
+        volume = (
+            db.query(VolumePriceSnapshot)
+            .filter(VolumePriceSnapshot.code.in_(list(candidates)))
+            .order_by(VolumePriceSnapshot.captured_at.desc(), VolumePriceSnapshot.id.desc())
+            .first()
+        )
+        expectation_ok = bool(
+            expectation
+            and expectation.expectation_result in {"STRONGER", "MATCHED"}
+            and expectation.expectation_gap_score >= 0
+        )
+        volume_ok = bool(
+            volume
+            and volume.vwap_reliable
+            and str(volume.data_quality or "").lower() not in {"missing", "degraded", "unavailable"}
+        )
+        missing: list[str] = []
+        if not expectation_ok:
+            missing.append("预期差尚未确认不为负")
+        if not volume_ok:
+            missing.append("真实分钟量价尚未确认")
+        if entry.code in holding_codes:
+            missing.append("当前已持仓，应在持仓执行中管理")
+        score = 50
+        score += 20 if expectation_ok else -10
+        score += 20 if volume_ok else -10
+        score = max(0, min(100, score))
+        gate_passed = expectation_ok and volume_ok and entry.code not in holding_codes
+        tier = "重点观察" if gate_passed and score >= 70 else "等待确认"
+        timestamps = [
+            value for value in (
+                expectation.created_at if expectation else None,
+                volume.captured_at if volume else None,
+                entry.updated_at,
+            ) if value is not None
+        ]
+        outputs.append(WatchlistRecommendationOut(
+            code=entry.code,
+            name=entry.name or entry.code,
+            score=score,
+            tier=tier,
+            expectation_status=(
+                _candidate_state_label(expectation.expectation_result)
+                if expectation else "等待建立预期"
+            ),
+            volume_price_status=(
+                _candidate_state_label(volume.pattern)
+                if volume else "等待真实分钟量价"
+            ),
+            expectation_gap=(expectation.expectation_gap_score if expectation else None),
+            gate_passed=gate_passed,
+            missing_conditions=missing,
+            reasons=[entry.entry_reason] if entry.entry_reason else [],
+            risks=(
+                ["观察池不等于买点；未通过预期、量价与计划内买点前禁止追高。"]
+                if not gate_passed else []
+            ),
+            source="持久化观察池 + 后台采集证据",
+            category=entry.category or ("手动自选" if entry.source == "manual" else "系统观察"),
+            entry_reason=entry.entry_reason,
+            observation_days=max(1, (shanghai_today() - entry.created_at.date()).days + 1),
+            converted=bool(entry.converted_at or entry.code in holding_codes),
+            updated_at=max(timestamps) if timestamps else None,
+        ))
+    entry_by_code = {entry.code: entry for entry in entries}
+    return sorted(outputs, key=lambda item: (
+        0 if entry_by_code[item.code].source == "manual" else 1,
+        entry_by_code[item.code].snapshot_rank or 999,
+        item.code,
+    ))
+
+
+def _watchlist_recommendations(
+    db: Session,
+    *,
+    persist_rotation: bool,
+) -> list[WatchlistRecommendationOut]:
+    if not persist_rotation:
+        return _read_watchlist_recommendations(db)
+
     from app.services.market_data import MarketDataProvider, _is_valid_limit_up_ladder
 
     provider = MarketDataProvider()
@@ -171,7 +410,11 @@ def watchlist_recommendations(db: Session = Depends(get_db)) -> list[WatchlistRe
         and live_snapshot_date
         and _is_valid_limit_up_ladder(ladder)
     )
-    display_snapshot_date = snapshot_date if rotation_available else latest_auto_snapshot
+    # A read serves the currently persisted generation.  Only the explicit
+    # refresh endpoint is allowed to advance the displayed snapshot date.
+    display_snapshot_date = (
+        snapshot_date if persist_rotation and rotation_available else latest_auto_snapshot
+    )
     rows: dict[str, dict] = {}
     theme_source = radar.source if radar else "题材数据不可用"
     for theme in (radar.themes[:20] if radar else []):
@@ -394,7 +637,7 @@ def watchlist_recommendations(db: Session = Depends(get_db)) -> list[WatchlistRe
             category=str(row.get("category") or "主线题材观察"),
             entry_reason=(override.entry_reason if override else "") or (row["reasons"][0] if row["reasons"] else "系统评分入选"),
             observation_days=max(1, (shanghai_today() - (override.created_at.date() if override else shanghai_today())).days + 1),
-            converted=bool(override and override.converted_at),
+            converted=bool(override and (override.converted_at or row["code"] in holding_codes)),
             updated_at=max([value for value in (radar.updated_at if radar else None, ladder.updated_at if ladder else None) if value is not None], default=None),
         ))
     output_by_code = {item.code: item for item in outputs}
@@ -402,7 +645,7 @@ def watchlist_recommendations(db: Session = Depends(get_db)) -> list[WatchlistRe
     # once.  Old automatic rows are expired; manual rows are never touched.
     # An excluded row still counts as part of today's snapshot, which is what
     # prevents a delete followed by a GET from silently filling the vacancy.
-    if rotation_available:
+    if persist_rotation and rotation_available:
         for stale in db.query(WatchlistEntry).filter(
             WatchlistEntry.source == "auto",
             WatchlistEntry.status == "active",
@@ -416,7 +659,7 @@ def watchlist_recommendations(db: Session = Depends(get_db)) -> list[WatchlistRe
         WatchlistEntry.source == "auto",
         WatchlistEntry.snapshot_date == snapshot_date,
     ).all()
-    if rotation_available and not today_auto:
+    if persist_rotation and rotation_available and not today_auto:
         ranked = [
             item for item in sorted(outputs, key=lambda item: (-item.score, item.code))
             if item.category in {"昨日涨停承接观察", "近几日涨停／炸板承接观察"}
@@ -477,11 +720,12 @@ def watchlist_recommendations(db: Session = Depends(get_db)) -> list[WatchlistRe
         today_auto = db.query(WatchlistEntry).filter(WatchlistEntry.source == "auto", WatchlistEntry.snapshot_date == snapshot_date).all()
 
     active_entries = db.query(WatchlistEntry).filter(WatchlistEntry.status == "active").all()
-    for entry in active_entries:
-        if entry.code in holding_codes and entry.converted_at is None:
-            entry.converted_at = shanghai_now_naive()
-            db.add(entry)
-    db.commit()
+    if persist_rotation:
+        for entry in active_entries:
+            if entry.code in holding_codes and entry.converted_at is None:
+                entry.converted_at = shanghai_now_naive()
+                db.add(entry)
+        db.commit()
     active_codes = {
         item.code for item in active_entries
         if item.source == "manual" or item.snapshot_date == display_snapshot_date
@@ -526,7 +770,7 @@ def watchlist_recommendations(db: Session = Depends(get_db)) -> list[WatchlistRe
             category=entry.category or "手动自选",
             entry_reason=entry.entry_reason or "用户手动加入观察池",
             observation_days=max(1, (shanghai_today() - entry.created_at.date()).days + 1),
-            converted=bool(entry.converted_at),
+            converted=bool(entry.converted_at or code in holding_codes),
             updated_at=max(
                 [value for value in (expectation.created_at if expectation else None, volume.captured_at if volume else None, entry.updated_at) if value is not None],
                 default=None,
@@ -534,10 +778,29 @@ def watchlist_recommendations(db: Session = Depends(get_db)) -> list[WatchlistRe
         )
     if not active_codes and radar is None and ladder is None:
         raise HTTPException(status_code=503, detail="主线题材与涨停行情源暂不可用，请稍后重试；已有观察池和持仓数据未受影响")
-    return sorted(
+    result = sorted(
         [output_by_code[code] for code in active_codes if code in output_by_code],
-        key=lambda item: next((entry.snapshot_rank for entry in active_entries if entry.code == item.code and entry.snapshot_rank), 999),
+        key=lambda item: (
+            0 if entry_by_code[item.code].source == "manual" else 1,
+            entry_by_code[item.code].snapshot_rank or 999,
+            item.code,
+        ),
     )
+    if persist_rotation and rotation_available:
+        _persist_watchlist_recommendations(db, result, active_entries, snapshot_date)
+    return result
+
+
+@router.get("/watchlist-recommendations", response_model=list[WatchlistRecommendationOut])
+def watchlist_recommendations(db: Session = Depends(get_db)) -> list[WatchlistRecommendationOut]:
+    """Read the current pool without rotating or changing lifecycle rows."""
+    return _watchlist_recommendations(db, persist_rotation=False)
+
+
+@router.post("/watchlist-recommendations/refresh", response_model=list[WatchlistRecommendationOut])
+def refresh_watchlist_recommendations(db: Session = Depends(get_db)) -> list[WatchlistRecommendationOut]:
+    """Explicitly fetch market evidence and persist the next pool generation."""
+    return _watchlist_recommendations(db, persist_rotation=True)
 
 
 @router.post("/watchlist", response_model=WatchlistEntryOut)
@@ -681,7 +944,11 @@ def _candidate_state_label(value: str) -> str:
 
 @router.get("/expectation-rules", response_model=list[ExpectationRuleOut])
 def get_expectation_rules(db: Session = Depends(get_db)) -> list[ExpectationRule]:
-    return ensure_expectation_rules(db)
+    return (
+        db.query(ExpectationRule)
+        .order_by(ExpectationRule.script_type, ExpectationRule.stage, ExpectationRule.base_expectation)
+        .all()
+    )
 
 
 @router.post("/expectation-rules", response_model=ExpectationRuleOut)
@@ -712,17 +979,16 @@ def get_stock_decision_card(code: str, db: Session = Depends(get_db)) -> StockDe
 @router.get("/stocks/{code}/reflexivity", response_model=ReflexivityAssessmentOut)
 def get_stock_reflexivity(
     code: str,
-    force_refresh: bool = False,
     db: Session = Depends(get_db),
 ) -> ReflexivityAssessmentOut:
     card = decision_card(db, code)
-    regime = get_market_regime(db, force_refresh=force_refresh)
+    regime = read_market_regime(db)
     market_assessment = build_market_reflexivity(db, regime)
     holding = _find_holding_by_code(db, code)
     sector_context = None
     if holding is not None:
         try:
-            sector_context = _cached_holding_theme_flow_profile(holding)
+            sector_context = _cached_holding_theme_flow_profile(holding, allow_network=False)
         except Exception:
             # A failed board-data source is an evidence gap, never a zero-flow
             # or zero-relative-strength observation.
@@ -734,7 +1000,25 @@ def get_stock_reflexivity(
 
 @router.get("/stocks/{code}/expectation", response_model=ExpectationSnapshotOut)
 def get_stock_expectation(code: str, db: Session = Depends(get_db)) -> ExpectationSnapshotOut:
-    return build_expectation_snapshot(db, code, stage=current_expectation_stage())
+    normalized = code.zfill(6)
+    row = (
+        db.query(ExpectationSnapshot)
+        .filter(ExpectationSnapshot.code.in_([code, normalized, normalized.lstrip("0")]))
+        .order_by(ExpectationSnapshot.created_at.desc(), ExpectationSnapshot.id.desc())
+        .first()
+    )
+    if row is not None:
+        return _expectation_out(row)
+    holding = _find_holding_by_code(db, code)
+    return build_expectation_snapshot(
+        db,
+        code,
+        name=holding.name if holding else code,
+        stage=current_expectation_stage(),
+        quote={},
+        base_hint=holding.position_type if holding else "",
+        persist=False,
+    )
 
 
 @router.get("/stocks/{code}/expectation-chain", response_model=ExpectationChainOut)
@@ -799,9 +1083,25 @@ def get_stock_expectation_chain(code: str, trade_date: str = "", db: Session = D
 
 @router.get("/stocks/{code}/volume-price", response_model=VolumePriceSnapshotOut)
 def get_stock_volume_price(code: str, db: Session = Depends(get_db)) -> VolumePriceSnapshotOut:
-    quote = quote_for_code(code)
-    name = str(quote.get("name") or code)
-    return build_volume_price_snapshot(db, code, name=name, stage=current_expectation_stage(), quote=quote)
+    normalized = code.zfill(6)
+    row = (
+        db.query(VolumePriceSnapshot)
+        .filter(VolumePriceSnapshot.code.in_([code, normalized, normalized.lstrip("0")]))
+        .order_by(VolumePriceSnapshot.captured_at.desc(), VolumePriceSnapshot.id.desc())
+        .first()
+    )
+    if row is not None:
+        return _snapshot_out(row)
+    holding = _find_holding_by_code(db, code)
+    return build_volume_price_snapshot(
+        db,
+        code,
+        name=holding.name if holding else code,
+        stage=current_expectation_stage(),
+        quote={},
+        daily_metrics={},
+        persist=False,
+    )
 
 
 @router.post("/expectations", response_model=ExpectationSnapshotOut)

@@ -57,6 +57,15 @@ docker compose logs --tail=100 backend
 bash scripts/server_upgrade.sh
 ```
 
+该脚本同时兼容 `docker compose` 与 `docker-compose`。它会先通过 SQLite 在线备份 API 生成一致性副本，再按后端容器 ID 使用 `docker cp` 复制到宿主机，并在宿主机再次执行 `PRAGMA quick_check`。每次升级的证据目录包括：
+
+- `code-before.txt` / `code-after.txt`：升级前后提交号；
+- `trading_discipline.db` / `backup-check.json`：可恢复备份及宿主机完整性检查；
+- `counts-before.json`：升级前关键表行数和当时尚不存在的表；
+- `counts-after.json`：升级后行数、增量和完整性结果。
+
+升级前允许记录尚未由新迁移创建的关键表；升级完成后，任何关键表仍缺失、关键表行数减少、数据库完整性失败或 Alembic 未到 head，脚本都会失败退出并保留证据目录。
+
 验收：
 
 - 打开站点时先出现登录页，未登录不能读取 `/api/holdings`。

@@ -5,6 +5,7 @@ import { chineseEvidence, chineseLabel } from '../labels'
 import { intradayEventSemantics } from '../eventSemantics'
 import { SensitiveEvidenceText, SensitiveValue } from '../privacy'
 import { usePrivacyMode } from '../privacy-context'
+import DecisionBasisView from './DecisionBasisView'
 
 import type {
   HoldingOut as Holding,
@@ -49,15 +50,15 @@ export default function Positions({ mode = 'overview' }: { mode?: 'overview' | '
     setRefreshMessage(failed ? `${now} ${messagePrefix}，部分行情使用缓存/手工价` : `${now} ${messagePrefix}，已按实时行情更新`)
   }
 
-  const fetchSeesaw = (force = false) => {
-    fetch(`${API_BASE}/api/market/seesaw-monitor${force ? '?force_refresh=true' : ''}`)
+  const fetchSeesaw = () => {
+    return fetch(`${API_BASE}/api/market/seesaw-monitor`)
       .then(r => r.json())
       .then((data: SeesawMonitor) => setSeesaw(data))
       .catch(() => {})
   }
 
-  const fetchExecutionStates = (force = false) => {
-    fetch(`${API_BASE}/api/holdings/execution-states${force ? '?force_refresh=true' : ''}`)
+  const fetchExecutionStates = () => {
+    return fetch(`${API_BASE}/api/holdings/execution-states`)
       .then(r => r.json())
       .then((data: PositionExecutionState[]) => setExecutionStates(data))
       .catch(() => setExecutionStates([]))
@@ -127,10 +128,20 @@ export default function Positions({ mode = 'overview' }: { mode?: 'overview' | '
       })
       .then((data: { holdings: Holding[]; success_count: number; fallback_count: number; notes: string[] }) => {
         applyHoldings(data.holdings, `刷新完成：实时 ${data.success_count} 只，缓存/手工 ${data.fallback_count} 只`)
-        fetchSeesaw(true)
-        fetchExecutionStates(true)
         if (data.notes.length) setRefreshMessage(prev => `${prev}；${data.notes.slice(0, 2).join('；')}`)
+        const controller = new AbortController()
+        const timeout = window.setTimeout(() => controller.abort(), 60_000)
+        return fetch(`${API_BASE}/api/intraday-collector/run`, { method: 'POST', signal: controller.signal })
+          .then(async response => {
+            if (!response.ok) throw new Error(await response.text())
+            return response.json()
+          })
+          .catch(() => {
+            setRefreshMessage(prev => `${prev}；盘中证据采集未完成，以下读取最近一次已保存快照`)
+          })
+          .finally(() => window.clearTimeout(timeout))
       })
+      .then(() => Promise.allSettled([fetchSeesaw(), fetchExecutionStates()]))
       .catch(() => setRefreshMessage('行情刷新失败，暂用已有价格'))
       .finally(() => {
         refreshingRef.current = false
@@ -170,11 +181,18 @@ export default function Positions({ mode = 'overview' }: { mode?: 'overview' | '
   useEffect(() => {
     fetchAccountAsset()
     fetchHoldings()
-    fetchSeesaw()
-    fetchExecutionStates()
     fetchTimeStopRules()
     fetchTPlans()
   }, [])
+
+  useEffect(() => {
+    const focusCode = sessionStorage.getItem('position-feedback-code')
+    if (!focusCode || !executionStates.some(item => item.code === focusCode)) return
+    sessionStorage.removeItem('position-feedback-code')
+    window.requestAnimationFrame(() => {
+      document.getElementById(`execution-feedback-${focusCode}`)?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+    })
+  }, [executionStates])
 
   const totalMarketValue = holdings.reduce((s, h) => s + h.market_value, 0)
   const totalPnL = holdings.reduce((s, h) => s + h.profit_amount, 0)
@@ -184,7 +202,16 @@ export default function Positions({ mode = 'overview' }: { mode?: 'overview' | '
   const totalPositionRatio = savedTotalAsset ? totalMarketValue / savedTotalAsset : 0
   const highRiskAlerts = (seesaw?.holding_alerts ?? []).filter(item => ['高', '中高', '中'].includes(item.risk_level))
   const executionByCode = new Map(executionStates.map(item => [item.code, item]))
-  const urgentExecutions = executionStates.filter(item => ['EXIT_REQUIRED', 'REDUCE_REQUIRED', 'PROFIT_PROTECTION', 'EXPECTATION_INVALIDATED'].includes(item.state))
+  const executionPriority = (item: PositionExecutionState) => {
+    const value = `${item.recommendation?.level ?? ''} ${item.state}`.toUpperCase()
+    if (/EXIT|INVALID|CRITICAL|HIGH|必须退出|高风险/.test(value)) return 3
+    if (/REDUCE|PROTECT|WARNING|MEDIUM|减仓|中风险/.test(value)) return 2
+    return 1
+  }
+  const sortedExecutionStates = [...executionStates].sort((left, right) => (
+    executionPriority(right) - executionPriority(left)
+    || Date.parse(right.updated_at || '') - Date.parse(left.updated_at || '')
+  ))
   const money = (value: number) => `${value >= 0 ? '+' : ''}${value.toLocaleString(undefined, { maximumFractionDigits: 2 })} 元`
 
   const resetForm = () => {
@@ -284,25 +311,44 @@ export default function Positions({ mode = 'overview' }: { mode?: 'overview' | '
   }
   const sendFeedback = (state: PositionExecutionState, status: string) => {
     const recommendationId = state.recommendation?.id
-    if (!recommendationId) return
+    if (!recommendationId) {
+      setFeedbackMessage(`${state.name} 暂无可追溯的建议版本，不能提交执行反馈。`)
+      return
+    }
+    const requiresReason = ['部分执行', '不同意', '纪律违背'].includes(status)
+    const promptedReason = requiresReason
+      ? window.prompt(`请填写“${status}”的具体原因，供复盘闭环使用：`, '')
+      : null
+    if (requiresReason && !promptedReason?.trim()) {
+      setFeedbackMessage(`未提交：${status}必须填写原因。`)
+      return
+    }
+    const clientEventId = typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
+      ? crypto.randomUUID()
+      : `feedback-${recommendationId}-${Date.now()}`
     setFeedbackMessage('')
     fetch(`${API_BASE}/api/recommendations/${recommendationId}/execution-feedback`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         status,
-        reason: status === '不同意' ? '人工判断与系统建议不一致，留待复盘。'
-          : status === '未成交' ? '已尝试执行但订单未成交。'
+        reason: promptedReason?.trim() || (status === '未成交' ? '已尝试执行但订单未成交。'
           : status === '没看到' ? '建议出现时未及时看到。'
-          : status === '纪律违背' ? '看到建议但未按纪律执行。'
-          : '',
+          : ''),
+        revision_id: state.recommendation?.revision_id ?? null,
+        client_event_id: clientEventId,
       }),
     })
       .then(async r => {
         if (!r.ok) throw new Error(await r.text())
         return r.json()
       })
-      .then(() => setFeedbackMessage(`${state.name} 已记录：${status}`))
+      .then(() => {
+        setExecutionStates(previous => previous.map(item => item.code === state.code && item.recommendation
+          ? { ...item, recommendation: { ...item.recommendation, feedback_status: status } }
+          : item))
+        setFeedbackMessage(`${state.name} 已记录执行反馈：${status}`)
+      })
       .catch(() => setFeedbackMessage('执行反馈记录失败'))
   }
   const createTPlan = (state: PositionExecutionState) => {
@@ -425,11 +471,11 @@ export default function Positions({ mode = 'overview' }: { mode?: 'overview' | '
         <div className="header-actions">
           <button className="refresh-btn inline" type="button" onClick={fetchHoldings} disabled={refreshing}>
             <RefreshCcw size={16} />
-            {refreshing ? '刷新中' : '重新读取'}
+            {refreshing ? '读取中' : '读取最新采集快照'}
           </button>
           <button className="refresh-btn inline" type="button" onClick={refreshQuotes} disabled={refreshing}>
             <RefreshCcw size={16} />
-            {refreshing ? '刷新中' : '刷新行情'}
+            {refreshing ? '采集中' : '采集并刷新行情'}
           </button>
           <button className="refresh-btn inline" type="button" onClick={syncFromTrades} disabled={syncing}>
             <RefreshCcw size={16} />
@@ -755,8 +801,8 @@ export default function Positions({ mode = 'overview' }: { mode?: 'overview' | '
             </div>
           </div>
           <div className="execution-card-grid">
-            {(urgentExecutions.length ? urgentExecutions : executionStates).slice(0, 6).map(item => (
-              <article className="execution-card" key={`${item.code}-${item.updated_at}`}>
+            {sortedExecutionStates.map(item => (
+              <article id={`execution-feedback-${item.code}`} className={`execution-card ${executionCardTone(item)}`} key={`${item.code}-${item.updated_at}`}>
                 {(() => {
                   const plan = tPlans[item.holding_id]
                   return plan ? (
@@ -792,9 +838,14 @@ export default function Positions({ mode = 'overview' }: { mode?: 'overview' | '
                   <div><b>做T</b><span>{item.t_eligible ? item.t_type : '禁止'}</span></div>
                 </div>
                 <p className="execution-stop-source"><SensitiveEvidenceText value={item.stop_source_detail || '止损来源待下一次状态刷新确认。'} /></p>
-                <div className="execution-evidence">
-                  {(item.evidence.length ? item.evidence : ['暂无强触发证据，按原计划观察。']).slice(0, 3).map(line => <p key={line}><SensitiveEvidenceText value={line} /></p>)}
-                </div>
+                <DecisionBasisView
+                  evidence={item.evidence}
+                  counterEvidence={item.counter_evidence}
+                  invalidConditions={item.invalid_conditions}
+                  recoveryConditions={item.recovery_conditions}
+                  dataQuality={item.data_quality}
+                  asOf={item.data_time || item.updated_at}
+                />
                 <div className="execution-mini-sections">
                   <div>
                     <b>状态迁移</b>
@@ -828,11 +879,22 @@ export default function Positions({ mode = 'overview' }: { mode?: 'overview' | '
                     生成做T计划
                   </button>
                   {['已执行', '部分执行', '不同意', '未成交', '没看到', '纪律违背'].map(status => (
-                    <button key={status} type="button" onClick={() => sendFeedback(item, status)}>
+                    <button
+                      key={status}
+                      type="button"
+                      disabled={!item.recommendation?.id}
+                      title={item.recommendation?.id ? `记录：${status}` : '暂无可追溯的建议版本，不能反馈'}
+                      onClick={() => sendFeedback(item, status)}
+                    >
                       {status === '已执行' ? <CheckCircle2 size={14} /> : <ShieldAlert size={14} />}
                       {status}
                     </button>
                   ))}
+                  <div className="execution-feedback-status">
+                    <b>当前反馈</b>
+                    <span>{item.recommendation?.feedback_status || (item.recommendation?.id ? '尚未反馈' : '无建议版本')}</span>
+                    {item.recommendation?.revision_version != null && <small>建议版本 V{item.recommendation.revision_version}</small>}
+                  </div>
                 </div>
               </article>
             ))}
@@ -967,4 +1029,11 @@ function stopSourceLabel(source: string) {
   }
   const parts = (source || 'fallback_candidate').split('+').filter(Boolean)
   return parts.map(part => labels[part] ?? part).join(' + ') || labels.fallback_candidate
+}
+
+function executionCardTone(item: PositionExecutionState) {
+  const value = `${item.recommendation?.level ?? ''} ${item.state}`.toUpperCase()
+  if (/EXIT|INVALID|CRITICAL|HIGH|必须退出|高风险/.test(value)) return 'risk-high'
+  if (/REDUCE|PROTECT|WARNING|MEDIUM|减仓|中风险/.test(value)) return 'risk-medium'
+  return ''
 }

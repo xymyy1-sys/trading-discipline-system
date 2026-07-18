@@ -1,4 +1,5 @@
 import json
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
@@ -37,31 +38,50 @@ def _out(row: StrategyTemplate) -> StrategyTemplateOut:
         created_at=row.created_at, updated_at=row.updated_at,
     )
 
-def _ensure_defaults(db: Session) -> None:
-    existing = {row.code for row in db.query(StrategyTemplate).all()}
-    for code, name, category in DEFAULT_STRATEGIES:
-        if code in existing:
-            continue
-        db.add(StrategyTemplate(
-            code=code, name=name, category=category,
-            market_environment_json=json.dumps(["市场环境允许该模式"], ensure_ascii=False),
-            prerequisites_json=json.dumps(["数据质量合格", "属于主线或前排"], ensure_ascii=False),
-            premarket_expectation_json=json.dumps(["先定义合理预期区间"], ensure_ascii=False),
-            auction_conditions_json=json.dumps(["竞价不得严重低于预期"], ensure_ascii=False),
-            volume_price_conditions_json=json.dumps(["真实分钟VWAP与成交额确认"], ensure_ascii=False),
-            buy_confirmation_json=json.dumps(["风险收益比达标后确认"], ensure_ascii=False),
-            position_limit=0.2,
-            structure_stop_json=json.dumps(["采用与剧本一致的结构失效位"], ensure_ascii=False),
-            invalid_conditions_json=json.dumps(["预期证伪", "板块订单流方向估算持续转弱"], ensure_ascii=False),
-            holding_management_json=json.dumps(["按证据状态机持有或减仓"], ensure_ascii=False),
-            forbidden_actions_json=json.dumps(["禁止亏损补仓", "禁止数据不足时执行"], ensure_ascii=False),
-        ))
-    db.commit()
+def _default_payload(code: str, name: str, category: str) -> StrategyTemplateIn:
+    return StrategyTemplateIn(
+        code=code,
+        name=name,
+        category=category,
+        market_environment=["市场环境允许该模式"],
+        prerequisites=["数据质量合格", "属于主线或前排"],
+        premarket_expectation=["先定义合理预期区间"],
+        auction_conditions=["竞价不得严重低于预期"],
+        volume_price_conditions=["真实分钟VWAP与成交额确认"],
+        buy_confirmation=["风险收益比达标后确认"],
+        position_limit=0.2,
+        structure_stop=["采用与剧本一致的结构失效位"],
+        invalid_conditions=["预期证伪", "板块订单流方向估算持续转弱"],
+        holding_management=["按证据状态机持有或减仓"],
+        forbidden_actions=["禁止亏损补仓", "禁止数据不足时执行"],
+    )
+
+
+def _transient_default(index: int, payload: StrategyTemplateIn) -> StrategyTemplateOut:
+    """Expose a usable built-in draft without inserting it during a GET.
+
+    Negative ids are stable UI handles.  Saving one through the explicit PUT
+    endpoint materialises the corresponding row and returns its real id.
+    """
+    epoch = datetime(1970, 1, 1, tzinfo=timezone.utc)
+    return StrategyTemplateOut(
+        **payload.model_dump(),
+        id=-(index + 1),
+        version=0,
+        created_at=epoch,
+        updated_at=epoch,
+    )
 
 @router.get("/strategies/templates", response_model=list[StrategyTemplateOut])
 def list_strategy_templates(db: Session = Depends(get_db)) -> list[StrategyTemplateOut]:
-    _ensure_defaults(db)
-    return [_out(row) for row in db.query(StrategyTemplate).order_by(StrategyTemplate.category, StrategyTemplate.id).all()]
+    persisted = db.query(StrategyTemplate).order_by(StrategyTemplate.category, StrategyTemplate.id).all()
+    persisted_codes = {row.code for row in persisted}
+    defaults = [
+        _transient_default(index, _default_payload(code, name, category))
+        for index, (code, name, category) in enumerate(DEFAULT_STRATEGIES)
+        if code not in persisted_codes
+    ]
+    return [*[_out(row) for row in persisted], *defaults]
 
 @router.post("/strategies/templates", response_model=StrategyTemplateOut)
 def create_strategy_template(payload: StrategyTemplateIn, db: Session = Depends(get_db)) -> StrategyTemplateOut:
@@ -74,6 +94,19 @@ def create_strategy_template(payload: StrategyTemplateIn, db: Session = Depends(
 @router.put("/strategies/templates/{template_id}", response_model=StrategyTemplateOut)
 def update_strategy_template(template_id: int, payload: StrategyTemplateIn, db: Session = Depends(get_db)) -> StrategyTemplateOut:
     row = db.get(StrategyTemplate, template_id)
+    if row is None and template_id < 0:
+        index = -template_id - 1
+        if index < 0 or index >= len(DEFAULT_STRATEGIES):
+            raise HTTPException(status_code=404, detail="strategy template not found")
+        expected_code, _, _ = DEFAULT_STRATEGIES[index]
+        if payload.code != expected_code:
+            raise HTTPException(status_code=409, detail="transient strategy handle does not match payload")
+        existing = db.query(StrategyTemplate).filter(StrategyTemplate.code == payload.code).first()
+        if existing is not None:
+            return _save(existing, payload, db, increment=True)
+        row = StrategyTemplate(code=payload.code, name=payload.name)
+        db.add(row)
+        return _save(row, payload, db, increment=False)
     if row is None:
         raise HTTPException(status_code=404, detail="strategy template not found")
     return _save(row, payload, db, increment=True)

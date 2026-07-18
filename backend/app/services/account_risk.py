@@ -13,18 +13,33 @@ def account_risk(db: Session, payload: AccountRiskIn | None = None) -> AccountRi
     row = db.query(AccountDailyRisk).filter(AccountDailyRisk.trade_date == trade_date).first()
     account = db.get(AccountState, 1)
     current_default = float(account.total_asset if account else 0)
-    if row is None:
-        row = AccountDailyRisk(trade_date=trade_date, opening_asset=0, current_asset=current_default)
-        db.add(row)
-    if payload:
+    opening_asset = float(row.opening_asset or 0) if row is not None else 0.0
+    persisted_current_asset = float(row.current_asset or 0) if row is not None else 0.0
+    current_asset = current_default if current_default > 0 else persisted_current_asset
+    updated_at = row.updated_at if row is not None else None
+
+    # Only the explicit PUT path persists account-risk inputs.  A dashboard
+    # GET may derive a transient view from account_state, but must never create
+    # a daily row or rewrite its timestamp merely because the page was opened.
+    if payload is not None:
+        if row is None:
+            row = AccountDailyRisk(
+                trade_date=trade_date,
+                opening_asset=0,
+                current_asset=current_asset,
+            )
+            db.add(row)
         if payload.opening_asset is not None:
-            row.opening_asset = max(0, payload.opening_asset)
+            opening_asset = max(0, payload.opening_asset)
         if payload.current_asset is not None:
-            row.current_asset = max(0, payload.current_asset)
-    elif current_default > 0:
-        row.current_asset = current_default
-    db.commit()
-    db.refresh(row)
+            current_asset = max(0, payload.current_asset)
+        row.opening_asset = opening_asset
+        row.current_asset = current_asset
+        db.commit()
+        db.refresh(row)
+        opening_asset = float(row.opening_asset or 0)
+        current_asset = float(row.current_asset or 0)
+        updated_at = row.updated_at
 
     states = db.query(PositionExecutionState).filter(PositionExecutionState.trade_date == trade_date).all()
     latest_by_code = {}
@@ -37,11 +52,11 @@ def account_risk(db: Session, payload: AccountRiskIn | None = None) -> AccountRi
         TradeLog.traded_at < day_end,
     ).all()
     stop_count = sum("止损" in (item.reason or "") for item in trades)
-    complete = row.opening_asset > 0 and row.current_asset > 0
-    ratio = (row.current_asset / row.opening_asset - 1) * 100 if complete else 0
+    complete = opening_asset > 0 and current_asset > 0
+    ratio = (current_asset / opening_asset - 1) * 100 if complete else 0
     evidence = []
     if complete:
-        evidence.append(f"账户当日收益 {ratio:.2f}%（期初 {row.opening_asset:.2f}，当前 {row.current_asset:.2f}）。")
+        evidence.append(f"账户当日收益 {ratio:.2f}%（期初 {opening_asset:.2f}，当前 {current_asset:.2f}）。")
     else:
         evidence.append("尚未设置当日期初资产，不能计算账户日内风险。")
     if degraded:
@@ -61,8 +76,8 @@ def account_risk(db: Session, payload: AccountRiskIn | None = None) -> AccountRi
         elif ratio <= -2 or stop_count >= 2 or degraded >= 2:
             level, allowed, action = "BLOCK_NEW", False, "停止新开仓，优先处理现有风险仓位。"
     return AccountRiskOut(
-        trade_date=trade_date, opening_asset=row.opening_asset, current_asset=row.current_asset,
+        trade_date=trade_date, opening_asset=opening_asset, current_asset=current_asset,
         daily_profit_ratio=round(ratio, 2), level=level, new_positions_allowed=allowed,
         recommended_action=action, degraded_position_count=degraded, stop_loss_count=stop_count,
-        data_complete=complete, evidence=evidence, updated_at=row.updated_at,
+        data_complete=complete, evidence=evidence, updated_at=updated_at,
     )

@@ -12,7 +12,7 @@ This matrix is derived from all three supplied requirement documents. A feature 
 | High-open failed-breakout model | yellow/orange/red evidence states and 600584 replay checkpoints |
 | Position execution state machine | persisted state transitions, profit protection, structure/hard/time stops, executable position ratios |
 | T trading and T+1 | positive/reverse/no-T eligibility, yesterday/today quantities, sell-buyback lifecycle, permanent reduction |
-| Recommendation feedback | active alerts, acknowledgement, executed/partial/deferred/ignored feedback and review statistics |
+| Recommendation feedback | one current recommendation per stock/day, immutable material revisions, revision-scoped/idempotent feedback, direction/time/quantity trade matching and de-duplicated review statistics |
 | Capital migration | multi-evidence weighted confirmation and `/api/market/capital-rotation` |
 | Candidate pools | evidence-based A/B/C/D classification |
 | Trading scripts | 12 seeded editable and versioned templates |
@@ -33,7 +33,7 @@ This matrix is derived from all three supplied requirement documents. A feature 
 
 | Requirement area | Current boundary / remaining work |
 | --- | --- |
-| Production availability | code is deployable; HTTPS certificate, firewall verification, database backup and real-server smoke tests must run on the target server |
+| Production availability | HTTP target-server deployment, database backup and smoke checks have a verified baseline; every new release still requires its own acceptance record. HTTPS/HSTS remain blocked by the absence of a domain. |
 
 ## Deliberate non-goals
 
