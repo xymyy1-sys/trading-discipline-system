@@ -1,6 +1,10 @@
+import json
+from datetime import datetime
+
 import pandas as pd
 
 from app.api.helpers.quotes import _attach_minute_bars, _daily_history_metrics, _eastmoney_minute_bars, _eastmoney_secid, _eastmoney_tick_flow, _sina_minute_bars
+from app.services.effective_flow import INSUFFICIENT_DATA, analyze_effective_flow
 
 
 def test_eastmoney_secid_handles_a_share_and_etf_markets():
@@ -135,3 +139,56 @@ def test_eastmoney_tick_flow_aggregates_active_and_large_orders(monkeypatch):
     assert flow["09:31"]["active_sell_amount"] == 101_000
     assert flow["09:31"]["large_order_net_amount"] == 300_000
     assert flow["09:31"]["large_order_threshold"] == 200_000
+    assert flow["__meta__"]["tick_returned_count"] == 3
+    assert flow["__meta__"]["tick_first_time"] == "09:31:01"
+    assert flow["__meta__"]["tick_last_time"] == "09:32:00"
+    assert flow["__meta__"]["tick_batch_truncated"] is False
+
+
+def test_eastmoney_tick_truncation_metadata_reaches_effective_flow_guard(monkeypatch):
+    trade_date = "2026-07-17"
+    klines = [
+        f"{trade_date} 10:{minute:02d},10.00,10.{minute:02d},10.30,9.95,1000,1000000,3.5,2.0,0.20,1.2"
+        for minute in range(1, 11)
+    ]
+    details = [f"10:05:{index % 60:02d},10.00,1,0,2" for index in range(2000)]
+
+    class FakeKlineResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"data": {"klines": klines}}
+
+    class FakeTickResponse:
+        text = f'data: {json.dumps({"data": {"details": details}})}\n\n'
+
+        def raise_for_status(self):
+            return None
+
+    def fake_get(url, *_args, **_kwargs):
+        return FakeTickResponse() if "/stock/details/" in url else FakeKlineResponse()
+
+    monkeypatch.setattr("app.api.helpers.quotes._last_trading_day", lambda: trade_date)
+    monkeypatch.setattr("app.api.helpers.quotes.requests.get", fake_get)
+
+    bars = _eastmoney_minute_bars("600584")
+
+    assert len(bars) == 10
+    assert all(bar["tick_batch_truncated"] is True for bar in bars)
+    assert all(bar["tick_returned_count"] == 2000 for bar in bars)
+    assert all(bar["tick_first_time"] == "10:05:00" for bar in bars)
+    assert all("__meta__" not in bar for bar in bars)
+
+    result = analyze_effective_flow(
+        bars,
+        now=datetime(2026, 7, 17, 10, 10),
+        trade_date=trade_date,
+        vwap=10.05,
+        vwap_reliable=True,
+        data_quality="realtime",
+        active_flow_source="eastmoney_tick",
+    )
+
+    assert result.state == INSUFFICIENT_DATA
+    assert "TRUNCATED_TICK_WINDOW" in result.reason_codes

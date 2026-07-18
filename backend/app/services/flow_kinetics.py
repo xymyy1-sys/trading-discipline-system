@@ -142,7 +142,7 @@ def analyze_flow_kinetics(
         return FlowKinetics(
             direction=direction,
             as_of=latest_at.strftime("%Y-%m-%d %H:%M:%S"),
-            evidence=("只有一个带时点的真实资金快照，不计算流速、加速度或拐点。",),
+            evidence=("只有一个带时点的供应商订单流快照，不计算流速、加速度或拐点。",),
         )
 
     previous_at, previous_minute, previous_value = causal[-2]
@@ -152,7 +152,7 @@ def analyze_flow_kinetics(
         return FlowKinetics(
             direction=direction,
             as_of=latest_at.strftime("%Y-%m-%d %H:%M:%S"),
-            evidence=("资金快照没有形成不同的交易分钟，不计算流速。",),
+            evidence=("订单流快照没有形成不同的交易分钟，不计算流速。",),
         )
 
     speed = (latest_value - previous_value) / elapsed
@@ -174,33 +174,33 @@ def analyze_flow_kinetics(
     severity = "info"
 
     if previous_value <= 0 < latest_value:
-        turning, signal = "TURN_TO_INFLOW", "资金由净流出拐为净流入"
+        turning, signal = "TURN_TO_INFLOW", "订单流方向由净流出拐为净流入"
     elif previous_value >= 0 > latest_value:
-        turning, signal, severity = "TURN_TO_OUTFLOW", "资金由净流入拐为净流出", "warning"
+        turning, signal, severity = "TURN_TO_OUTFLOW", "订单流方向由净流入拐为净流出", "warning"
     elif speed >= speed_noise and latest_value < 0:
         turning, signal = "OUTFLOW_NARROWING", "净流出正在快速收窄"
     elif speed <= -speed_noise and latest_value > 0:
         turning, signal, severity = "INFLOW_FADING", "净流入正在快速回落", "warning"
     elif speed >= speed_noise and acceleration is not None and acceleration >= acceleration_noise:
-        turning, signal = "INFLOW_ACCELERATING", "资金流入正在加速"
+        turning, signal = "INFLOW_ACCELERATING", "订单流方向流入正在加速"
     elif speed <= -speed_noise and acceleration is not None and acceleration <= -acceleration_noise:
-        turning, signal, severity = "OUTFLOW_ACCELERATING", "资金流出正在加速", "warning"
+        turning, signal, severity = "OUTFLOW_ACCELERATING", "订单流方向流出正在加速", "warning"
     elif speed >= speed_noise:
-        turning, signal = "FLOW_IMPROVING", "资金边际改善"
+        turning, signal = "FLOW_IMPROVING", "订单流方向边际改善"
     elif speed <= -speed_noise:
-        turning, signal, severity = "FLOW_WEAKENING", "资金边际转弱", "warning"
+        turning, signal, severity = "FLOW_WEAKENING", "订单流方向边际转弱", "warning"
 
     # Price/flow divergence is observable evidence, not a claim about intent.
     if change_pct >= 0.8 and (direction == "NET_OUTFLOW" or speed <= -speed_noise):
-        signal, severity = "价格上涨但资金转弱，形成资金价格背离，警惕诱多", "warning"
+        signal, severity = "价格上涨但订单流方向转弱，形成订单流与价格背离，警惕诱多", "warning"
     elif change_pct <= -0.8 and (turning == "TURN_TO_INFLOW" or speed >= speed_noise):
-        signal = "价格仍下跌但资金边际回流，进入反抽观察；未收复分时均价前不确认反转"
+        signal = "价格仍下跌但订单流方向边际回流，进入反抽观察；未收复分时均价前不确认反转"
 
     speed_text = f"{speed:+.3f}亿/分钟"
     acceleration_text = "不可计算" if acceleration is None else f"{acceleration:+.4f}亿/分钟²"
     evidence = (
         f"{previous_at.strftime('%H:%M:%S')} 至 {latest_at.strftime('%H:%M:%S')}，净流由 {previous_value:+.2f} 亿变为 {latest_value:+.2f} 亿。",
-        f"资金流速 {speed_text}，资金加速度 {acceleration_text}；窗口 {elapsed} 个交易分钟。",
+        f"订单流方向流速 {speed_text}，订单流方向加速度 {acceleration_text}；窗口 {elapsed} 个交易分钟；该值来自供应商算法，不代表账户真实流水。",
     )
     return FlowKinetics(
         direction=direction,
@@ -240,10 +240,10 @@ def classify_price_volume_flow_alerts(
     if change_pct >= 1 and 0 < ratio <= 0.8 and flow_worsening:
         alerts.append(PriceVolumeFlowAlert(
             event_type="SHRINKING_RISE_DIVERGENCE",
-            title="缩量上涨且资金转弱，警惕诱多",
+            title="缩量上涨且订单流方向转弱，警惕诱多",
             severity="warning",
-            action="禁止追高；等待放量站稳分时均价且资金重新拐入。",
-            evidence=(f"涨幅 {change_pct:+.2f}%，量比 {ratio:.2f}。", flow.signal or "资金边际转弱。"),
+            action="禁止追高；等待放量站稳分时均价且订单流方向重新拐入。",
+            evidence=(f"涨幅 {change_pct:+.2f}%，量比 {ratio:.2f}。", flow.signal or "订单流方向边际转弱。"),
         ))
 
     if low_rebound_pct >= 1.5 and 0 < ratio <= 0.8 and below_vwap:
@@ -251,10 +251,10 @@ def classify_price_volume_flow_alerts(
             event_type="SHRINKING_REBOUND_UNCONFIRMED",
             title="缩量反弹仍在分时均价下方，反转未确认",
             severity="warning",
-            action="不追反弹、不急于买回；等待放量站回真实分时均价且板块资金继续改善。",
+            action="不追反弹、不急于买回；等待放量站回真实分时均价且板块订单流方向继续改善。",
             evidence=(
                 f"自日内低点反弹 {low_rebound_pct:.2f}%，量比仅 {ratio:.2f}，价格仍在真实分时均价下方。",
-                flow.signal or "资金方向尚未形成可靠的持续回流。",
+                flow.signal or "订单流方向尚未形成可靠的持续回流。",
             ),
         ))
 
@@ -262,23 +262,23 @@ def classify_price_volume_flow_alerts(
         if flow_improving:
             alerts.append(PriceVolumeFlowAlert(
                 event_type="SHRINKING_DECLINE_EXHAUSTION_WATCH",
-                title="缩量下跌且资金边际改善，抛压衰减待确认",
+                title="缩量下跌且订单流方向边际改善，抛压衰减待确认",
                 severity="info",
                 action="不在低位追卖，也不直接抄底；等待低点抬高并重新站回真实分时均价。",
                 evidence=(
                     f"跌幅 {change_pct:+.2f}%，量比 {ratio:.2f}，下跌成交未放大。",
-                    flow.signal or "资金流速已边际改善。",
+                    flow.signal or "订单流方向流速已边际改善。",
                 ),
             ))
         elif flow_worsening:
             alerts.append(PriceVolumeFlowAlert(
                 event_type="SHRINKING_DECLINE_WEAKNESS",
-                title="缩量下跌但资金仍在流出，不能当作见底",
+                title="缩量下跌但订单流方向仍在流出，不能当作见底",
                 severity="warning",
                 action="禁止接飞刀；缩量只说明成交不足，须等待流出收窄、低点抬高和分时均价修复。",
                 evidence=(
                     f"跌幅 {change_pct:+.2f}%，量比 {ratio:.2f}。",
-                    flow.signal or "资金仍在边际转弱。",
+                    flow.signal or "订单流方向仍在边际转弱。",
                 ),
             ))
 
@@ -294,20 +294,20 @@ def classify_price_volume_flow_alerts(
             event_type="SHRINKING_PULLBACK_SUPPORT_WATCH",
             title="缩量回踩且仍在分时均价上方，观察承接",
             severity="info",
-            action="不因一次回踩恐慌卖出；只有重新放量跌破分时均价且资金拐出才升级风险。",
+            action="不因一次回踩恐慌卖出；只有重新放量跌破分时均价且订单流方向拐出才升级风险。",
             evidence=(
                 f"当前仍上涨 {change_pct:+.2f}%，高点回撤 {high_drawdown_pct:.2f}%，量比 {ratio:.2f}。",
-                flow.signal or "资金未出现可靠转弱拐点。",
+                flow.signal or "订单流方向未出现可靠转弱拐点。",
             ),
         ))
 
     if change_pct <= -2 and ratio >= 1.2 and below_vwap and flow_worsening:
         alerts.append(PriceVolumeFlowAlert(
             event_type="VOLUME_DOWN_FLOW_ACCELERATION",
-            title="放量下跌且资金转弱，禁止接飞刀",
+            title="放量下跌且订单流方向转弱，禁止接飞刀",
             severity="critical",
             action="不逆势补仓；等待流出速度明显收窄、低点抬高并重新站回真实分时均价。",
-            evidence=(f"跌幅 {change_pct:+.2f}%，量比 {ratio:.2f}，价格位于真实分时均价下方。", flow.signal or "资金流出仍在延续。"),
+            evidence=(f"跌幅 {change_pct:+.2f}%，量比 {ratio:.2f}，价格位于真实分时均价下方。", flow.signal or "订单流方向流出仍在延续。"),
         ))
 
     if near_intraday_low and not hard_stop_triggered and change_pct <= -3 and (flow_improving or low_rebound_pct >= 1.5):
@@ -316,44 +316,44 @@ def classify_price_volume_flow_alerts(
             title="低位恐慌释放，禁止在日内低点追卖",
             severity="info",
             action="禁止在低点追卖；保留风险结论并等待首次有效反抽，只有固定硬止损实际触发才直接退出。",
-            evidence=(f"当前接近日内低点，跌幅 {change_pct:+.2f}%，低点反弹 {low_rebound_pct:.2f}%。", flow.signal or "资金流速已停止恶化。"),
+            evidence=(f"当前接近日内低点，跌幅 {change_pct:+.2f}%，低点反弹 {low_rebound_pct:.2f}%。", flow.signal or "订单流方向流速已停止恶化。"),
         ))
 
     if change_pct > 0 and flow.turning == "TURN_TO_OUTFLOW":
         alerts.append(PriceVolumeFlowAlert(
             event_type="FLOW_TURN_OUT_DISTRIBUTION_WARNING",
-            title="上涨过程中资金由流入拐为流出",
+            title="上涨过程中订单流方向由流入拐为流出",
             severity="warning",
             action="提高利润保护；若随后跌破真实分时均价，按冲高兑现窗口处理。",
-            evidence=(flow.signal or "资金由净流入拐为净流出。",),
+            evidence=(flow.signal or "订单流方向由净流入拐为净流出。",),
         ))
     elif change_pct < 0 and flow.turning == "TURN_TO_INFLOW":
         alerts.append(PriceVolumeFlowAlert(
             event_type="FLOW_TURN_IN_REBOUND_WATCH",
-            title="下跌过程中资金由流出拐为流入",
+            title="下跌过程中订单流方向由流出拐为流入",
             severity="info",
             action="进入反抽观察，不在最低点追卖；未站回真实分时均价前也不追涨或抄底。",
-            evidence=(flow.signal or "资金由净流出拐为净流入。",),
+            evidence=(flow.signal or "订单流方向由净流出拐为净流入。",),
         ))
 
     if change_pct >= 1.5 and ratio >= 1.2 and above_vwap and flow_improving:
         alerts.append(PriceVolumeFlowAlert(
             event_type="VOLUME_FLOW_STRENGTH_CONFIRMED",
-            title="放量上涨且资金同步改善",
+            title="放量上涨且订单流方向同步改善",
             severity="info",
-            action="保持观察；回踩分时均价不破且资金未再拐出，才视为强势延续。",
-            evidence=(f"涨幅 {change_pct:+.2f}%，量比 {ratio:.2f}，价格位于真实分时均价上方。", flow.signal or "资金边际改善。"),
+            action="保持观察；回踩分时均价不破且订单流方向未再拐出，才视为强势延续。",
+            evidence=(f"涨幅 {change_pct:+.2f}%，量比 {ratio:.2f}，价格位于真实分时均价上方。", flow.signal or "订单流方向边际改善。"),
         ))
 
     if low_rebound_pct >= 1.5 and ratio >= 1.2 and above_vwap and flow_improving:
         alerts.append(PriceVolumeFlowAlert(
             event_type="VOLUME_REBOUND_CONFIRMED",
-            title="放量反弹站回分时均价且资金改善",
+            title="放量反弹站回分时均价且订单流方向改善",
             severity="info",
             action="停止沿用低点卖出结论；观察首次回踩分时均价是否不破，仍不自动加仓。",
             evidence=(
                 f"自日内低点反弹 {low_rebound_pct:.2f}%，量比 {ratio:.2f}，已在真实分时均价上方。",
-                flow.signal or "资金边际改善。",
+                flow.signal or "订单流方向边际改善。",
             ),
         ))
 

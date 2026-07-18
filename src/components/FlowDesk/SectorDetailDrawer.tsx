@@ -66,7 +66,7 @@ export default function SectorDetailDrawer({
         </div>
 
         <div className="drawer-stats">
-          <MiniStat label="净流入" value={`${(detail?.net_inflow ?? item.net_inflow).toFixed(2)}亿`} tone={(detail?.net_inflow ?? item.net_inflow) >= 0 ? 'up' : 'down'} />
+          <MiniStat label="订单流方向净额" value={`${(detail?.net_inflow ?? item.net_inflow).toFixed(2)}亿`} tone={(detail?.net_inflow ?? item.net_inflow) >= 0 ? 'up' : 'down'} />
           <MiniStat label="涨跌幅" value={`${(detail?.change_pct ?? item.change_pct).toFixed(2)}%`} tone={(detail?.change_pct ?? item.change_pct) >= 0 ? 'up' : 'down'} />
           <MiniStat label="涨停股" value={`${detail?.limit_up_stocks.length ?? 0}只`} />
           <MiniStat label="强度" value={`${detail?.strength ?? item.strength}/100`} />
@@ -74,7 +74,7 @@ export default function SectorDetailDrawer({
           <MiniStat label="板块分时均价" value={item.sector_vwap?.toFixed(2) ?? '--'} />
         </div>
 
-        <FlowKineticsEvidence fields={item} label="板块资金拐点" />
+        <FlowKineticsEvidence fields={item} label="板块订单流拐点" />
 
         <p className="plain-text">
           {item.sector_vwap_reliable

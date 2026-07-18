@@ -130,7 +130,7 @@ def summarize_all_a_rows(
 
     notes: list[str] = []
     if expected_total and len(rows) < expected_total:
-        notes.append(f"全A行情仅返回{len(rows)}/{expected_total}条，广度和资金统计标记为缺口。")
+        notes.append(f"全A行情仅返回{len(rows)}/{expected_total}条，广度和订单流方向统计标记为缺口。")
         if len(rows) / max(1, expected_total) < 0.90:
             return {}, notes + ["全A覆盖率不足90%，拒绝用涨幅排序的局部榜单推断全市场。"]
     if not active:
@@ -164,7 +164,7 @@ def summarize_all_a_rows(
     if turnover_yi is None:
         notes.append(f"成交额字段覆盖{len(amount_values)}/{len(active)}，不足90%，不输出市场成交额。")
     if main_net_yi is None:
-        notes.append(f"主力净流字段覆盖{len(main_flow_values)}/{len(active)}，不足90%，不输出全市场主力净流。")
+        notes.append(f"供应商大单方向字段覆盖{len(main_flow_values)}/{len(active)}，不足90%，不输出全市场大单方向估算。")
 
     source_time = shanghai_from_timestamp(max(source_timestamps)) if source_timestamps else None
     # Before the next session opens, quote endpoints still expose the previous
@@ -651,7 +651,7 @@ def _fetch_sector_evidence(force_refresh: bool) -> tuple[dict[str, Any], str, li
     except Exception as exc:
         raw_rows = []
         notes.append(
-            f"全量行业资金采集失败：{exc.__class__.__name__}；行业正负比例和集中度保持为空。"
+            f"全量行业订单流方向采集失败：{exc.__class__.__name__}；行业正负比例和集中度保持为空。"
         )
 
     directional_rows = [
@@ -727,7 +727,7 @@ def _fetch_sector_evidence(force_refresh: bool) -> tuple[dict[str, Any], str, li
             for item in visible_negative[:5]
         ]
     if not raw_rows and not strongest and not weakest:
-        notes.append("行业资金榜为空，不生成板块扩散结论。")
+        notes.append("行业订单流方向榜为空，不生成板块扩散结论。")
     if not vwap_items:
         notes.append("行业指数分钟均价缺失，板块站上VWAP比例留空。")
     else:
@@ -758,7 +758,7 @@ def _missing_metric_fields(metrics: MarketRegimeMetrics) -> list[str]:
         "index_composite_change_pct": "主要指数合成涨跌幅",
         "limit_up_count": "涨停家数",
         "limit_down_count": "跌停家数",
-        "market_main_net_inflow_yi": "全市场主力净流入",
+        "market_main_net_inflow_yi": "全市场大单方向估算",
         "positive_sector_ratio": "行业上涨/正流入扩散比例",
         "top3_inflow_share": "行业流入集中度",
         "sector_above_vwap_ratio": "行业指数站上VWAP比例",
@@ -806,7 +806,7 @@ def classify_market_regime(
         "主要指数合成涨跌幅",
         "涨停家数",
         "跌停家数",
-        "全市场主力净流入",
+        "全市场大单方向估算",
         "行业上涨/正流入扩散比例",
     }
     missing_required = [item for item in missing if item in required]
@@ -850,7 +850,7 @@ def classify_market_regime(
             if volume_ratio_previous is not None
             else f"预计全天成交额为5日均额的{volume_ratio:.2f}倍，主要指数合成涨跌{index_change:+.2f}%。"
         ),
-        f"全市场主力净流入{main_flow:+.2f}亿，行业正向比例{sector_ratio:.1%}。",
+        f"全市场大单方向估算{main_flow:+.2f}亿，行业正向比例{sector_ratio:.1%}；该值来自供应商算法，不是账户真实流水。",
     ]
 
     repair = False
@@ -884,7 +884,7 @@ def classify_market_regime(
         code, name, risk = "STABILIZING_REPAIR", "恐慌企稳修复", "中"
         allowed = ["仅允许10%-20%计划仓位试错", "等待板块和个股重新站稳VWAP后再执行"]
         forbidden = ["禁止把单次反抽当作趋势反转", "禁止一次性补满仓"]
-        evidence.append("市场广度、指数、行业扩散和主力流较上一快照同步修复。")
+        evidence.append("市场广度、指数、行业扩散和供应商订单流方向估算较上一快照同步修复。")
     elif (
         shrink_signal
         and advance_ratio <= 0.30
@@ -924,9 +924,9 @@ def classify_market_regime(
         and sector_ratio <= 0.60
     ):
         code, name, risk = "SHRINK_ROTATION", "缩量存量轮动", "中高"
-        allowed = ["只做主线前排或容量核心的小仓确认", "跟踪资金排名和板块VWAP"]
+        allowed = ["只做主线前排或容量核心的小仓确认", "跟踪订单流方向排名和板块VWAP"]
         forbidden = ["禁止追后排补涨", "禁止在板块流入减速时接力"]
-        evidence.append(f"前三行业占正流入{float(metrics.top3_inflow_share):.1%}，资金集中于少数方向。")
+        evidence.append(f"前三行业占正向订单流{float(metrics.top3_inflow_share):.1%}，方向估算集中于少数板块。")
     else:
         code, name, risk = "NEUTRAL_DIVERGENCE", "中性震荡分歧", "中"
         allowed = ["按个股预期和量价证据执行", "控制仓位并等待方向确认"]

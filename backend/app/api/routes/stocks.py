@@ -201,7 +201,7 @@ def watchlist_recommendations(db: Session = Depends(get_db)) -> list[WatchlistRe
             ]
             row["risks"] = [risk for risk in row["risks"] if "题材资金" not in risk]
             if theme.net_inflow > 0:
-                row["fund_signal"] = f"题材净流入{theme.net_inflow:.2f}亿"
+                row["fund_signal"] = f"题材订单流方向净额{theme.net_inflow:.2f}亿（供应商算法）"
                 row["reasons"].append(row["fund_signal"])
             else:
                 row["fund_signal"] = ""

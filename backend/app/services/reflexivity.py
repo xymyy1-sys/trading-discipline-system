@@ -14,7 +14,7 @@ from typing import Any
 
 
 METHODOLOGY_NOTE = (
-    "本模块识别的是价格、量能、市场宽度和资金行为所呈现的预期拥挤代理，"
+    "本模块识别的是价格、量能、市场宽度和供应商订单流算法所呈现的预期拥挤代理，"
     "不是对主力、散户或任何参与者真实意图的判断；场景必须由后续数据验证或证伪。"
 )
 
@@ -23,7 +23,7 @@ MARKET_REQUIRED_FIELDS = {
     "advance_ratio": "上涨家数占比",
     "index_change_pct": "指数涨跌幅",
     "index_vwap_deviation_pct": "指数相对分时均价偏离",
-    "market_main_net_inflow_yi": "全市场资金净流入",
+    "market_main_net_inflow_yi": "全市场大单方向估算",
     "positive_sector_ratio": "上涨/净流入板块占比",
     "low_rebound_pct": "指数距日内低点反弹",
     "high_drawdown_pct": "指数距日内高点回撤",
@@ -97,7 +97,7 @@ STOCK_SCENARIO_REQUIRED_FIELDS = {
 
 MARKET_FIELD_LABELS = {
     **MARKET_REQUIRED_FIELDS,
-    "main_net_inflow_change_yi": "资金净流向较前一快照变化",
+    "main_net_inflow_change_yi": "大单方向估算较前一快照变化",
 }
 
 
@@ -308,18 +308,18 @@ def analyze_market_reflexivity(metrics: Mapping[str, Any]) -> dict[str, Any]:
     score = 18.0
     score += _add(rebound is not None and rebound >= 1.0, 20, evidence, f"指数从日内低点反弹{_fmt(rebound)}%")
     score += _add(vwap is not None and vwap >= 0, 18, evidence, f"指数回到分时均价上方{_fmt(vwap, signed=True)}%")
-    score += _add(flow_change is not None and flow_change > 0, 14, evidence, f"资金净流向较前一快照改善{_fmt(flow_change, 1, signed=True)}亿元")
+    score += _add(flow_change is not None and flow_change > 0, 14, evidence, f"大单方向估算较前一快照改善{_fmt(flow_change, 1, signed=True)}亿元（供应商算法）")
     score += _add(advance is not None and advance >= 0.45, 14, evidence, f"上涨家数占比修复至{_fmt(advance, 1, scale=100)}%")
     score += _add(sectors is not None and sectors >= 0.45, 12, evidence, f"正向板块占比修复至{_fmt(sectors, 1, scale=100)}%")
     if vwap is not None and vwap < 0:
         counter.append(f"指数仍在分时均价下方{abs(vwap):.2f}%")
     if main_flow is not None and main_flow < 0:
-        counter.append(f"全市场资金仍净流出{abs(main_flow):.1f}亿元")
+        counter.append(f"全市场大单方向估算仍为负{abs(main_flow):.1f}亿元（供应商算法）")
     scenarios.append(_scenario(
         "REBOUND_ABSORPTION", "反弹出现有效承接", score, evidence, counter,
         ["等待指数回踩分时均价不破后再提高持仓容忍度", "只跟踪与指数、板块共振且强于板块的标的"],
         ["首次脉冲即追高", "仅凭一根反弹K线认定反转"],
-        ["下一次回踩能否守住指数分时均价", "上涨家数与正向板块占比能否连续两个快照改善", "资金净流出是否继续收窄或翻正"],
+        ["下一次回踩能否守住指数分时均价", "上涨家数与正向板块占比能否连续两个快照改善", "大单方向估算负值是否继续收窄或翻正"],
     ))
 
     evidence, counter = [], []
@@ -328,18 +328,18 @@ def analyze_market_reflexivity(metrics: Mapping[str, Any]) -> dict[str, Any]:
     score += _add(index_change is not None and index_change <= -1, 16, evidence, f"指数下跌{_fmt(index_change, absolute=True)}%")
     score += _add(vwap is not None and vwap < 0, 16, evidence, f"指数位于分时均价下方{_fmt(vwap, absolute=True)}%")
     score += _add(rebound is not None and rebound < 0.6, 13, evidence, f"距日内低点反弹仅{_fmt(rebound)}%")
-    score += _add(main_flow is not None and main_flow < 0, 10, evidence, f"全市场资金净流出{_fmt(main_flow, 1, absolute=True)}亿元")
+    score += _add(main_flow is not None and main_flow < 0, 10, evidence, f"全市场大单方向估算为负{_fmt(main_flow, 1, absolute=True)}亿元（供应商算法）")
     score += _add(sectors is not None and sectors <= 0.3, 10, evidence, f"正向板块占比仅{_fmt(sectors, 1, scale=100)}%")
     if rebound is not None and rebound >= 1:
         score -= 20
         counter.append(f"指数已从低点反弹{rebound:.2f}%，不再符合“无反弹”的严格定义")
     if flow_change is not None and flow_change > 0:
-        counter.append(f"资金净流向已改善{flow_change:+.1f}亿元")
+        counter.append(f"大单方向估算已改善{flow_change:+.1f}亿元（供应商算法）")
     scenarios.append(_scenario(
         "NO_REBOUND_LIQUIDATION", "无有效反弹、抛压继续释放", score, evidence, counter,
         ["暂停新开仓与补仓", "只执行已预先定义且被真实价格触发的硬止损", "等待首次放量回收分时均价"],
         ["下跌途中凭主观估值抄底", "没有硬止损依据时在日内低点附近恐慌追卖", "用单一个股反弹替代全市场确认"],
-        ["指数能否从低点反弹并回收分时均价", "上涨家数占比能否脱离极低区", "跌停家数是否下降且资金净流出收窄"],
+        ["指数能否从低点反弹并回收分时均价", "上涨家数占比能否脱离极低区", "跌停家数是否下降且大单方向估算负值收窄"],
     ))
 
     evidence, counter = [], []
@@ -347,7 +347,7 @@ def analyze_market_reflexivity(metrics: Mapping[str, Any]) -> dict[str, Any]:
     score += _add(rebound is not None and rebound >= 0.7, 15, evidence, f"盘中曾从低点反弹{_fmt(rebound)}%")
     score += _add(vwap is not None and vwap < 0, 18, evidence, f"反弹后仍未站回分时均价，偏离{_fmt(vwap, signed=True)}%")
     score += _add(drawdown is not None and drawdown >= 1.2, 17, evidence, f"距日内高点回撤{_fmt(drawdown)}%")
-    score += _add(flow_change is not None and flow_change <= 0, 12, evidence, "反弹过程中资金净流向未改善")
+    score += _add(flow_change is not None and flow_change <= 0, 12, evidence, "反弹过程中大单方向估算未改善")
     score += _add(advance is not None and advance < 0.4, 12, evidence, f"上涨家数占比仍仅{_fmt(advance, 1, scale=100)}%")
     if vwap is not None and vwap >= 0:
         counter.append("指数已站回分时均价")
@@ -357,7 +357,7 @@ def analyze_market_reflexivity(metrics: Mapping[str, Any]) -> dict[str, Any]:
         "REBOUND_FAILURE_SUPPLY", "反弹失败、上方抛压重新占优", score, evidence, counter,
         ["反抽不能回收分时均价时分批降低风险", "优先处理弱于指数和所属板块的持仓"],
         ["反抽时无差别追涨", "把缩量反抽视为趋势反转", "在首次回落前一次性做满仓位"],
-        ["二次回升能否放量站回分时均价", "回落是否跌破前低", "板块相对强度和资金流能否转正"],
+        ["二次回升能否放量站回分时均价", "回落是否跌破前低", "板块相对强度和订单流方向能否转正"],
     ))
 
     evidence, counter = [], []
@@ -366,7 +366,7 @@ def analyze_market_reflexivity(metrics: Mapping[str, Any]) -> dict[str, Any]:
     score += _add(index_change is not None and index_change > 0, 14, evidence, f"指数上涨{_fmt(index_change)}%")
     score += _add(vwap is not None and vwap >= 0.3, 17, evidence, f"指数站上分时均价{_fmt(vwap, signed=True)}%")
     score += _add(advance is not None and advance >= 0.6, 16, evidence, f"上涨家数占比扩散至{_fmt(advance, 1, scale=100)}%")
-    score += _add(main_flow is not None and main_flow > 0, 12, evidence, f"全市场资金净流入{_fmt(main_flow, 1)}亿元")
+    score += _add(main_flow is not None and main_flow > 0, 12, evidence, f"全市场大单方向估算为正{_fmt(main_flow, 1)}亿元（供应商算法）")
     score += _add(sectors is not None and sectors >= 0.6, 11, evidence, f"正向板块占比{_fmt(sectors, 1, scale=100)}%")
     if volume_ratio is not None and volume_ratio < 0.9:
         counter.append(f"成交额仅为5日均额的{volume_ratio:.2f}倍，修复量能不足")
@@ -512,15 +512,15 @@ def analyze_stock_reflexivity(
     score += _add(rebound is not None and rebound >= 2, 20, evidence, f"股价从日内低点反弹{_fmt(rebound)}%")
     score += _add(vwap is not None and vwap >= 0, 18, evidence, f"股价回到分时均价上方{_fmt(vwap, signed=True)}%")
     score += _add(sector_rs is not None and sector_rs >= 0, 13, evidence, f"相对所属板块强度{_fmt(sector_rs, signed=True)}%")
-    score += _add(sector_flow_improving, 10, evidence, "所属板块资金流速/拐点边际改善")
+    score += _add(sector_flow_improving, 10, evidence, "所属板块订单流方向流速/拐点边际改善")
     score += _add(volume is not None and volume >= 1, 12, evidence, f"量能比{_fmt(volume)}，承接有量")
     score += _add(gap is not None and gap >= 0, 10, evidence, f"当前预期差{_fmt(gap, 1, signed=True)}")
     if market_risk:
         counter.append(f"全市场仍处于{market_scenario}风险状态")
     if sector_flow is not None and sector_flow < 0:
-        counter.append(f"所属板块资金净流出{abs(sector_flow):.1f}亿元")
+        counter.append(f"所属板块订单流方向净额为负{abs(sector_flow):.1f}亿元（供应商算法）")
     if sector_flow_weakening:
-        counter.append("所属板块资金流速或拐点正在转弱")
+        counter.append("所属板块订单流方向流速或拐点正在转弱")
     scenarios.append(_scenario(
         "REBOUND_ABSORPTION", "反弹获得承接", score, evidence, counter,
         ["保留计划内仓位，观察回踩分时均价", "回踩缩量不破且板块同步转强时继续持有"],
@@ -534,7 +534,7 @@ def analyze_stock_reflexivity(
     score += _add(vwap is not None and vwap < 0, 17, evidence, f"股价位于分时均价下方{_fmt(vwap, absolute=True)}%")
     score += _add(rebound is not None and rebound < 1, 14, evidence, f"距日内低点反弹仅{_fmt(rebound)}%")
     score += _add(sector_rs is not None and sector_rs < 0, 12, evidence, f"弱于所属板块{_fmt(sector_rs, absolute=True)}%")
-    score += _add(sector_flow_weakening, 10, evidence, "所属板块资金流速/拐点继续转弱")
+    score += _add(sector_flow_weakening, 10, evidence, "所属板块订单流方向流速/拐点继续转弱")
     score += _add(market_risk, 10, evidence, "全市场风险闸门处于防守状态")
     score += _add(support_distance is not None and support_distance < 0, 10, evidence, f"已跌破预定义支撑{_fmt(support_distance, absolute=True)}%")
     if volume is not None and volume < 0.8:
@@ -560,7 +560,7 @@ def analyze_stock_reflexivity(
     score += _add(drawdown is not None and drawdown >= 4, 18, evidence, f"距日内高点回撤{_fmt(drawdown)}%")
     score += _add(volume is not None and volume >= 1.2, 12, evidence, f"量能比{_fmt(volume)}但价格未能维持")
     score += _add(sector_rs is not None and sector_rs < 0, 10, evidence, f"反弹后仍弱于板块{_fmt(sector_rs, absolute=True)}%")
-    score += _add(sector_flow_weakening, 10, evidence, "反弹阶段板块资金仍在边际转弱")
+    score += _add(sector_flow_weakening, 10, evidence, "反弹阶段板块订单流方向仍在边际转弱")
     if vwap is not None and vwap >= 0:
         counter.append("股价已经回收分时均价")
     scenarios.append(_scenario(
@@ -576,7 +576,7 @@ def analyze_stock_reflexivity(
     score += _add(vwap is not None and vwap >= 0.5, 17, evidence, f"股价站上分时均价{_fmt(vwap, signed=True)}%")
     score += _add(change is not None and change > 0, 13, evidence, f"股价上涨{_fmt(change)}%")
     score += _add(sector_rs is not None and sector_rs >= 1, 14, evidence, f"强于所属板块{_fmt(sector_rs, signed=True)}%")
-    score += _add(sector_flow_improving, 10, evidence, "所属板块资金流速/拐点同步改善")
+    score += _add(sector_flow_improving, 10, evidence, "所属板块订单流方向流速/拐点同步改善")
     score += _add(volume is not None and 1 <= volume <= 2.5, 11, evidence, f"量能比{_fmt(volume)}，量价尚未极端")
     if market_risk:
         counter.append(f"全市场{market_scenario}仍限制个股仓位上限")
@@ -586,7 +586,7 @@ def analyze_stock_reflexivity(
         "UPSIDE_SURPRISE_REPAIR", "超预期修复/弱转强候选", score, evidence, counter,
         ["已有仓位可持有并以分时均价作为动态验证线", "等待回踩不破、板块共振后再评估风险收益比"],
         ["在大盘风险闸门关闭时新增仓位", "高开或急拉时直接追价", "没有失效条件的主观格局"],
-        ["回踩分时均价是否缩量不破", "所属板块资金流与相对强度能否同步改善", "下一高点突破时是否有成交量确认"],
+        ["回踩分时均价是否缩量不破", "所属板块订单流方向与相对强度能否同步改善", "下一高点突破时是否有成交量确认"],
     ))
 
     scenarios.sort(key=lambda item: item["match_score"], reverse=True)
@@ -669,7 +669,7 @@ CONSENSUS_OPEN_REQUIRED_LABELS = {
     "actual_open_pct": "实际开盘涨幅",
     "sector_opening_consensus": "板块高开广度或多只成分股高开",
     "post_open_drawdown_pct": "开盘后相对高点回撤",
-    "weakening_confirmation": "分时均价或资金转弱证据",
+    "weakening_confirmation": "分时均价或订单流方向转弱证据",
 }
 
 
@@ -732,9 +732,9 @@ def analyze_consensus_high_open_fade(metrics: Mapping[str, Any]) -> dict[str, An
         "evidence": [],
         "counter_evidence": [],
         "missing_fields": list(dict.fromkeys(missing)),
-        "allowed_actions": ["补齐真实竞价、板块广度和开盘后量价证据后再判断"] if missing else ["继续观察开盘后的承接与资金方向"],
+        "allowed_actions": ["补齐真实竞价、板块广度和开盘后量价证据后再判断"] if missing else ["继续观察开盘后的承接与订单流方向"],
         "forbidden_actions": ["用缺失或模拟数据生成追涨、清仓结论", "仅凭高开或单条消息自动卖出"],
-        "next_validation_points": ["价格能否重新站回真实分时均价", "板块资金流速是否停止恶化并拐回流入"],
+        "next_validation_points": ["价格能否重新站回真实分时均价", "板块订单流方向流速是否停止恶化并拐回流入"],
         "methodology_note": "只识别可观测的一致性兑现风险，不推断主力意图，也不自动触发卖出。",
     }
     if missing:
@@ -787,9 +787,9 @@ def analyze_consensus_high_open_fade(metrics: Mapping[str, Any]) -> dict[str, An
             details.append(f"流速 {flow_speed:+.3f} 亿/分钟")
         if flow_acceleration is not None:
             details.append(f"加速度 {flow_acceleration:+.4f} 亿/分钟²")
-        evidence.append("板块资金边际转弱：" + "，".join(details) + "。")
+        evidence.append("板块订单流方向边际转弱：" + "，".join(details) + "（供应商算法）。")
     elif flow_reliable and (flow_speed is not None or flow_acceleration is not None or flow_turning):
-        counter.append("板块资金尚未确认由强转弱。")
+        counter.append("板块订单流方向尚未确认由强转弱。")
 
     trigger = bool(
         previous_reversal is True
@@ -811,8 +811,8 @@ def analyze_consensus_high_open_fade(metrics: Mapping[str, Any]) -> dict[str, An
         "evidence": evidence,
         "counter_evidence": counter,
         "allowed_actions": (
-            ["禁止在开盘一致阶段追涨", "等待首次承接；反抽不能收复分时均价且资金继续转弱时，按计划分批减仓"]
-            if trigger else ["保持观察，只有价格和资金进一步转弱才升级风险"]
+            ["禁止在开盘一致阶段追涨", "等待首次承接；反抽不能收复分时均价且订单流方向继续转弱时，按计划分批减仓"]
+            if trigger else ["保持观察，只有价格和订单流方向进一步转弱才升级风险"]
         ),
         "forbidden_actions": ["仅凭高开或消息自动卖出", "在尚未确认承接失败时一次性清仓", "在转弱过程中盲目接飞刀"],
     })
@@ -920,11 +920,11 @@ def analyze_news_impact(
     if market_captured_at is not None:
         captured_reference = market_captured_at.astimezone(evaluated_at.tzinfo)
         if captured_reference > evaluated_at + timedelta(seconds=5):
-            missing.append("资金量价验证时点晚于评估时点")
+            missing.append("订单流与量价验证时点晚于评估时点")
         elif published is not None:
             published_reference = published.astimezone(captured_reference.tzinfo)
             if captured_reference < published_reference:
-                missing.append("缺少消息发布后的资金量价验证")
+                missing.append("缺少消息发布后的订单流与量价验证")
             else:
                 market_time_valid = True
         else:
@@ -982,24 +982,24 @@ def analyze_news_impact(
 
     evidence: list[str] = []
     if fund_present:
-        evidence.append(f"资金方向 {fund_direction or '--'}，拐点 {flow_turning or '--'}。")
+        evidence.append(f"订单流方向 {fund_direction or '--'}，拐点 {flow_turning or '--'}（供应商算法）。")
     if price_present:
         evidence.append(f"价格方向 {price_direction or '--'}，相对分时均价 {vwap_position or '--'}。")
     if market_captured_at:
-        evidence.append(f"资金量价验证时点 {market_captured_at.isoformat()}。")
+        evidence.append(f"订单流与量价验证时点 {market_captured_at.isoformat()}。")
     if market_validation == "CONFIRMED":
-        evidence.append("消息方向与后续资金、价格/分时均价表现同向；这只验证市场影响，不验证消息内容真伪。")
+        evidence.append("消息方向与后续订单流估算、价格/分时均价表现同向；这只验证市场影响，不验证消息内容真伪。")
 
     if negative_holding_risk:
-        action = "持仓相关负面消息与一致性高开转弱共振：禁止追高；等待承接，反抽不能收复分时均价且资金继续转弱时再按计划分批减仓。"
+        action = "持仓相关负面消息与一致性高开转弱共振：禁止追高；等待承接，反抽不能收复分时均价且订单流方向继续转弱时再按计划分批减仓。"
     elif claim_level == "RUMOR":
         action = "传闻仅列为待验证线索；不得写成事实，不得据此追涨、抄底或卖出。"
     elif market_validation == "CONFIRMED":
-        action = "市场影响已获量价与资金同向验证；继续按持仓/观察池既有失效条件执行，不自动交易。"
+        action = "市场影响已获量价与订单流方向同向验证；继续按持仓/观察池既有失效条件执行，不自动交易。"
     elif market_validation == "INVALIDATED":
-        action = "资金与量价未支持消息方向，降低该消息权重，不据此交易。"
+        action = "订单流方向与量价未支持消息方向，降低该消息权重，不据此交易。"
     else:
-        action = "等待资金方向与价格/分时均价共同验证，禁止仅凭消息交易。"
+        action = "等待订单流方向与价格/分时均价共同验证，禁止仅凭消息交易。"
 
     return {
         "status": status,

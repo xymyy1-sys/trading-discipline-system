@@ -46,7 +46,8 @@ SYSTEM_INSTRUCTIONS = """你是A股持仓决策的证据审查助手，不是下
 必须清楚区分“事实”和“推断”，并优先回答用户正在问的该不该卖、能否加仓、是否属于恐慌割肉、是否适合逢高减仓。
 输出固定小节：直接回答、事实依据、推断与备选路径、允许动作、禁止动作、失效条件、恢复条件、数据缺口。
 动作必须是有条件的分批纪律，说明触发窗口和撤销条件；不得仅凭盈亏比例给出清仓或补仓结论，不得承诺收益，不得自动下单。
-若市场闸门、T+1可卖数量、真实分钟量价或板块资金缺失，必须降低结论强度。"""
+MKT-1、SEC-1和FLOW-1里的净额、主动成交方向、大单方向都只是供应商订单流算法，不是机构账户流水；统一称为“订单流方向估算”，不得写成“主力买入/卖出”或推断账户身份、意图，且必须结合价格响应、持续性和失效条件解释。FLOW-1若为历史收盘、部分覆盖、过期、方向未决或数据不足，只能作为背景/缺口，不能支持当前盘中动作。
+若市场闸门、T+1可卖数量、真实分钟量价、有效资金证据链或板块订单流估算缺失，必须降低结论强度。"""
 
 
 @dataclass(slots=True)
@@ -322,6 +323,21 @@ def build_position_context(db: Session, code: str) -> dict[str, Any]:
         entry_discipline = None
     if entry_discipline is None:
         missing.append("新增/加仓纪律闸门")
+    effective_model = getattr(card, "effective_capital", None)
+    if effective_model is None:
+        effective_capital = None
+    elif hasattr(effective_model, "model_dump"):
+        effective_capital = effective_model.model_dump(mode="json")
+    elif isinstance(effective_model, dict):
+        effective_capital = effective_model
+    else:
+        effective_capital = None
+    effective_state = str((effective_capital or {}).get("state") or "")
+    effective_quality = str((effective_capital or {}).get("data_quality") or "")
+    if not effective_capital or effective_state == "INSUFFICIENT_DATA":
+        missing.append("可验证的订单流有效性证据链")
+    elif effective_state == "INCONCLUSIVE" or effective_quality != "realtime":
+        missing.append("实时可确认的订单流有效性证据链")
     if not volume_price:
         missing.append("分钟量价快照")
     elif not bool(volume_price.get("vwap_reliable")):
@@ -340,6 +356,7 @@ def build_position_context(db: Session, code: str) -> dict[str, Any]:
     volume_as_of = volume_price.get("captured_at") if volume_price else "未知"
     timeline_as_of = card.timeline[0].captured_at if card.timeline else "未知"
     execution_as_of = execution.get("updated_at") if execution else "未知"
+    effective_as_of = effective_capital.get("as_of") if effective_capital else "未知"
     context_as_of = _latest_evidence_time(
         regime.captured_at,
         global_snapshot.get("as_of"),
@@ -349,6 +366,7 @@ def build_position_context(db: Session, code: str) -> dict[str, Any]:
         volume_as_of,
         timeline_as_of,
         execution_as_of,
+        effective_as_of,
         latest_news_as_of,
     )
     return {
@@ -374,7 +392,7 @@ def build_position_context(db: Session, code: str) -> dict[str, Any]:
                 "down_count": regime.down_count,
                 "limit_up_count": regime.limit_up_count,
                 "limit_down_count": regime.limit_down_count,
-                "market_main_net_inflow_yi": regime.market_main_net_inflow_yi,
+                "market_order_flow_estimate_yi": regime.market_main_net_inflow_yi,
                 "volume_ratio_5d": regime.volume_ratio_5d,
                 "positive_sector_ratio": regime.positive_sector_ratio,
                 "strongest_sectors": [item.model_dump(mode="json") for item in regime.strongest_sectors[:5]],
@@ -392,15 +410,15 @@ def build_position_context(db: Session, code: str) -> dict[str, Any]:
             _global_summary(global_snapshot),
         ),
         "sector_funds": _source_item(
-            "SEC-1", sector_as_of, sector_flow.get("source") or "板块资金缓存不可用",
+            "SEC-1", sector_as_of, sector_flow.get("source") or "板块订单流方向估算缓存不可用",
             {
                 "industry": theme.get("industry"),
                 "concepts": theme.get("concepts", []),
                 "matched_sectors": sector_flow.get("sectors", []),
                 "concept_sectors": sector_flow.get("concept_sectors", []),
                 "rank": sector_flow.get("rank"),
-                "net_inflow_yi": sector_flow.get("current"),
-                "main_net_inflow_yi": sector_flow.get("main"),
+                "order_flow_estimate_yi": sector_flow.get("current"),
+                "large_order_direction_estimate_yi": sector_flow.get("main"),
                 "flow_peak_yi": sector_flow.get("peak"),
                 "flow_pullback_yi": sector_flow.get("pullback"),
                 "flow_pullback_pct": sector_flow.get("pullback_pct"),
@@ -442,6 +460,12 @@ def build_position_context(db: Session, code: str) -> dict[str, Any]:
             "VP-1", volume_as_of,
             volume_price.get("data_source") if volume_price else "缺失",
             volume_price,
+        ),
+        "effective_capital": _source_item(
+            "FLOW-1",
+            effective_as_of,
+            effective_capital.get("source_label") if effective_capital else "缺失",
+            effective_capital,
         ),
         "entry_discipline": _source_item(
             "ENTRY-1", volume_as_of,
@@ -580,7 +604,7 @@ def generate_position_answer(
     if not content:
         raise RuntimeError("DeepSeek 返回为空")
     cited_ids = set(re.findall(
-        r"\[(MKT-1|GLB-1|SEC-1|HLD-1|EXP-1|EXP-CHAIN|VP-1|EVT-1|EXE-1|RFX-1|NEWS-1)\]",
+        r"\[(MKT-1|GLB-1|SEC-1|HLD-1|EXP-1|EXP-CHAIN|VP-1|FLOW-1|EVT-1|EXE-1|RFX-1|NEWS-1)\]",
         content,
     ))
     available_ids = _context_evidence_ids(context)

@@ -360,7 +360,7 @@ def test_stock_reflexivity_endpoint_injects_matched_holding_sector_evidence(
     assert "个股相对板块强弱" not in payload["missing_fields"]
     scenarios = {item["code"]: item for item in payload["scenarios"]}
     assert any(
-        "板块资金" in item
+        "板块订单流方向" in item
         for item in scenarios["NO_REBOUND_LIQUIDATION"]["evidence"]
     )
 

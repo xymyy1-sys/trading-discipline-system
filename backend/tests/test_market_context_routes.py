@@ -67,7 +67,7 @@ def test_sector_temperature_route_keeps_margin_as_t_plus_one(monkeypatch):
     assert result.items[0].flow_speed == -0.8
     assert result.items[0].flow_turning == "OUTFLOW_ACCELERATING"
     assert "东方财富两融T+1" in result.source
-    assert "板块资金缓存" in result.source
+    assert "板块订单流算法缓存" in result.source
     assert result.updated_at.isoformat() == "2026-07-17T10:29:00+08:00"
     assert any("使用 eastmoney 缓存" in note and "10:29:00" in note for note in result.notes)
 

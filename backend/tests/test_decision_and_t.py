@@ -591,6 +591,190 @@ def test_decision_card_includes_volume_price(client, monkeypatch):
     assert payload["forbidden_actions"][0] == payload["entry_discipline"]["label"]
 
 
+def _effective_flow_quote(trade_date: str, start_hour: int = 10, start_minute: int = 1):
+    prices = [10.00, 10.03, 10.06, 10.10, 10.14, 10.18, 10.21, 10.24, 10.27, 10.30]
+    rows = []
+    for index, price in enumerate(prices):
+        minute_of_day = start_hour * 60 + start_minute + index
+        amount = 10_000_000.0
+        rows.append({
+            "trade_date": trade_date,
+            "time": f"{minute_of_day // 60:02d}:{minute_of_day % 60:02d}",
+            "price": price,
+            "close": price,
+            "high": price,
+            "low": price,
+            "volume": amount / price,
+            "amount": amount,
+            "active_buy_amount": 8_000_000.0,
+            "active_sell_amount": 2_000_000.0,
+        })
+    return {
+        "name": "订单流测试",
+        "price": prices[-1],
+        "change_pct": 3.0,
+        "open": prices[0],
+        "prev_close": 10.0,
+        "high": prices[-1],
+        "low": prices[0],
+        "amount": 1.0,
+        "volume": sum(row["volume"] for row in rows),
+        "turnover": 2.0,
+        "note": "东方财富实时行情",
+        "minute_bar_trade_date": trade_date,
+        "minute_bars": rows,
+    }
+
+
+def _deep_v_recovery_quote(trade_date: str):
+    """Keep the latest repair below the true whole-session VWAP.
+
+    The first five high-volume bars establish an older, higher cost anchor;
+    the selected ten-bar decision window then repairs strongly from deep
+    water with explicit aggressive-buy classifications.  This is the case
+    that used to be mistaken for distribution merely because the latest
+    price had not reclaimed the whole-session VWAP yet.
+    """
+
+    prices = [10.80] * 5 + [9.50, 9.58, 9.66, 9.75, 9.84, 9.92, 9.98, 10.00, 10.00, 10.00]
+    rows = []
+    for index, price in enumerate(prices):
+        minute_of_day = 9 * 60 + 56 + index
+        leading_anchor = index < 5
+        amount = 50_000_000.0 if leading_anchor else 10_000_000.0
+        rows.append({
+            "trade_date": trade_date,
+            "time": f"{minute_of_day // 60:02d}:{minute_of_day % 60:02d}",
+            "price": price,
+            "close": price,
+            "high": price,
+            "low": price,
+            "volume": amount / price,
+            "amount": amount,
+            "active_buy_amount": 25_000_000.0 if leading_anchor else 8_000_000.0,
+            "active_sell_amount": 25_000_000.0 if leading_anchor else 2_000_000.0,
+        })
+    return {
+        "name": "深水修复测试",
+        "price": prices[-1],
+        "change_pct": -0.5,
+        "open": prices[0],
+        "prev_close": 10.05,
+        "high": max(prices),
+        "low": min(prices),
+        "amount": sum(row["amount"] for row in rows) / 1e8,
+        "volume": sum(row["volume"] for row in rows),
+        "turnover": 2.0,
+        "note": "东方财富实时行情",
+        "minute_bar_trade_date": trade_date,
+        "minute_bars": rows,
+    }
+
+
+def test_decision_card_maps_order_flow_units_and_provenance(client, monkeypatch):
+    from app.api.helpers import decision
+    from app.api.helpers import quotes
+
+    now = datetime(2026, 7, 17, 10, 10)
+    quote = _effective_flow_quote("2026-07-17")
+    monkeypatch.setattr(decision, "shanghai_now_naive", lambda *_args, **_kwargs: now)
+    monkeypatch.setattr(decision, "quote_for_code", lambda _code: quote)
+    monkeypatch.setattr(quotes, "_daily_history_metrics", lambda _code: {})
+
+    response = client.get("/api/stocks/600040/decision-card")
+
+    assert response.status_code == 200
+    evidence = response.json()["effective_capital"]
+    assert evidence["state"] == "ATTACK_CONFIRMED"
+    assert evidence["state_severity"] == "POSITIVE"
+    assert evidence["data_quality"] == "realtime"
+    assert evidence["source_label"].startswith("东方财富逐笔成交方向分类")
+    assert evidence["metrics"]["active_buy_yi"] == 0.8
+    assert evidence["metrics"]["active_sell_yi"] == 0.2
+    assert evidence["metrics"]["signed_flow_yi"] == 0.6
+    assert evidence["metrics"]["active_flow_coverage_ratio"] == 1.0
+    assert evidence["metrics"]["same_time_flow_percentile"] is None
+    assert evidence["metrics"]["normalization_sample_count"] == 0
+    assert "非账户身份" in evidence["source_label"]
+    assert any("不代表机构账户" in item for item in evidence["warnings"])
+
+
+def test_decision_card_maps_deep_v_repair_to_watch_without_panic_sell_or_chase(client, db_session, monkeypatch):
+    from app.api.helpers import decision
+    from app.api.helpers import quotes
+
+    db_session.add(Holding(
+        code="600043",
+        name="深水修复测试",
+        quantity=1000,
+        cost_price=10.2,
+        current_price=10.0,
+        total_asset=100_000,
+        position_type="观察仓",
+    ))
+    db_session.commit()
+    now = datetime(2026, 7, 17, 10, 10)
+    quote = _deep_v_recovery_quote("2026-07-17")
+    monkeypatch.setattr(decision, "shanghai_now_naive", lambda *_args, **_kwargs: now)
+    monkeypatch.setattr(decision, "quote_for_code", lambda _code: quote)
+    monkeypatch.setattr(quotes, "_daily_history_metrics", lambda _code: {})
+
+    response = client.get("/api/stocks/600043/decision-card")
+
+    assert response.status_code == 200
+    payload = response.json()
+    evidence = payload["effective_capital"]
+    assert evidence["state"] == "RECOVERY_CANDIDATE"
+    assert evidence["state_severity"] == "WATCH"
+    assert evidence["metrics"]["sample_count"] == 10
+    assert evidence["metrics"]["window_minutes"] == 9
+    assert evidence["metrics"]["price_change_pct"] > 5
+    assert evidence["metrics"]["vwap_distance_pct"] < 0
+    assert any("避免在窗口低点附近恐慌卖出" in item for item in evidence["discipline"])
+    assert any("禁止追高或逆势补仓" in item for item in evidence["discipline"])
+    assert any("深水修复候选" in item and "恐慌卖出" in item for item in payload["allowed_actions"])
+    assert any("未站稳分时均价前禁止追高、补仓" in item for item in payload["forbidden_actions"])
+
+
+def test_decision_card_labels_prior_session_close_without_calling_it_live(client, monkeypatch):
+    from app.api.helpers import decision
+    from app.api.helpers import quotes
+
+    wall_clock = datetime(2026, 7, 18, 10, 10)
+    quote = _effective_flow_quote("2026-07-17", start_hour=14, start_minute=51)
+    monkeypatch.setattr(decision, "shanghai_now_naive", lambda *_args, **_kwargs: wall_clock)
+    monkeypatch.setattr(decision, "quote_for_code", lambda _code: quote)
+    monkeypatch.setattr(quotes, "_daily_history_metrics", lambda _code: {})
+
+    response = client.get("/api/stocks/600041/decision-card")
+
+    assert response.status_code == 200
+    evidence = response.json()["effective_capital"]
+    assert evidence["state"] == "ATTACK_CONFIRMED"
+    assert evidence["data_quality"] == "historical_close"
+    assert evidence["source_label"].startswith("2026-07-17 收盘窗口")
+    assert any("不代表当前盘前或盘中的实时状态" in item for item in evidence["warnings"])
+
+
+def test_decision_card_rejects_future_trade_date_instead_of_replaying_it(client, monkeypatch):
+    from app.api.helpers import decision
+    from app.api.helpers import quotes
+
+    wall_clock = datetime(2026, 7, 17, 10, 10)
+    quote = _effective_flow_quote("2026-07-18")
+    monkeypatch.setattr(decision, "shanghai_now_naive", lambda *_args, **_kwargs: wall_clock)
+    monkeypatch.setattr(decision, "quote_for_code", lambda _code: quote)
+    monkeypatch.setattr(quotes, "_daily_history_metrics", lambda _code: {})
+
+    response = client.get("/api/stocks/600042/decision-card")
+
+    assert response.status_code == 200
+    evidence = response.json()["effective_capital"]
+    assert evidence["state"] == "INSUFFICIENT_DATA"
+    assert "FUTURE_TIMESTAMP" in evidence["reason_codes"]
+    assert not evidence["source_label"].startswith("2026-07-18 收盘窗口")
+
+
 def test_expectation_create_and_update_routes(client, monkeypatch):
     quote = {
         "price": 9.8,

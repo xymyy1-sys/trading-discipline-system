@@ -375,7 +375,9 @@ export function TodayDecisionSummary() {
     const signals = [execution.high_sell_signal, execution.panic_sell_guard, execution.contrarian_add_signal]
       .filter((signal): signal is HoldingExecutionSignal => Boolean(signal))
       .filter(signal => signal.status === 'ACTIVE' || signal.status === 'ELIGIBLE')
-    return signals.map(signal => ({ execution, signal }))
+      .sort((left, right) => holdingSignalPriority(right) - holdingSignalPriority(left))
+    if (!signals.length) return []
+    return [{ execution, signal: signals[0], relatedSignals: signals.slice(1) }]
   }), [executionStates])
   const expectationRisks = useMemo(() => holdings.flatMap(holding => {
     const card = decisionCards[holding.code]
@@ -383,8 +385,38 @@ export function TodayDecisionSummary() {
     const execution = executionStates.find(item => item.code === holding.code)
     return [{ holding, card, execution }]
   }), [holdings, decisionCards, executionStates])
+  const effectiveCapitalSignals = useMemo(() => holdings.flatMap(holding => {
+    const evidence = decisionCards[holding.code]?.effective_capital
+    if (!evidence || evidence.data_quality !== 'realtime' || ['INSUFFICIENT_DATA', 'INCONCLUSIVE'].includes(evidence.state)) return []
+    return [{ holding, evidence }]
+  }), [holdings, decisionCards])
+  const effectiveCapitalRisks = effectiveCapitalSignals.filter(item =>
+    ['DISTRIBUTION_RISK', 'OUTFLOW_CONFIRMED', 'LIQUIDITY_SHOCK'].includes(item.evidence.state)
+    && item.evidence.data_quality === 'realtime',
+  )
   const highRiskAlerts = (seesaw?.holding_alerts ?? []).filter(item => ['高', '中高', '中'].includes(item.risk_level))
-  const riskTargetCount = new Set([...riskStates.map(item => item.code), ...expectationRisks.map(item => item.holding.code), ...highRiskAlerts.map(item => item.code), ...urgentHoldingSignals.map(item => item.execution.code)]).size
+  const urgentTaskCodes = new Set(urgentHoldingSignals.map(item => item.execution.code))
+  const expectationTaskRisks = expectationRisks.filter(item => !urgentTaskCodes.has(item.holding.code))
+  const expectationTaskCodes = new Set(expectationTaskRisks.map(item => item.holding.code))
+  const effectiveCapitalTaskRisks = effectiveCapitalRisks.filter(item =>
+    !urgentTaskCodes.has(item.holding.code) && !expectationTaskCodes.has(item.holding.code),
+  )
+  const effectiveCapitalTaskCodes = new Set(effectiveCapitalTaskRisks.map(item => item.holding.code))
+  const riskStateTasks = riskStates.filter((item, index, items) =>
+    !urgentTaskCodes.has(item.code)
+    && !expectationTaskCodes.has(item.code)
+    && !effectiveCapitalTaskCodes.has(item.code)
+    && items.findIndex(candidate => candidate.code === item.code) === index,
+  )
+  const riskStateTaskCodes = new Set(riskStateTasks.map(item => item.code))
+  const highRiskAlertTasks = highRiskAlerts.filter((item, index, items) =>
+    !urgentTaskCodes.has(item.code)
+    && !expectationTaskCodes.has(item.code)
+    && !effectiveCapitalTaskCodes.has(item.code)
+    && !riskStateTaskCodes.has(item.code)
+    && items.findIndex(candidate => candidate.code === item.code) === index,
+  )
+  const riskTargetCount = new Set([...riskStates.map(item => item.code), ...expectationRisks.map(item => item.holding.code), ...effectiveCapitalRisks.map(item => item.holding.code), ...highRiskAlerts.map(item => item.code), ...urgentHoldingSignals.map(item => item.execution.code)]).size
   const totalMarketValue = holdings.reduce((sum, item) => sum + item.market_value, 0)
   const totalProfit = holdings.reduce((sum, item) => sum + item.profit_amount, 0)
   const trackedReviews = holdings.map(holding => ({ holding, review: intradayReviews[holding.code] }))
@@ -409,7 +441,7 @@ export function TodayDecisionSummary() {
       <div className="command-card emphasis">
         <span>今日处理优先级</span>
         <strong>{riskTargetCount}</strong>
-        <small>持仓执行风险 + 资金跷跷板告警</small>
+        <small>持仓执行风险 + 订单流跷跷板告警</small>
       </div>
       <div className="command-card sensitive-card">
         <span>持仓市值</span>
@@ -424,9 +456,9 @@ export function TodayDecisionSummary() {
         <small>{marketRegime ? `赚钱 ${marketRegime.opportunity_score} · 亏钱 ${marketRegime.loss_score} · 风险${marketRegime.risk_level}` : '等待全A真实广度与量能'}</small>
       </div>
       <div className="command-card">
-        <span>全市场主力净流</span>
+        <span>全市场订单流估算</span>
         <strong className={(marketRegime?.market_main_net_inflow_yi ?? 0) < 0 ? 'num-down' : 'num-up'}>{formatSignedNumber(marketRegime?.market_main_net_inflow_yi, ' 亿')}</strong>
-        <small>{marketRegime ? `上涨 ${marketRegime.up_count ?? '--'} · 下跌 ${marketRegime.down_count ?? '--'} · 涨停/跌停 ${marketRegime.limit_up_count ?? '--'}/${marketRegime.limit_down_count ?? '--'}` : '等待全市场资金与涨跌家数'}</small>
+        <small>{marketRegime ? `上涨 ${marketRegime.up_count ?? '--'} · 下跌 ${marketRegime.down_count ?? '--'} · 涨停/跌停 ${marketRegime.limit_up_count ?? '--'}/${marketRegime.limit_down_count ?? '--'}` : '等待全市场订单流方向与涨跌家数'}</small>
       </div>
 
       <div className="panel command-list">
@@ -436,20 +468,31 @@ export function TodayDecisionSummary() {
             <RefreshCcw size={14} />刷新
           </button>
         </header>
-        {marketRiskActive || expectationRisks.length || riskStates.length || highRiskAlerts.length || urgentHoldingSignals.length ? (
+        {marketRiskActive || expectationTaskRisks.length || effectiveCapitalTaskRisks.length || riskStateTasks.length || highRiskAlertTasks.length || urgentHoldingSignals.length ? (
           <>
-            {urgentHoldingSignals.slice(0, 8).map(({ execution, signal }) => (
-              <article key={`holding-signal-${execution.code}-${signal.code}`} className={`holding-action-signal ${holdingSignalTone(signal)}`}>
-                <b>{execution.name} · {signal.title}</b>
-                <span>{signal.action}</span>
-                <small className="sensitive-evidence">{signal.evidence[0] || signal.missing_conditions[0] || '等待下一份真实量价快照确认。'}</small>
-                <details><summary>查看触发依据与撤销条件</summary><div className="decision-basis">
-                  {signal.evidence.slice(0, 5).map(item => <p className="sensitive-evidence" key={item}>依据：{chineseEvidence(item)}</p>)}
-                  {signal.cancel_conditions.slice(0, 3).map(item => <p key={item}>撤销/升级：{chineseEvidence(item)}</p>)}
-                  {signal.recovery_conditions.slice(0, 2).map(item => <p key={item}>后续复核：{chineseEvidence(item)}</p>)}
-                </div></details>
-              </article>
-            ))}
+            {urgentHoldingSignals.slice(0, 8).map(({ execution, signal, relatedSignals }) => {
+              const expectationRisk = expectationRisks.find(item => item.holding.code === execution.code)
+              const effectiveCapitalRisk = effectiveCapitalRisks.find(item => item.holding.code === execution.code)
+              const executionRisk = riskStates.find(item => item.code === execution.code)
+              const flowAlert = highRiskAlerts.find(item => item.code === execution.code)
+              return (
+                <article key={`holding-signal-${execution.code}-${signal.code}`} className={`holding-action-signal ${holdingSignalTone(signal)}`}>
+                  <b>{execution.name} · {signal.title}</b>
+                  <span>{signal.action}</span>
+                  <small className="sensitive-evidence">{signal.evidence[0] || signal.missing_conditions[0] || '等待下一份真实量价快照确认。'}</small>
+                  <details><summary>查看全部触发依据、关联风险与撤销条件</summary><div className="decision-basis">
+                    {signal.evidence.slice(0, 5).map(item => <p className="sensitive-evidence" key={`primary-${item}`}>依据：{chineseEvidence(item)}</p>)}
+                    {signal.cancel_conditions.slice(0, 3).map(item => <p key={`cancel-${item}`}>撤销/升级：{chineseEvidence(item)}</p>)}
+                    {signal.recovery_conditions.slice(0, 2).map(item => <p key={`recovery-${item}`}>后续复核：{chineseEvidence(item)}</p>)}
+                    {relatedSignals.map(related => <p key={`related-${related.code}`}>关联信号：{related.title} · {related.action}（{holdingSignalStatus(related.status)}）</p>)}
+                    {expectationRisk && <p className="sensitive-evidence">预期风险：{expectationRisk.card.expectation.expectation_result === 'INVALID' ? '预期证伪' : '弱于预期'}，预期差 {expectationRisk.card.expectation.expectation_gap_score}；{chineseEvidence(expectationRisk.execution?.recommended_action || expectationRisk.card.expectation.suggestion)}</p>}
+                    {effectiveCapitalRisk && <p className="sensitive-evidence">订单流风险：{effectiveCapitalRisk.evidence.state_label}；{effectiveCapitalRisk.evidence.evidence[0] || effectiveCapitalRisk.evidence.discipline[0]}</p>}
+                    {executionRisk && <p className="sensitive-evidence">执行状态：{chineseEvidence(executionRisk.recommended_action)}；{chineseEvidence(executionRisk.evidence[0] || chineseLabel(executionRisk.volume_price_state))}</p>}
+                    {flowAlert && <p className="sensitive-evidence">板块联动：{flowAlert.risk_level}风险；{flowAlert.advice || flowAlert.signal}</p>}
+                  </div></details>
+                </article>
+              )
+            })}
             {marketRiskActive && marketRegime && (
               <article className={riskTone(marketRegime.risk_level)}>
                 <b>全市场执行闸门</b>
@@ -458,27 +501,66 @@ export function TodayDecisionSummary() {
                 <details><summary>查看真实数据依据</summary><div className="decision-basis">{(marketRegime.evidence ?? []).map(item => <p key={item}>依据：{item}</p>)}{(marketRegime.allowed_actions ?? []).map(item => <p key={item}>允许：{item}</p>)}</div></details>
               </article>
             )}
-            {expectationRisks.slice(0, 5).map(({ holding, card, execution }) => (
-              <article key={`expectation-${holding.code}`} className={`expectation-risk-task ${riskTone(execution?.recommendation?.level || (card.expectation.expectation_result === 'INVALID' ? 'EXIT' : 'PROTECT'))}`}>
-                <b>{holding.name}</b>
-                <span>{card.expectation.expectation_result === 'INVALID' ? '预期证伪' : '弱于预期'} · {chineseEvidence(execution?.recommended_action || card.expectation.suggestion)}</span>
-                <small className="sensitive-evidence">合理开盘 {card.expectation.expected_open_low.toFixed(2)}%～{card.expectation.expected_open_high.toFixed(2)}%，实际 {card.expectation.actual_open_pct >= 0 ? '+' : ''}{card.expectation.actual_open_pct.toFixed(2)}%，预期差 {card.expectation.expectation_gap_score}。</small>
-                <details><summary>查看决策依据与动态复核条件</summary><DecisionBasis execution={execution} fallback={card.expectation.evidence} /></details>
-              </article>
-            ))}
-            {riskStates.filter(item => !expectationRisks.some(risk => risk.holding.code === item.code) && !urgentHoldingSignals.some(entry => entry.execution.code === item.code)).slice(0, 4).map(item => (
-              <article key={`exec-${item.holding_id}`} className={riskTone(item.recommendation?.level || item.state)}>
-                <b>{item.name}</b>
-                <span>{chineseEvidence(item.recommended_action)}</span>
-                <small className="sensitive-evidence">{chineseEvidence(item.evidence[0] ?? chineseLabel(item.volume_price_state))}</small>
-                <details><summary>为什么是这个建议？</summary><DecisionBasis execution={item} /></details>
-              </article>
-            ))}
-            {highRiskAlerts.slice(0, 4).map(item => (
+            {expectationTaskRisks.slice(0, 5).map(({ holding, card, execution }) => {
+              const effectiveCapitalRisk = effectiveCapitalRisks.find(item => item.holding.code === holding.code)
+              const flowAlert = highRiskAlerts.find(item => item.code === holding.code)
+              return (
+                <article key={`expectation-${holding.code}`} className={`expectation-risk-task ${riskTone(execution?.recommendation?.level || (card.expectation.expectation_result === 'INVALID' ? 'EXIT' : 'PROTECT'))}`}>
+                  <b>{holding.name}</b>
+                  <span>{card.expectation.expectation_result === 'INVALID' ? '预期证伪' : '弱于预期'} · {chineseEvidence(execution?.recommended_action || card.expectation.suggestion)}</span>
+                  <small className="sensitive-evidence">合理开盘 {card.expectation.expected_open_low.toFixed(2)}%～{card.expectation.expected_open_high.toFixed(2)}%，实际 {card.expectation.actual_open_pct >= 0 ? '+' : ''}{card.expectation.actual_open_pct.toFixed(2)}%，预期差 {card.expectation.expectation_gap_score}。</small>
+                  <details><summary>查看全部决策依据、关联风险与动态复核条件</summary><div className="decision-basis">
+                    <DecisionBasis execution={execution} fallback={card.expectation.evidence} />
+                    {effectiveCapitalRisk && <>
+                      <p className="sensitive-evidence">订单流风险：{effectiveCapitalRisk.evidence.state_label}；{effectiveCapitalRisk.evidence.discipline[0] || effectiveCapitalRisk.evidence.evidence[0]}</p>
+                      {effectiveCapitalRisk.evidence.invalidation.slice(0, 2).map(item => <p key={`flow-invalid-${item}`}>订单流失效：{item}</p>)}
+                    </>}
+                    {flowAlert && <p className="sensitive-evidence">板块联动：{flowAlert.risk_level}风险；{flowAlert.advice || flowAlert.signal}</p>}
+                  </div></details>
+                </article>
+              )
+            })}
+            {effectiveCapitalTaskRisks.slice(0, 5).map(({ holding, evidence }) => {
+              const executionRisk = riskStates.find(item => item.code === holding.code)
+              const flowAlert = highRiskAlerts.find(item => item.code === holding.code)
+              return (
+                <article key={`effective-capital-${holding.code}`} className={riskTone(evidence.state_severity)}>
+                  <b>{holding.name} · {evidence.state_label}</b>
+                  <span>{evidence.discipline[0] || '订单流方向、价格响应和持续性已形成新的联合证据。'}</span>
+                  <small className="sensitive-evidence">{evidence.evidence[0] || '等待下一分钟窗口继续验证。'}</small>
+                  <details><summary>查看全部订单流依据、关联风险与失效条件</summary><div className="decision-basis">
+                    {evidence.evidence.slice(0, 4).map(item => <p key={`flow-evidence-${item}`}>依据：{item}</p>)}
+                    {evidence.invalidation.slice(0, 3).map(item => <p key={`flow-invalidation-${item}`}>失效：{item}</p>)}
+                    {evidence.warnings.slice(0, 3).map(item => <p key={`flow-warning-${item}`}>边界：{item}</p>)}
+                    {executionRisk && <p className="sensitive-evidence">执行状态：{chineseEvidence(executionRisk.recommended_action)}；{chineseEvidence(executionRisk.evidence[0] || chineseLabel(executionRisk.volume_price_state))}</p>}
+                    {flowAlert && <p className="sensitive-evidence">板块联动：{flowAlert.risk_level}风险；{flowAlert.advice || flowAlert.signal}</p>}
+                  </div></details>
+                </article>
+              )
+            })}
+            {riskStateTasks.slice(0, 4).map(item => {
+              const flowAlert = highRiskAlerts.find(alert => alert.code === item.code)
+              return (
+                <article key={`exec-${item.holding_id}`} className={riskTone(item.recommendation?.level || item.state)}>
+                  <b>{item.name}</b>
+                  <span>{chineseEvidence(item.recommended_action)}</span>
+                  <small className="sensitive-evidence">{chineseEvidence(item.evidence[0] ?? chineseLabel(item.volume_price_state))}</small>
+                  <details><summary>查看全部决策依据与关联风险</summary><div className="decision-basis">
+                    <DecisionBasis execution={item} />
+                    {flowAlert && <p className="sensitive-evidence">板块联动：{flowAlert.risk_level}风险；{flowAlert.advice || flowAlert.signal}</p>}
+                  </div></details>
+                </article>
+              )
+            })}
+            {highRiskAlertTasks.slice(0, 4).map(item => (
               <article key={`risk-${item.code}`} className={riskTone(item.risk_level)}>
                 <b>{item.name}</b>
                 <span>{item.risk_level}风险</span>
                 <small className="sensitive-evidence">{item.advice || item.signal}</small>
+                <details><summary>查看板块与个股联动依据</summary><div className="decision-basis">
+                  {item.evidence.slice(0, 5).map(evidence => <p className="sensitive-evidence" key={evidence}>依据：{evidence}</p>)}
+                  {!item.evidence.length && <p className="sensitive-evidence">{item.signal || '等待下一份板块订单流和量价证据。'}</p>}
+                </div></details>
               </article>
             ))}
           </>
@@ -494,20 +576,27 @@ export function TodayDecisionSummary() {
         {(seesaw?.inflow_targets ?? []).slice(0, 3).map(item => (
           <article key={item.name}>
             <b>{item.name}</b>
-            <span className="num-up">流入 {item.net_inflow.toFixed(2)} 亿</span>
+            <span className="num-up">订单流方向净额 {item.net_inflow.toFixed(2)} 亿</span>
             <small>{item.evidence}</small>
-            <FlowKineticsEvidence fields={item} compact label="板块资金" />
+            <FlowKineticsEvidence fields={item} compact label="板块订单流" />
           </article>
         ))}
         {(seesaw?.holding_alerts ?? []).slice(0, 3).map(item => (
           <article className="holding-flow-evidence" key={`holding-flow-${item.code}`}>
             <b>{item.name} · {item.primary_industry_sector || item.holding_theme || '所属板块'}</b>
-            <span>{item.sector_flow_signal || '等待板块资金形成可验证拐点'}</span>
-            <small>当前板块净流 {item.sector_net_inflow >= 0 ? '+' : ''}{item.sector_net_inflow.toFixed(2)} 亿</small>
-            <FlowKineticsEvidence fields={holdingFlowKineticsFields(item)} compact label="持仓资金" />
+            <span>{item.sector_flow_signal || '等待板块订单流方向形成可验证拐点'}</span>
+            <small>当前板块订单流方向净额 {item.sector_net_inflow >= 0 ? '+' : ''}{item.sector_net_inflow.toFixed(2)} 亿</small>
+            <FlowKineticsEvidence fields={holdingFlowKineticsFields(item)} compact label="持仓关联订单流" />
           </article>
         ))}
-        {!seesaw?.inflow_targets?.length && !seesaw?.holding_alerts?.length && <p className="plain-text">{marketLive ? '暂无已确认的资金迁移证据。' : '非交易时段不产生新的资金迁移证据；开盘后根据板块资金曲线更新。'}</p>}
+        {effectiveCapitalSignals.filter(item => !effectiveCapitalRisks.includes(item)).slice(0, 3).map(({ holding, evidence }) => (
+          <article className="holding-flow-evidence" key={`flow-change-${holding.code}`}>
+            <b>{holding.name} · {evidence.state_label}</b>
+            <span>{evidence.discipline[0] || '等待下一分钟窗口继续验证。'}</span>
+            <small>{evidence.evidence[0] || '订单流方向与价格响应尚未形成完整结论。'}</small>
+          </article>
+        ))}
+        {!seesaw?.inflow_targets?.length && !seesaw?.holding_alerts?.length && <p className="plain-text">{marketLive ? '暂无已确认的订单流轮动证据。' : '非交易时段不产生新的订单流轮动证据；开盘后根据板块订单流方向曲线更新。'}</p>}
       </div>
 
       <div className="panel command-list realtime-events">
@@ -544,10 +633,10 @@ export function TodayDecisionSummary() {
           <div><span>市场状态</span><strong>{marketCycle}</strong><small>{marketRegime ? `风险${marketRegime.risk_level} · 可信度 ${(marketRegime.confidence * 100).toFixed(0)}%` : '等待量能、广度和指数共振'}</small></div>
           <div><span>上涨 / 下跌家数</span><strong>{marketRegime?.up_count ?? '--'} / {marketRegime?.down_count ?? '--'}</strong><small>涨停 / 跌停 {marketRegime?.limit_up_count ?? '--'} / {marketRegime?.limit_down_count ?? '--'} · 中位涨幅 {formatSignedNumber(marketRegime?.median_change_pct, '%')}</small></div>
           <div><span>成交额与量能</span><strong>{formatNumber(marketRegime?.turnover_yi, ' 亿')}</strong><small>较前日 {formatRatio(marketRegime?.volume_ratio_previous)} · 较5日均量 {formatRatio(marketRegime?.volume_ratio_5d)}</small></div>
-          <div><span>全市场主力净流</span><strong className={(marketRegime?.market_main_net_inflow_yi ?? 0) < 0 ? 'num-down' : 'num-up'}>{formatSignedNumber(marketRegime?.market_main_net_inflow_yi, ' 亿')}</strong><small>指数合成涨跌 {formatSignedNumber(marketRegime?.index_composite_change_pct, '%')}</small></div>
+          <div><span>全市场订单流估算</span><strong className={(marketRegime?.market_main_net_inflow_yi ?? 0) < 0 ? 'num-down' : 'num-up'}>{formatSignedNumber(marketRegime?.market_main_net_inflow_yi, ' 亿')}</strong><small>供应商方向分类 · 指数合成涨跌 {formatSignedNumber(marketRegime?.index_composite_change_pct, '%')}</small></div>
           <div><span>行业扩散 / 集中</span><strong>{formatRatio(marketRegime?.positive_sector_ratio)} / {formatRatio(marketRegime?.top3_inflow_share)}</strong><small>正向行业占比 / 前三流入集中度</small></div>
-          <div><span>主线方向</span><strong>{theme?.strongest_theme?.name || marketRegime?.strongest_sectors?.[0]?.name || '--'}</strong><small>{theme?.strongest_theme ? `题材强度 ${theme.strongest_theme.score}` : '按行业资金与价格确认'}</small></div>
-          <div><span>资金轮动</span><strong>{seesaw?.market_mode || '--'}</strong><small>{seesaw?.summary || '等待资金流证据'}</small><button type="button" className="market-evidence-link" onClick={() => setShowMarketEvidence(value => !value)}>查看资金明细</button></div>
+          <div><span>主线方向</span><strong>{theme?.strongest_theme?.name || marketRegime?.strongest_sectors?.[0]?.name || '--'}</strong><small>{theme?.strongest_theme ? `题材强度 ${theme.strongest_theme.score}` : '按行业订单流方向与价格确认'}</small></div>
+          <div><span>订单流轮动</span><strong>{seesaw?.market_mode?.replace('存量资金', '存量订单流') || '--'}</strong><small>{seesaw?.summary || '等待订单流方向证据'}</small><button type="button" className="market-evidence-link" onClick={() => setShowMarketEvidence(value => !value)}>查看订单流明细</button></div>
         </div>
         {showMarketEvidence && <div className="market-evidence-panel">
           <h4>全市场结论计算依据</h4>
@@ -595,7 +684,7 @@ export function TodayDecisionSummary() {
             ))}
           </div>
           <p className="reflexivity-method">{marketReflexivity.methodology_note}</p>
-        </> : <p className="plain-text">正在用全A广度、指数分时均价、资金流和板块扩散计算可证伪路径。</p>}
+        </> : <p className="plain-text">正在用全A广度、指数分时均价、订单流方向估算和板块扩散计算可证伪路径。</p>}
       </section>
 
       <section className="panel global-evidence-panel">
@@ -642,13 +731,13 @@ export function TodayDecisionSummary() {
       <section className="panel opportunity-radar-panel">
         <header>
           <h3><Activity size={16} />盘中机会雷达</h3>
-          <span className="stream-state">新闻假设 → 板块资金 → 相对强度 → 分时均价确认</span>
+          <span className="stream-state">新闻假设 → 板块订单流方向 → 相对强度 → 分时均价确认</span>
         </header>
         <p className="opportunity-discipline">{opportunityRadar?.discipline || '资讯不得单独触发买入，等待真实板块与个股量价确认。'}</p>
         <div className="intraday-expansion-block">
           <header>
             <h4>盘中增量方向</h4>
-            <small>最近 {opportunityRadar?.intraday_expansion?.window_minutes || 15} 个交易分钟 · 新增涨停 + 资金拐点 + 板块强度</small>
+            <small>最近 {opportunityRadar?.intraday_expansion?.window_minutes || 15} 个交易分钟 · 新增涨停 + 订单流方向拐点 + 板块强度</small>
           </header>
           <div className="opportunity-grid">
             {(intradayExpansion?.items ?? []).slice(0, 6).map(item => (
@@ -660,7 +749,7 @@ export function TodayDecisionSummary() {
                 </small>
                 <p>{item.evidence?.[0] || item.counter_evidence?.[0] || `待补：${(item.missing ?? []).join('、')}`}</p>
                 <p className="expansion-flow-line">
-                  板块 {formatSignedNumber(item.change_pct, '%')} · 资金 {formatSignedNumber(item.net_inflow, '亿')}
+                  板块 {formatSignedNumber(item.change_pct, '%')} · 订单流方向 {formatSignedNumber(item.net_inflow, '亿')}
                   {item.flow_speed !== null ? ` · 流速 ${formatSignedNumber(item.flow_speed, '亿/分钟')}` : ''}
                 </p>
                 <FlowKineticsEvidence fields={{
@@ -670,7 +759,7 @@ export function TodayDecisionSummary() {
                   flow_as_of: item.as_of,
                   flow_window_minutes: item.window_minutes,
                   flow_kinetics_reliable: item.flow_speed !== null,
-                }} compact label="增量资金" />
+                }} compact label="增量订单流" />
                 {item.leaders?.length ? <small>新增涨停/前排：{item.leaders.slice(0, 6).join('、')}</small> : null}
                 <p className="opportunity-action">{item.action}</p>
                 <details>
@@ -684,8 +773,8 @@ export function TodayDecisionSummary() {
             ))}
           </div>
           {!(intradayExpansion?.items ?? []).length && (expansionUnavailable
-            ? <div className="data-gap-state"><b>盘中增量证据不足，无法判断</b><p>{intradayExpansion?.notes?.[0] || (opportunityRadar ? '真实涨停梯队或板块资金时点尚未齐备，不以旧数据推断当前机会。' : '盘中机会雷达尚未同步成功，请稍后重试或手动刷新。')}</p></div>
-            : <p className="plain-text">真实涨停梯队与资金数据可用，但当前未发现共同确认的增量方向；不生成模拟机会。</p>)}
+            ? <div className="data-gap-state"><b>盘中增量证据不足，无法判断</b><p>{intradayExpansion?.notes?.[0] || (opportunityRadar ? '真实涨停梯队或板块订单流时点尚未齐备，不以旧数据推断当前机会。' : '盘中机会雷达尚未同步成功，请稍后重试或手动刷新。')}</p></div>
+            : <p className="plain-text">真实涨停梯队与订单流方向数据可用，但当前未发现共同确认的增量方向；不生成模拟机会。</p>)}
           {intradayExpansion && <small className="global-data-note">数据质量：{expansionDataQualityLabel(intradayExpansion.data_quality)} · 证据时点：{formatConsensusAsOf(intradayExpansion.as_of)}</small>}
         </div>
         <div className="opportunity-grid">
@@ -703,7 +792,7 @@ export function TodayDecisionSummary() {
           ))}
         </div>
         {opportunityRadar && !opportunityRadar.items.length && <p className="plain-text">{opportunityRadar.data_quality === 'missing' ? '消息与市场验证数据不足，无法判断盘中消息机会。' : '真实消息与市场验证数据可用，但暂无共同确认的盘中消息机会。'}系统不会用空数据生成题材建议。</p>}
-        {!opportunityRadar && <div className="data-gap-state"><b>机会雷达暂不可用</b><p>未取得可追溯的新闻、板块资金与相对强度数据，不生成题材建议。</p></div>}
+        {!opportunityRadar && <div className="data-gap-state"><b>机会雷达暂不可用</b><p>未取得可追溯的新闻、板块订单流方向与相对强度数据，不生成题材建议。</p></div>}
       </section>
 
       <section className="panel holding-cockpit">
@@ -1023,9 +1112,9 @@ function globalEvidenceSummary(cues: GlobalMarketCues | null) {
     return `韩国市场出现显著负反馈：${negativeKorea.map(item => `${item.name} ${formatSignedNumber(item.change_pct, '%')}`).join('、')}。涉及半导体、存储或科技持仓时提高开仓门槛，外围证据只作加减分，不单独触发交易。`
   }
   if (negativeSemis.length) {
-    return `隔夜半导体代理走弱：${negativeSemis.map(item => `${item.symbol} ${formatSignedNumber(item.change_pct, '%')}`).join('、')}。需等待A股板块资金和个股VWAP独立确认。`
+    return `隔夜半导体代理走弱：${negativeSemis.map(item => `${item.symbol} ${formatSignedNumber(item.change_pct, '%')}`).join('、')}。需等待A股板块订单流方向和个股VWAP独立确认。`
   }
-  return '外围证据未出现明确系统性冲击；仍以A股全市场、板块资金和个股量价为主，外围只作当日预期修正。'
+  return '外围证据未出现明确系统性冲击；仍以A股全市场、板块订单流方向和个股量价为主，外围只作当日预期修正。'
 }
 
 function opportunityTone(status: string) {
@@ -1131,6 +1220,15 @@ function holdingSignalTone(signal: HoldingExecutionSignal) {
   if (signal.status === 'BLOCKED') return 'signal-blocked'
   if (signal.status === 'EXPIRED') return 'signal-expired'
   return 'signal-neutral'
+}
+
+function holdingSignalPriority(signal: HoldingExecutionSignal) {
+  if (signal.code === 'PANIC_SELL_GUARD' && signal.status === 'ACTIVE') return 500
+  if (signal.code === 'HIGH_SELL_WINDOW' && signal.status === 'ACTIVE') return signal.level === 'HIGH' ? 460 : 450
+  if (signal.code === 'CONTRARIAN_ADD_EVALUATION' && signal.status === 'ELIGIBLE') return 400
+  if (signal.status === 'ACTIVE') return 300
+  if (signal.status === 'ELIGIBLE') return 200
+  return 100
 }
 
 function holdingSignalStatus(status: string) {

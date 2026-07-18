@@ -79,7 +79,7 @@ export default function NextDayPlans({ mode = 'holding' }: { mode?: 'holding' | 
       return { allowed: false, reason: '系统未开放仓位，只生成观察预案。' }
     }
     if (!auction.board_strength || !auction.limit_quality) {
-      return { allowed: false, reason: '板块资金或封板质量证据不完整，暂不允许挂单。' }
+      return { allowed: false, reason: '板块订单流方向或封板质量证据不完整，暂不允许挂单。' }
     }
     return { allowed: true, reason: '主线、题材阶段、身份竞争和封板质量均已通过，仍须等待竞价与开盘量价确认。' }
   }, [draft])
@@ -310,14 +310,14 @@ export default function NextDayPlans({ mode = 'holding' }: { mode?: 'holding' | 
                   <p>{draft.auction_plan.operation_advice || '按三套剧本和关键价执行。'}</p>
                 </div>
                 <div>
-                  <b>资金跷跷板监控</b>
+                  <b>订单流跷跷板监控</b>
                   {selectedSeesaw ? (
                     <>
                       <p>{selectedSeesaw.risk_level} · {selectedSeesaw.signal}。{selectedSeesaw.advice}</p>
                       <p>
                         所属主线：{selectedSeesaw.holding_theme || selectedSeesaw.sector || draft.classification_basis.sector || '待确认'}；
-                        主口径：{selectedSeesaw.flow_basis || '资金流'}；
-                        主资金曲线：{selectedSeesaw.primary_industry_sector || selectedSeesaw.matched_flow_sector || '未匹配'}，当前 {selectedSeesaw.theme_flow_current.toFixed(2)} 亿
+                        主口径：{(selectedSeesaw.flow_basis || '订单流方向估算').replace('资金流', '订单流算法')}；
+                        板块订单流方向曲线：{selectedSeesaw.primary_industry_sector || selectedSeesaw.matched_flow_sector || '未匹配'}，当前 {selectedSeesaw.theme_flow_current.toFixed(2)} 亿（供应商算法，非账户真实流水）
                         {selectedSeesaw.theme_flow_pullback > 0 ? `，高位回落 ${selectedSeesaw.theme_flow_pullback.toFixed(2)} 亿（${selectedSeesaw.theme_flow_pullback_pct.toFixed(1)}%）` : ''}；
                         个股画像：{selectedSeesaw.stock_industry || '未抓到行业'} / {(selectedSeesaw.stock_concepts || []).slice(0, 4).join('、') || '未抓到概念'}；
                         概念辅助：{(selectedSeesaw.concept_flow_sectors?.length ? selectedSeesaw.concept_flow_sectors.slice(0, 4).join('、') : '不参与主曲线')}；
@@ -345,7 +345,7 @@ export default function NextDayPlans({ mode = 'holding' }: { mode?: 'holding' | 
                     <ul>
                       {(draft.auction_plan.sell_trigger_cards?.length ? draft.auction_plan.sell_trigger_cards : [
                         '利润保护：浮盈5%以上进入保护，不再幻想涨停。',
-                        '板块退潮：板块资金排名下滑、主线核心同步回落时触发。',
+                        '板块退潮：板块订单流方向排名下滑、主线核心同步回落时触发。',
                         '个股弱化：冲高不能封板、跌破分时均价、放量下跌时触发。',
                         '接回条件：只在板块止跌、个股站回均价、量价重新转强时接回。',
                       ]).slice(0, 6).map(item => <li key={item}>{item}</li>)}
@@ -418,7 +418,7 @@ export default function NextDayPlans({ mode = 'holding' }: { mode?: 'holding' | 
                       </span>
                       <span>身份 {draft.auction_plan.identity_roles?.join(' · ') || '待确认'}</span>
                     </div>
-                    <p className="limit-stage-reason">{draft.auction_plan.theme_stage_reason || '等待题材雷达、资金排名和涨停梯队形成阶段判断。'}</p>
+                    <p className="limit-stage-reason">{draft.auction_plan.theme_stage_reason || '等待题材雷达、订单流方向排名和涨停梯队形成阶段判断。'}</p>
                     <div className="limit-position-gate">
                       <div>
                         <b>身份竞争结论</b>
@@ -473,8 +473,8 @@ export default function NextDayPlans({ mode = 'holding' }: { mode?: 'holding' | 
                 </div>
                 <div className="auction-evidence-grid">
                   <div>
-                    <b>板块资金强度</b>
-                    <p>{draft.auction_plan.board_strength || '等待刷新题材雷达/资金流后补充。'}</p>
+                    <b>板块订单流强度</b>
+                    <p>{draft.auction_plan.board_strength || '等待刷新题材雷达/订单流方向估算后补充。'}</p>
                     {!!draft.auction_plan.board_strength_detail?.length && (
                       <ul>{draft.auction_plan.board_strength_detail.slice(0, 4).map(item => <li key={item}>{item}</li>)}</ul>
                     )}
@@ -544,7 +544,7 @@ export default function NextDayPlans({ mode = 'holding' }: { mode?: 'holding' | 
               <div className="form-grid">
                 <input placeholder="板块" value={draft.classification_basis.sector} onChange={e => updateBasis('sector', e.target.value)} />
                 <input placeholder="主线地位" value={draft.classification_basis.mainline_position} onChange={e => updateBasis('mainline_position', e.target.value)} />
-                <input placeholder="资金流" value={draft.classification_basis.fund_flow} onChange={e => updateBasis('fund_flow', e.target.value)} />
+                <input placeholder="订单流方向估算（供应商算法）" value={draft.classification_basis.fund_flow} onChange={e => updateBasis('fund_flow', e.target.value)} />
                 <input placeholder="成交额" value={draft.classification_basis.amount} onChange={e => updateBasis('amount', e.target.value)} />
                 <input placeholder="换手率" value={draft.classification_basis.turnover} onChange={e => updateBasis('turnover', e.target.value)} />
                 <input placeholder="趋势" value={draft.classification_basis.trend} onChange={e => updateBasis('trend', e.target.value)} />

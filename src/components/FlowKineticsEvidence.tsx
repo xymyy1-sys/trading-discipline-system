@@ -3,7 +3,7 @@ import { buildFlowKineticsView, type FlowKineticsFields } from '../flowKinetics'
 export default function FlowKineticsEvidence({
   fields,
   compact = false,
-  label = '资金拐点',
+  label = '订单流方向拐点',
 }: {
   fields: FlowKineticsFields
   compact?: boolean

@@ -403,7 +403,10 @@ def _eastmoney_minute_bars(code: str) -> list[dict[str, Any]]:
         })
     try:
         tick_flow = _eastmoney_tick_flow(normalized)
+        tick_meta = tick_flow.pop("__meta__", {})
         for bar in bars:
+            if tick_meta:
+                bar.update(tick_meta)
             flow = tick_flow.get(str(bar.get("time") or ""))
             if flow:
                 bar.update(flow)
@@ -412,7 +415,7 @@ def _eastmoney_minute_bars(code: str) -> list[dict[str, Any]]:
     return bars
 
 
-def _eastmoney_tick_flow(code: str, large_order_threshold: float = 200_000) -> dict[str, dict[str, float]]:
+def _eastmoney_tick_flow(code: str, large_order_threshold: float = 200_000) -> dict[str, dict[str, Any]]:
     normalized = _quote_code_candidates(code)[0] if _quote_code_candidates(code) else _normalize_code(code)
     response = requests.get(
         "https://70.push2.eastmoney.com/api/qt/stock/details/sse",
@@ -431,12 +434,15 @@ def _eastmoney_tick_flow(code: str, large_order_threshold: float = 200_000) -> d
             payload = json.loads(line[5:].strip())
             break
     details = ((payload or {}).get("data") or {}).get("details") or []
-    output: dict[str, dict[str, float]] = {}
+    output: dict[str, dict[str, Any]] = {}
+    valid_tick_times: list[str] = []
     for detail in details:
         parts = str(detail).split(",")
         if len(parts) < 5:
             continue
         raw_time, price, hands, _, nature = parts[:5]
+        if len(raw_time) >= 5:
+            valid_tick_times.append(raw_time[:8])
         minute = raw_time[:5]
         amount = _safe_float(price) * _safe_float(hands) * 100
         row = output.setdefault(minute, {"active_buy_amount": 0.0, "active_sell_amount": 0.0, "large_order_net_amount": 0.0})
@@ -449,6 +455,13 @@ def _eastmoney_tick_flow(code: str, large_order_threshold: float = 200_000) -> d
             if amount >= large_order_threshold:
                 row["large_order_net_amount"] -= amount
         row["large_order_threshold"] = large_order_threshold
+    output["__meta__"] = {
+        "tick_returned_count": len(details),
+        "tick_valid_count": len(valid_tick_times),
+        "tick_first_time": min(valid_tick_times) if valid_tick_times else None,
+        "tick_last_time": max(valid_tick_times) if valid_tick_times else None,
+        "tick_batch_truncated": len(details) >= 2000,
+    }
     return output
 
 def _latest_quote_for_holding(holding: Holding) -> dict[str, Any]:

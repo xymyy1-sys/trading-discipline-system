@@ -304,7 +304,7 @@ def _persist_unified_market_events(
             confirmed=confirmed,
             value=float(metadata["confirmation_score"]),
             previous_value=float(_value(item, "net_inflow", 0) or 0),
-            evidence=evidence or [f"{sector}进入盘中增量观察，等待新增涨停、资金和价格共同确认。"],
+            evidence=evidence or [f"{sector}进入盘中增量观察，等待新增涨停、订单流方向与价格共同确认。"],
             counter_evidence=counter,
             source=_sources(_value(item, "source") or _value(expansion, "source")),
             source_url=None,

@@ -106,6 +106,21 @@ def _install_context_dependencies(monkeypatch, db_session) -> Holding:
         evidence=["当前仍在冲高后的确认窗口"],
         recheck_conditions=["回踩分时均价不破后重新抬高"],
     )
+    effective_capital = DumpNamespace(
+        state="ABSORPTION_CANDIDATE",
+        state_label="下方承接候选",
+        confidence=61,
+        risk_level="MEDIUM",
+        data_quality="realtime",
+        source_label="东方财富逐笔成交方向分类（非账户身份）",
+        as_of=now,
+        estimated=False,
+        metrics={"signed_flow_yi": -0.8, "price_change_pct": -0.05, "persistence_score": 0.7},
+        evidence=["主动卖出占优，但价格未继续下移。"],
+        warnings=["无法识别交易账户身份。"],
+        invalidation=["放量跌破窗口低点。"],
+        discipline=["等待收回分时均价后再确认。"],
+    )
     card = DumpNamespace(
         code=holding.code,
         name=holding.name,
@@ -118,6 +133,7 @@ def _install_context_dependencies(monkeypatch, db_session) -> Holding:
         volume_price=volume,
         execution_state=execution,
         entry_discipline=entry_discipline,
+        effective_capital=effective_capital,
         timeline=timeline,
         minute_chart=[
             {"time": "09:31", "price": 98.0, "vwap": 98.0, "amount": 0.2},
@@ -185,9 +201,23 @@ def test_position_context_contains_traceable_decision_evidence(db_session, monke
     assert context["minute_volume_price"]["data"]["vwap_reliable"] is True
     assert context["execution_state"]["data"]["sellable_quantity"] == 200
     assert context["entry_discipline"]["data"]["decision"] == "WAIT_RETEST"
+    assert context["effective_capital"]["evidence_id"] == "FLOW-1"
+    assert context["effective_capital"]["data"]["state"] == "ABSORPTION_CANDIDATE"
     assert context["reflexivity"]["data"]["stock"]["current_scenario"] == "REBOUND_ABSORPTION"
     assert context["related_news"]["data"][0]["url"] == "https://example.test/news"
     assert context["missing_fields"] == []
+
+
+def test_position_context_marks_historical_order_flow_as_current_evidence_gap(db_session, monkeypatch):
+    _install_context_dependencies(monkeypatch, db_session)
+    card = service.decision_card(db_session, "600584")
+    card.effective_capital.data_quality = "historical_close"
+    monkeypatch.setattr(service, "decision_card", lambda *_args, **_kwargs: card)
+
+    context = service.build_position_context(db_session, "600584")
+
+    assert context["effective_capital"]["data"]["data_quality"] == "historical_close"
+    assert "实时可确认的订单流有效性证据链" in context["missing_fields"]
 
 
 def test_position_answer_reuses_same_question_and_context_cache(db_session, monkeypatch):
@@ -203,6 +233,11 @@ def test_position_answer_reuses_same_question_and_context_cache(db_session, monk
                 "as_of": "2026-07-14T10:30:00+08:00",
                 "data": {"risk_level": "中高"},
             },
+            "effective_capital": {
+                "evidence_id": "FLOW-1",
+                "as_of": "2026-07-14T10:30:00+08:00",
+                "data": {"state": "ABSORPTION_CANDIDATE"},
+            },
             "holding_facts": {"evidence_id": "HLD-1", "as_of": "2026-07-14T10:30:00+08:00", "data": {"quantity": 200}},
         }
 
@@ -217,7 +252,7 @@ def test_position_answer_reuses_same_question_and_context_cache(db_session, monk
             return None
 
         def json(self):
-            return {"choices": [{"message": {"content": "事实：等待量价确认[MKT-1][HLD-1]"}}]}
+            return {"choices": [{"message": {"content": "事实：承接仍待价格确认[FLOW-1][HLD-1]"}}]}
 
     def fake_post(*_args, **kwargs):
         calls.append(kwargs)

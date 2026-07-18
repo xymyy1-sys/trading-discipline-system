@@ -41,7 +41,7 @@ def test_flow_kinetics_detects_both_sign_turns():
     )
 
     assert turn_out.turning == "TURN_TO_OUTFLOW"
-    assert turn_out.signal == "价格上涨但资金转弱，形成资金价格背离，警惕诱多"
+    assert turn_out.signal == "价格上涨但订单流方向转弱，形成订单流与价格背离，警惕诱多"
     assert turn_in.turning == "TURN_TO_INFLOW"
     assert "反抽观察" in (turn_in.signal or "")
 

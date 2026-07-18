@@ -94,7 +94,7 @@ def _default_next_day_plan(
     basis = ClassificationBasis(
         sector=evidence.get("sector") or "待盘后确认",
         mainline_position=evidence.get("mainline_position") or "待识别是否为主线前排",
-        fund_flow=evidence.get("fund_flow") or "待结合资金流证据页确认",
+        fund_flow=evidence.get("fund_flow") or "待结合订单流方向证据页确认",
         amount=evidence.get("amount") or "待补成交额",
         turnover=evidence.get("turnover") or "待补换手率",
         trend="；".join(
@@ -132,14 +132,14 @@ def _default_next_day_plan(
         confirm_price=round(max(holding.current_price, holding.cost_price), 2),
         trim_price=round(max(holding.current_price * 1.03, holding.cost_price * 1.04), 2),
         trim_condition=(
-            "到达计划兑现位/早盘有效高点后，只有放量滞涨或跌破VWAP、板块资金走弱、"
+            "到达计划兑现位/早盘有效高点后，只有放量滞涨或跌破VWAP、板块订单流方向走弱、"
             "高点回撤、利润保护中的至少两类证据共振，才分批兑现25%-50%；重新站稳VWAP并突破高点则取消。"
         ),
         trim_quantity=trim_quantity,
         allow_buyback=category in {"符合预期", "弱转强"},
         buyback_price=round(holding.current_price * 0.97, 2),
         buyback_condition=(
-            "禁止把不恐慌卖出等同于抄底。仅当全市场扩仓闸门开放、板块资金转强、"
+            "禁止把不恐慌卖出等同于抄底。仅当全市场扩仓闸门开放、板块订单流方向转强、"
             "个股V形/低点抬高并站回真实VWAP、到兑现位风险收益比不低于1.5时，才允许评估小仓试错。"
         ),
         max_buyback_quantity=trim_quantity if category in {"符合预期", "弱转强"} else 0,
@@ -295,7 +295,7 @@ def _build_stage_checks(
             "trigger": f"现价 {price:.2f} / 涨停 {limit_price:.2f}" if limit_price else "涨停价待确认",
             "decision": "接近涨停且量价未证伪" if near_limit else "尚未进入冲板确认",
             "required_action": "只在板块和量价同步确认时执行，不临盘扩大仓位。",
-            "evidence": [auction.get("board_strength") or "板块资金证据待补。"],
+            "evidence": [auction.get("board_strength") or "板块订单流方向证据待补。"],
         },
         {
             "stage": "炸板/回落处理",
@@ -462,7 +462,7 @@ def _limit_up_next_day_plan(
         )
     plan.expected_condition = (
         f"符合预期：高开2%-5%，短暂换手后10点前回封；"
-        f"回踩不破 {weak_reduce_price:.2f}，分时均价承接强，板块资金仍在前排。"
+        f"回踩不破 {weak_reduce_price:.2f}，分时均价承接强，板块订单流方向仍在前排。"
     )
     plan.expected_action = (
         f"持有观察，不加仓；若迟迟不板但仍站稳 {weak_reduce_price:.2f}，可以保留底仓，"
@@ -506,7 +506,7 @@ def _limit_up_next_day_plan(
 
 def _limit_up_auction_evidence(payload: LimitUpPlanCreate, concepts: list[str]) -> dict[str, Any]:
     concept_text = " ".join([payload.industry, payload.name, *concepts])
-    board_strength = "板块资金数据缺口：请先刷新题材雷达/资金流，再生成打板预案。"
+    board_strength = "板块订单流方向数据缺口：请先刷新题材雷达/订单流估算，再生成打板预案。"
     mainline_position = ""
     leader_support: list[str] = []
     board_supported = False
@@ -518,7 +518,7 @@ def _limit_up_auction_evidence(payload: LimitUpPlanCreate, concepts: list[str]) 
     mainline_level = "待验证"
     is_mainline: bool | None = None
     theme_stage = "数据不足"
-    theme_stage_reason = "缺少题材资金与阶段证据"
+    theme_stage_reason = "缺少题材订单流方向与阶段证据"
     identity_roles: list[str] = []
     identity_action = "只观察"
     position_rule = "主线、阶段和个股身份未完成联合确认，仓位上限为0%"
@@ -543,8 +543,8 @@ def _limit_up_auction_evidence(payload: LimitUpPlanCreate, concepts: list[str]) 
             if _contains_any(related, tuple([payload.industry, *concepts, payload.name, payload.code])) or _contains_any(concept_text, tuple([theme.name, theme_mainline, theme_subline])):
                 board_strength = (
                     f"{theme.name}：题材强度{theme.score}分，排名第{idx}；"
-                    f"板块净流入{theme.net_inflow:.2f}亿，主力净流入{theme.main_inflow:.2f}亿，"
-                    f"涨停{theme.limit_up_count}只，阶段={theme.stage}。"
+                    f"板块订单流方向净额{theme.net_inflow:.2f}亿，大单方向估算{theme.main_inflow:.2f}亿，"
+                    f"涨停{theme.limit_up_count}只，阶段={theme.stage}（供应商算法，非账户真实流水）。"
                 )
                 board_supported = theme.net_inflow > 0 and theme.main_inflow > 0 and theme.limit_up_count >= 3
                 weak_board = theme.net_inflow <= 0 or theme.main_inflow <= 0 or theme.limit_up_count <= 1 or theme.score < 60
@@ -725,7 +725,7 @@ def _auction_risk_notes(
     high_volume = payload.amount >= 20 or turnover >= 18
     if high_level and high_volume:
         if payload.amount >= 80:
-            notes.append("容量核心放量换手：风险权重升高，但若主线资金 and 前排助攻持续，仍有观察价值。")
+            notes.append("容量核心放量换手：风险权重升高，但若主线订单流方向与前排助攻持续，仍有观察价值。")
         elif break_count > 0:
             notes.append("高位天量分歧回封：继续转一致难度上升，次日必须强更强。")
         else:
@@ -735,9 +735,9 @@ def _auction_risk_notes(
     if high_volume:
         notes.append("偏离5日线风险：未取得均线数据时按高位放量替代提示，禁止追高加仓，等待竞价/开盘强势确认。")
     if weak_board:
-        notes.append("板块资金不支持：个股独立行情持续性下降，若次日无板块助攻，涨停预期下调一级。")
+        notes.append("板块订单流方向不支持：个股独立行情持续性下降，若次日无板块助攻，涨停预期下调一级。")
     elif not board_supported:
-        notes.append("板块共振证据不足：需补充题材雷达/资金流 and 涨停天梯后再提高预期。")
+        notes.append("板块共振证据不足：需补充题材雷达、订单流方向估算与涨停天梯后再提高预期。")
     if support_count <= 1:
         notes.append("前排/后排助攻不足：同题材梯队或首板扩散不足，次日必须个股强更强。")
     notes.append(f"弱于预期价格触发：跌破{payload.price:.2f}先减仓，跌破分时均价后反抽不过继续减仓，跌破{payload.price * 0.97:.2f}附近清仓。")
@@ -796,7 +796,7 @@ def _holding_market_evidence(holding: Holding, quote: dict[str, Any] | None = No
                 f"日内高低{high_price:.2f}/{low_price:.2f}。"
             )
         else:
-            evidence["intraday"] = "分时字段不足，仅使用最新价 and 涨跌幅做降级判断。"
+            evidence["intraday"] = "分时字段不足，仅使用最新价与涨跌幅做降级判断。"
         evidence["gap_pct"] = open_gap
         evidence["change_pct"] = change_pct
         evidence["intraday_repair"] = intraday_repair
@@ -808,7 +808,7 @@ def _holding_market_evidence(holding: Holding, quote: dict[str, Any] | None = No
         evidence.update(volume_context)
     theme_flow = _cached_holding_theme_flow_profile(holding)
     if theme_flow["sectors"]:
-        evidence["flow_basis"] = theme_flow.get("basis") or "行业资金流"
+        evidence["flow_basis"] = str(theme_flow.get("basis") or "行业资金流").replace("资金流", "订单流算法")
         evidence["primary_industry_sector"] = "、".join(theme_flow["sectors"][:3])
         evidence["matched_flow_sector"] = evidence["primary_industry_sector"]
         evidence["theme_flow_sectors"] = list(theme_flow["sectors"])
@@ -844,8 +844,8 @@ def _holding_market_evidence(holding: Holding, quote: dict[str, Any] | None = No
                 )
                 if not evidence.get("fund_flow"):
                     evidence["fund_flow"] = (
-                        f"题材雷达辅助：{theme.name}净流入{theme.net_inflow:.2f}亿，"
-                        f"主力净流入{theme.main_inflow:.2f}亿，涨停{theme.limit_up_count}只。"
+                        f"题材雷达辅助：{theme.name}订单流方向净额{theme.net_inflow:.2f}亿，"
+                        f"大单方向估算{theme.main_inflow:.2f}亿，涨停{theme.limit_up_count}只（供应商算法，非账户真实流水）。"
                     )
                 evidence["is_mainline_front"] = (
                     theme.score >= 75
@@ -883,7 +883,7 @@ def _holding_market_evidence(holding: Holding, quote: dict[str, Any] | None = No
                         or stock.amount >= 30
                         or (turnover is not None and turnover >= 25)
                     )
-                    evidence["trend"] = "涨停强势结构，次日必须看封单、开盘承接 and 板块扩散。"
+                    evidence["trend"] = "涨停强势结构，次日必须看封单、开盘承接与板块扩散。"
                     return evidence
 
     current = holding.current_price
@@ -892,7 +892,7 @@ def _holding_market_evidence(holding: Holding, quote: dict[str, Any] | None = No
         evidence["is_underperforming"] = True
         evidence["trend"] = "现价低于成本3%以上，优先按弱修复/退出纪律处理。"
     elif cost and current > cost * 1.12:
-        evidence["trend"] = "已有较明显利润垫，关注冲高兑现 and 回撤保护。"
+        evidence["trend"] = "已有较明显利润垫，关注冲高兑现与回撤保护。"
     return evidence
 
 def _volume_price_context(code: str, quote: dict[str, Any]) -> dict[str, Any]:
@@ -961,7 +961,7 @@ def _dynamic_holding_auction_plan(
     expected_state = _expected_condition(category)
     expectation_match = _expectation_match_label(evidence, category)
     operation_advice = _dynamic_operation_advice(expectation_match, category, holding, current)
-    board_strength = evidence.get("fund_flow") or "板块资金证据缺口：请刷新题材雷达/资金流。"
+    board_strength = evidence.get("fund_flow") or "板块订单流方向证据缺口：请刷新题材雷达/订单流估算。"
     leader_support = _leader_support_for_holding(holding, evidence)
     limit_quality = (
         f"{holding.name}盘中状态：{evidence.get('intraday') or '实时分时字段不足'}；"
@@ -1045,7 +1045,7 @@ def _dynamic_sell_trigger_cards(holding: Holding, evidence: dict[str, Any], quot
     cards = [
         f"利润保护：{triggers['profit_protection_state']}",
         "板块退潮："
-        + ("；".join(triggers["sector_ebb_trigger"]) if triggers["sector_ebb_trigger"] else "未触发，继续看板块资金排名和主线前排。"),
+        + ("；".join(triggers["sector_ebb_trigger"]) if triggers["sector_ebb_trigger"] else "未触发，继续看板块订单流方向排名和主线前排。"),
         "个股弱化："
         + ("；".join(triggers["stock_weakening_trigger"]) if triggers["stock_weakening_trigger"] else "未触发，继续看是否守住分时均价/VWAP。"),
         "利润回撤："
@@ -1109,7 +1109,7 @@ def _dynamic_risk_notes(evidence: dict[str, Any], holding: Holding, current: flo
     if ma5_deviation >= 8:
         notes.append(f"偏离5日线{ma5_deviation:.2f}%：禁止追高加仓，若开盘/竞价不能强势确认，按回踩均线风险处理。")
     if evidence.get("is_underperforming"):
-        notes.append("现状弱于板块或资金流：个股独立行情持续性下降，涨停预期下调一级。")
+        notes.append("现状弱于板块或订单流方向：个股独立行情持续性下降，涨停预期下调一级。")
     if evidence.get("leader_support_missing"):
         notes.append("前排/后排助攻不足：无梯队扩散时，次日必须个股强更强。")
     notes.append(f"弱于预期价格触发：跌破{max(holding.cost_price * 0.98, current * 0.97):.2f}减仓，跌破{max(holding.cost_price * 0.96, current * 0.94):.2f}清仓。")
@@ -1182,7 +1182,7 @@ def _underperform_condition(category: str) -> str:
         return "高开后快速回落跌破分时均价/VWAP，无法重新收回确认位，明显弱于板块。"
     if category == "弱转强":
         return "翻红失败后再次跌回昨收/确认位下方，低点继续下移。"
-    return "低开不修复、跌破确认位/减仓线、弱于板块、放量下跌或资金明显流出"
+    return "低开不修复、跌破确认位/减仓线、弱于板块、放量下跌或订单流方向明显转弱"
 
 def _underperform_action(category: str) -> str:
     if category in {"强预期", "超预期", "主线前排股"}:

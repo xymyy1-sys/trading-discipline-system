@@ -77,9 +77,9 @@ export default function Dashboard() {
   const sourceLabel = radar?.source.includes('diagnostic')
     ? '诊断数据'
     : radar?.source.includes('sina')
-      ? '新浪资金流'
+      ? '新浪订单流算法'
     : radar?.source.includes('eastmoney')
-      ? '东方财富'
+      ? '东方财富订单流算法'
       : '同步中'
 
   const topThemes = radar?.themes.slice(0, 12) ?? []
@@ -93,7 +93,7 @@ export default function Dashboard() {
           <p>
             {radar?.strongest_theme
               ? `${radar.strongest_theme.stage} · ${radar.strongest_theme.stage_reason}`
-              : loading ? '正在同步板块资金、涨幅和核心股表现' : error || '暂无有效题材数据'}
+              : loading ? '正在同步板块订单流估算、涨幅和核心股表现' : error || '暂无有效题材数据'}
           </p>
         </div>
         <div className="radar-command-actions">
@@ -112,7 +112,7 @@ export default function Dashboard() {
       <section className="radar-pulse-strip">
         <Signal label="市场温度" value={radar?.market_temperature ?? '--'} icon={<Flame size={16} />} />
         <Signal label="最强题材分" value={radar?.strongest_theme ? `${radar.strongest_theme.score}` : '--'} icon={<Activity size={16} />} />
-        <Signal label="题材净流入" value={radar?.strongest_theme ? `${fmtSigned(radar.strongest_theme.net_inflow)}亿` : '--'} icon={<TrendingUp size={16} />} tone="up" />
+        <Signal label="题材订单流净额" value={radar?.strongest_theme ? `${fmtSigned(radar.strongest_theme.net_inflow)}亿` : '--'} icon={<TrendingUp size={16} />} tone="up" />
         <Signal label="共振数量" value={`${radar?.resonance.length ?? 0}`} icon={<Layers3 size={16} />} />
         <Signal label="阶段" value={radar?.strongest_theme?.stage ?? '--'} icon={<RadioTower size={16} />} />
       </section>
@@ -161,8 +161,8 @@ export default function Dashboard() {
               </div>
               <div className="theme-stat-grid">
                 <MiniStat label="涨幅" value={`${fmtSigned(selected.change_pct)}%`} tone={selected.change_pct >= 0 ? 'up' : 'down'} />
-                <MiniStat label="净流入" value={`${fmtSigned(selected.net_inflow)}亿`} tone={selected.net_inflow >= 0 ? 'up' : 'down'} />
-                <MiniStat label="主力流入" value={`${fmtSigned(selected.main_inflow)}亿`} tone={selected.main_inflow >= 0 ? 'up' : 'down'} />
+                <MiniStat label="订单流方向净额" value={`${fmtSigned(selected.net_inflow)}亿`} tone={selected.net_inflow >= 0 ? 'up' : 'down'} />
+                <MiniStat label="大单方向估算" value={`${fmtSigned(selected.main_inflow)}亿`} tone={selected.main_inflow >= 0 ? 'up' : 'down'} />
                 <MiniStat label="涨停扩散" value={`${selected.limit_up_count || '--'}只`} />
               </div>
               <div className="stock-role-list">
@@ -183,7 +183,7 @@ export default function Dashboard() {
 
         <article className="panel theme-flow-panel">
           <div className="panel-title-line">
-            <h3><TrendingUp size={16} /> 资金曲线</h3>
+            <h3><TrendingUp size={16} /> 订单流方向曲线</h3>
             <span>{chartThemes.length} 条曲线</span>
           </div>
           <ThemeFlowChart items={chartThemes} selectedName={selected?.name ?? null} />
@@ -196,13 +196,13 @@ export default function Dashboard() {
           <div className="watchlist-tags">
             {(selected?.leader_names?.length ? selected.leader_names : ['等待核心股确认']).map(name => <span key={name}>{name}</span>)}
           </div>
-          <p className="plain-text">{selected?.action ?? '只在题材、资金、核心股三者同向时提高关注。'}</p>
+          <p className="plain-text">{selected?.action ?? '只在题材、订单流方向与核心股三者同向时提高关注。'}</p>
         </article>
         <article className="panel">
           <h3><AlertTriangle size={16} /> 阶段风险</h3>
           <p className="plain-text">{selected?.risk ?? '等待题材阶段确认。'}</p>
           <div className="rule-list">
-            <span>资金流只是证据，不单独作为买点</span>
+            <span>供应商订单流算法只是证据，不是账户真实流水，也不单独作为买点</span>
             <span>后排跟风必须让位于情绪龙头和容量中军</span>
             <span>高潮阶段先看兑现风险，再看进攻机会</span>
           </div>
@@ -324,9 +324,9 @@ function ThemeFlowChart({ items, selectedName }: { items: ThemeRadarItem[]; sele
   }, [items, selectedName, xData])
 
   if (!items.length) {
-    return <div className="theme-flow-empty">等待板块资金曲线</div>
+    return <div className="theme-flow-empty">等待板块订单流方向曲线</div>
   }
-  return <div className="theme-flow-chart" ref={ref} aria-label="板块资金曲线" />
+  return <div className="theme-flow-chart" ref={ref} aria-label="板块订单流方向曲线" />
 }
 
 function Signal({ label, value, icon, tone }: { label: string; value: string; icon: ReactNode; tone?: 'up' }) {

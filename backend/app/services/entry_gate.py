@@ -503,8 +503,8 @@ def evaluate_entry_gate(
         _reason(reason_codes, evidence, "PLAN_POSITION_CAP_MISSING", "计划仓位或买回数量无法换算为账户仓位上限，禁止使用默认仓位替代。")
         missing_conditions.append("可核验的计划仓位或最大买回数量")
     if _boolean(sector_data, "crowding_evaluated") is False:
-        _reason(reason_codes, evidence, "SECTOR_CONTEXT_MISSING", "所属板块冷热、资金拐点或拥挤度尚未取得可靠快照，禁止凭个股冲高追入。")
-        missing_conditions.append("可靠的所属板块冷热与资金拐点快照")
+        _reason(reason_codes, evidence, "SECTOR_CONTEXT_MISSING", "所属板块冷热、订单流方向拐点或拥挤度尚未取得可靠快照，禁止凭个股冲高追入。")
+        missing_conditions.append("可靠的所属板块冷热与订单流方向拐点快照")
     if is_holding and (not has_plan or not mode_match):
         _append_unique(evidence, "已有持仓不构成加仓理由；加仓与新开仓使用同一纪律闸门。")
 
@@ -526,10 +526,10 @@ def evaluate_entry_gate(
         _reason(reason_codes, evidence, "SECTOR_OVERHEATED", "所属板块处于过热或高拥挤区，继续追价的赔率下降。")
         score += 15
     if sector_rolling_over:
-        _reason(reason_codes, evidence, "SECTOR_FLOW_WEAKENING", "板块资金由流入转弱或加速流出，个股冲高缺少板块确认。")
+        _reason(reason_codes, evidence, "SECTOR_FLOW_WEAKENING", "板块订单流方向估算由正转弱或负值加速，个股冲高缺少板块确认。")
         score += 15
     elif sector_supportive:
-        counter_evidence.append("板块资金边际改善，但仍不能替代个股回踩确认。")
+        counter_evidence.append("板块订单流方向估算边际改善，但仍不能替代个股回踩确认。")
 
     consensus_score = _number(consensus_data, "score")
     consensus_level = _text(consensus_data, "level", "risk_level").upper()
@@ -672,7 +672,7 @@ def evaluate_entry_gate(
         [
             "至少等待一个5分钟观察窗，禁止在直线拉升过程中追单。",
             "回踩真实分时均价或突破位不破，随后价格重新抬高。",
-            "回踩缩量、恢复放量，且板块资金没有由流入拐为流出。",
+            "回踩缩量、恢复放量，且板块订单流方向估算没有由正转负。",
             "仍符合当日交易计划、交易模式、止损和风险收益比。",
         ]
     )

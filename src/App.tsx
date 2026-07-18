@@ -230,14 +230,14 @@ function StockSelectionWorkspace() {
     <WorkspacePage
       title="选股中心"
       subtitle="盘前发现与观察池管理"
-      objective="从主线、题材强度、资金与涨停质量中发现新标的，形成少而精的观察池。"
-      allowed={['主线前排', '资金确认', '量价健康', '预期差不为负']}
-      forbidden={['后排跟风', '数据质量不合格', '高位巨量滞涨', '板块资金持续转弱']}
+      objective="从主线、题材强度、订单流方向与涨停质量中发现新标的，形成少而精的观察池。"
+      allowed={['主线前排', '订单流与价格确认', '量价健康', '预期差不为负']}
+      forbidden={['后排跟风', '数据质量不合格', '高位巨量滞涨', '板块订单流方向持续转弱']}
       modules={[
-        { key: 'candidates', label: '自动观察池', description: '主线、涨停质量、资金与风险综合推荐', Component: CandidatePool },
-        { key: 'intel', label: '行业要闻', description: '东方财富、央视及行业资讯原文与资金验证', Component: IntelDesk },
+        { key: 'candidates', label: '自动观察池', description: '主线、涨停质量、订单流方向与风险综合推荐', Component: CandidatePool },
+        { key: 'intel', label: '行业要闻', description: '东方财富、央视及行业资讯原文与市场验证', Component: IntelDesk },
         { key: 'radar', label: '主线题材', description: '主线强度、共振方向、核心股', Component: Dashboard },
-        { key: 'flow', label: '资金证据', description: '板块资金拐点、排名与强弱', Component: FlowDesk },
+        { key: 'flow', label: '订单流证据', description: '板块订单流方向拐点、排名与强弱', Component: FlowDesk },
         { key: 'ladder', label: '涨停质量', description: '连板高度、封板质量、题材聚类', Component: LimitUpLadder },
         { key: 'card', label: '个股研判', description: '预期、实际、事件与失效条件', Component: DecisionCard },
       ]}

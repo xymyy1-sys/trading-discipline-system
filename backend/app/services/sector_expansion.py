@@ -280,7 +280,7 @@ class SectorExpansionRadarService:
         flow_turning = flow.turning if flow else None
 
         if flow is None:
-            missing.extend(["同名板块真实资金流", "板块涨幅"])
+            missing.extend(["同名板块供应商订单流方向估算", "板块涨幅"])
         else:
             if flow.kinetics_reliable:
                 if _flow_supportive(flow):
@@ -291,15 +291,15 @@ class SectorExpansionRadarService:
                 elif _flow_improving(flow):
                     score += 10
                     evidence.append(_flow_evidence_text(flow))
-                    missing.append("板块资金由净流出转为净流入")
-                    risk.append("资金只是边际改善但仍为净流出，只能观察反抽，不能确认趋势反转。")
+                    missing.append("板块订单流方向估算由负转正")
+                    risk.append("订单流方向只是边际改善但净额仍为负，只能观察反抽，不能确认趋势反转。")
                 elif flow.turning in _NEGATIVE_TURNS or (flow.speed is not None and flow.speed < 0):
                     counter.append(_flow_evidence_text(flow))
-                    risk.append("板块资金正在转弱，新增涨停可能只是存量脉冲。")
+                    risk.append("板块订单流方向估算正在转弱，新增涨停可能只是存量脉冲。")
                 else:
-                    missing.append("资金由流出转流入或加速流入")
+                    missing.append("订单流方向由负转正或正向加速")
             else:
-                missing.append("至少两个因果资金快照形成的流速/拐点")
+                missing.append("至少两个带有效时间戳的订单流快照形成流速/拐点")
 
             price_strength = _price_strength_confirmed(flow, self.min_price_strength_pct)
             if price_strength:
@@ -339,15 +339,15 @@ class SectorExpansionRadarService:
         if confirmed:
             action = (
                 "仅加入盘中机会观察；优先跟踪最早封板、最高板或板块核心。"
-                "等待首次回踩真实分时均价不破、资金未拐出且涨停扩散未退潮后再评估，禁止追后排。"
+                "等待首次回踩真实分时均价不破、订单流方向未转弱且涨停扩散未退潮后再评估，禁止追后排。"
             )
         else:
             action = (
-                "证据尚未闭环，不开仓、不追高；等待新增封板达到门槛，并由真实资金流速和板块价格共同确认。"
+                "证据尚未闭环，不开仓、不追高；等待新增封板达到门槛，并由供应商订单流方向流速和板块价格共同确认。"
             )
 
         invalidation = [
-            "板块资金由流入拐为流出，或流入速度连续转负。",
+            "板块订单流方向估算由正转负，或方向速度连续转弱。",
             "板块跌破真实分时均价且不能在一个观察窗口内收回。",
             "新增涨停集中炸板、核心开板，板块扩散数量明显回落。",
         ]
@@ -729,7 +729,7 @@ def _price_strength_confirmed(flow: _FlowEvidence, threshold: float) -> bool:
 def _flow_evidence_text(flow: _FlowEvidence) -> str:
     parts: list[str] = []
     if flow.net_inflow is not None:
-        parts.append(f"净流入 {flow.net_inflow:+.2f} 亿")
+        parts.append(f"订单流方向净额 {flow.net_inflow:+.2f} 亿（供应商算法）")
     if flow.speed is not None:
         parts.append(f"流速 {flow.speed:+.3f} 亿/分钟")
     if flow.acceleration is not None:
@@ -738,7 +738,7 @@ def _flow_evidence_text(flow: _FlowEvidence) -> str:
         parts.append(flow.signal)
     elif flow.turning:
         parts.append(flow.turning)
-    return "资金证据：" + "，".join(parts) + "。"
+    return "订单流方向证据：" + "，".join(parts) + "。"
 
 
 def _intraday_price_change_pct(

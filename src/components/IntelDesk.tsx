@@ -5,9 +5,9 @@ import { API_BASE } from '../api'
 import type { HoldingOut, InformationDifferentialOut as IntelData } from '../types'
 
 const statusConfig: Record<string, { icon: typeof CheckCircle2; cls: string; label: string }> = {
-  '资金已验证': { icon: CheckCircle2, cls: 'verified', label: '资金已验证' },
-  '等资金确认': { icon: AlertCircle, cls: 'pending', label: '等资金确认' },
-  '资金流出': { icon: XCircle, cls: 'risk', label: '资金流出' },
+  '资金已验证': { icon: CheckCircle2, cls: 'verified', label: '订单流方向已验证' },
+  '等资金确认': { icon: AlertCircle, cls: 'pending', label: '等订单流确认' },
+  '资金流出': { icon: XCircle, cls: 'risk', label: '订单流方向转弱' },
 }
 
 export default function IntelDesk() {
@@ -91,7 +91,7 @@ export default function IntelDesk() {
           <AlertCircle size={14} /> 等确认 <strong>{waitingCnt}</strong>
         </button>
         <button className={`stat-chip risk ${filter === '资金流出' ? 'active' : ''}`} onClick={() => setFilter('资金流出')}>
-          <XCircle size={14} /> 流出 <strong>{riskCnt}</strong>
+          <XCircle size={14} /> 方向转弱 <strong>{riskCnt}</strong>
         </button>
         <label className="search-box intel-search">
           <Search size={15} />
@@ -179,7 +179,7 @@ export default function IntelDesk() {
             <h3>纪律提示</h3>
             <div className="rule-list">
               <span>消息只进入观察池，不直接开仓</span>
-              <span>必须等待题材资金、核心股和量价确认</span>
+              <span>必须等待题材订单流方向、核心股和量价确认；供应商算法不代表账户真实流水</span>
               <span>周末消息需等下个交易日竞价验证</span>
             </div>
           </div>

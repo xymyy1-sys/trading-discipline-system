@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'vitest'
 import { buildFlowKineticsView, flowTurningLabel, holdingFlowKineticsFields } from './flowKinetics'
 
-describe('资金流速与拐点显示', () => {
+describe('订单流方向流速与拐点显示', () => {
   test('单一时点不伪造流速或拐点', () => {
     const view = buildFlowKineticsView({
       flow_direction: 'NET_INFLOW',
@@ -26,7 +26,7 @@ describe('资金流速与拐点显示', () => {
       flow_kinetics_reliable: true,
     })
 
-    expect(view.signal).toBe('由净流入拐为净流出')
+    expect(view.signal).toBe('订单流方向由净流入拐为净流出')
     expect(view.tone).toBe('warning')
     expect(view.speed).toBe('-1.235 亿/分钟')
     expect(view.acceleration).toBe('-0.0789 亿/分钟²')
@@ -43,11 +43,11 @@ describe('资金流速与拐点显示', () => {
 
     expect(view.reliable).toBe(true)
     expect(view.tone).toBe('positive')
-    expect(flowTurningLabel('OUTFLOW_NARROWING')).toBe('净流出快速收窄')
+    expect(flowTurningLabel('OUTFLOW_NARROWING')).toBe('订单流方向净流出快速收窄')
   })
 
   test('未知拐点不泄露英文枚举，且显式风险等级决定颜色', () => {
-    expect(flowTurningLabel('NEW_PROVIDER_CODE')).toBe('资金拐点待识别')
+    expect(flowTurningLabel('NEW_PROVIDER_CODE')).toBe('订单流方向拐点待识别')
     expect(buildFlowKineticsView({
       flow_speed: -0.2,
       flow_as_of: '2026-07-16 10:15:00',

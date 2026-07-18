@@ -211,7 +211,7 @@ class OpportunityRadarService:
             data_quality = "degraded"
         else:
             data_quality = "missing"
-        discipline = "新闻只生成观察假设；未经板块资金、价格和可靠VWAP共同确认，不得升级。即使已确认也不是买入信号。"
+        discipline = "新闻只生成观察假设；未经板块订单流方向估算、价格和可靠VWAP共同确认，不得升级。即使已确认也不是买入信号。"
         return {
             "updated_at": now.isoformat(),
             "as_of": now.isoformat(),
@@ -256,11 +256,11 @@ class OpportunityRadarService:
         if status == STATUS_CONFIRMED:
             action = "板块证据已确认，可加入机会观察池；等待核心个股量价买点，禁止追后排。"
         elif status == STATUS_INVALIDATED:
-            action = "消息方向已被板块资金与量价证伪，停止据此开仓。"
+            action = "消息方向已被板块订单流方向估算与量价证伪，停止据此开仓。"
         elif status == STATUS_DECAYED:
             action = "消息时效或市场承接已衰减，不再作为新开仓依据。"
         else:
-            action = "仅记录信息差，等待板块资金、价格和分时均价共同确认。"
+            action = "仅记录信息差，等待板块订单流方向估算、价格和分时均价共同确认。"
 
         evidence = list(primary.evidence) if primary else []
         counter = list(primary.counter_evidence) if primary else []
@@ -316,7 +316,7 @@ class OpportunityRadarService:
         if impact["claim_level"] == "RUMOR":
             action = f"传闻/未核验线索不得当作事实；{action}"
         elif impact["market_validation"] == "CONFIRMED":
-            action = f"消息方向获得后续资金量价验证，但不等于因果已证实；{action}"
+            action = f"消息方向获得后续订单流方向与量价验证，但不等于因果已证实；{action}"
         return OpportunityAssessment(
             id=_news_id(item),
             title=title,
@@ -354,7 +354,7 @@ class OpportunityRadarService:
                 vwap_confirmed=False,
                 evidence=[],
                 counter_evidence=[],
-                missing=["板块资金", "板块涨幅/相对强度", "可靠板块VWAP"],
+                missing=["板块订单流方向估算", "板块涨幅/相对强度", "可靠板块VWAP"],
             )
 
         evidence_text: list[str] = []
@@ -372,13 +372,21 @@ class OpportunityRadarService:
             and (main is None or main < 0)
         )
         if not funds_available:
-            missing.append("板块资金")
+            missing.append("板块订单流方向估算")
         elif funds_confirmed:
-            evidence_text.append(f"板块净流入{net:+.2f}亿" + (f"，主力{main:+.2f}亿" if main is not None else ""))
+            evidence_text.append(
+                f"板块订单流方向净额{net:+.2f}亿"
+                + (f"，大单方向估算{main:+.2f}亿" if main is not None else "")
+                + "（供应商算法，非账户真实流水）"
+            )
         elif funds_invalid:
-            counter.append(f"板块净流出{net:.2f}亿" + (f"，主力{main:.2f}亿" if main is not None else ""))
+            counter.append(
+                f"板块订单流方向净额{net:.2f}亿"
+                + (f"，大单方向估算{main:.2f}亿" if main is not None else "")
+                + "（供应商算法）"
+            )
         else:
-            counter.append("板块资金尚未形成同向净流入")
+            counter.append("板块订单流方向估算尚未形成同向净流入")
 
         relative = evidence.relative_change_pct
         change = evidence.change_pct

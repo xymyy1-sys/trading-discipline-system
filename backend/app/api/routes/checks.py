@@ -153,7 +153,7 @@ def opportunity_radar(
             "source": [],
             "items": [],
             "counts": {"增量已确认": 0, "增量待确认": 0},
-            "notes": ["涨停梯队或板块资金暂不可用，本轮不生成模拟增量方向。"],
+            "notes": ["涨停梯队或板块订单流方向估算暂不可用，本轮不生成模拟增量方向。"],
         }
     if regime_note:
         result["notes"] = list(dict.fromkeys([*(result.get("notes") or []), regime_note]))

@@ -112,7 +112,7 @@ def test_missing_flow_never_becomes_confirmed_and_states_required_evidence():
 
     item = result["items"][0]
     assert item["status"] == STATUS_WATCH
-    assert "同名板块真实资金流" in item["missing"]
+    assert "同名板块供应商订单流方向估算" in item["missing"]
     assert "板块涨幅" in item["missing"]
     assert "不开仓、不追高" in item["action"]
     assert item["buy_signal"] is False
@@ -140,9 +140,9 @@ def test_negative_flow_turn_blocks_confirmation_and_exposes_risk_and_invalidatio
     item = result["items"][0]
     assert item["status"] == STATUS_WATCH
     assert any("净流出" in text for text in item["counter_evidence"])
-    assert any("资金正在转弱" in text for text in item["risk"])
+    assert any("订单流方向估算正在转弱" in text for text in item["risk"])
     assert any("炸板" in text for text in item["counter_evidence"])
-    assert any("资金由流入拐为流出" in text for text in item["invalidation"])
+    assert any("订单流方向估算由正转负" in text for text in item["invalidation"])
 
 
 def test_stale_or_unreliable_flow_is_not_used_as_confirmation():
@@ -161,7 +161,7 @@ def test_stale_or_unreliable_flow_is_not_used_as_confirmation():
 
     item = result["items"][0]
     assert item["status"] == STATUS_WATCH
-    assert "同名板块真实资金流" in item["missing"]
+    assert "同名板块供应商订单流方向估算" in item["missing"]
 
     unreliable = _flow(flow_kinetics_reliable=False, flow_speed=None, flow_acceleration=None)
     result = service.assess(
@@ -174,7 +174,7 @@ def test_stale_or_unreliable_flow_is_not_used_as_confirmation():
     )
     item = result["items"][0]
     assert item["status"] == STATUS_WATCH
-    assert any("资金快照" in text for text in item["missing"])
+    assert any("订单流快照" in text for text in item["missing"])
 
 
 def test_rejects_cross_day_or_future_ladder_instead_of_leaking_data():
@@ -236,7 +236,7 @@ def test_outflow_narrowing_is_visible_as_watch_but_never_claimed_as_reversal():
     item = result["items"][0]
     assert item["status"] == STATUS_WATCH
     assert any("净流出正在快速收窄" in text for text in item["evidence"])
-    assert "板块资金由净流出转为净流入" in item["missing"]
+    assert "板块订单流方向估算由负转正" in item["missing"]
     assert any("不能确认趋势反转" in text for text in item["risk"])
 
 
@@ -322,7 +322,7 @@ def test_only_verified_real_sources_can_participate_in_confirmation():
     assert fake_ladder["items"] == []
     assert "真实源" in fake_ladder["notes"][-1]
     assert fake_flow["items"][0]["status"] == STATUS_WATCH
-    assert "同名板块真实资金流" in fake_flow["items"][0]["missing"]
+    assert "同名板块供应商订单流方向估算" in fake_flow["items"][0]["missing"]
 
 
 def test_missing_flow_timestamp_cannot_claim_fresh_kinetics():
@@ -338,7 +338,7 @@ def test_missing_flow_timestamp_cannot_claim_fresh_kinetics():
     )
 
     assert result["items"][0]["status"] == STATUS_WATCH
-    assert any("资金快照" in text for text in result["items"][0]["missing"])
+    assert any("订单流快照" in text for text in result["items"][0]["missing"])
 
 
 def test_sector_aliases_are_canonicalized_before_theme_deduplication():

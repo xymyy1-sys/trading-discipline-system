@@ -783,7 +783,7 @@ def _holding_execution_signals(
     sector_pullback = float(getattr(seesaw, "theme_flow_pullback_pct", 0) or 0) if seesaw else 0.0
     if seesaw and (sector_risk in {"高", "中高"} or sector_net < 0 or sector_pullback >= 20):
         weakening_families["sector"] = (
-            f"板块承接走弱：净流入 {sector_net:.2f} 亿，资金峰值回撤 {sector_pullback:.1f}%，风险{sector_risk or '观察'}。"
+            f"板块承接走弱：订单流方向净额 {sector_net:.2f} 亿，方向净额峰值回撤 {sector_pullback:.1f}%（供应商算法），风险{sector_risk or '观察'}。"
         )
     if high_drawdown_pct >= 2.5:
         weakening_families["drawdown"] = f"个股从日内高点回撤 {high_drawdown_pct:.2f}%，冲高延续性下降。"
@@ -825,7 +825,7 @@ def _holding_execution_signals(
             evidence=target_evidence + list(weakening_families.values()),
             cancel_conditions=[
                 "连续两个观察窗口重新站稳VWAP并有效突破日内高点/计划兑现位。",
-                "板块资金重新回到前排且上攻效率、主动买盘同步恢复。",
+                "板块订单流方向估算重新回到前排，且上攻效率、主动买盘同步恢复。",
             ],
             recovery_conditions=["首批兑现后只在重新站稳VWAP、板块回流时保留剩余仓；否则继续按计划降风险。"],
         )
@@ -917,7 +917,7 @@ def _holding_execution_signals(
     if not market_gate_open:
         add_missing.append("全市场扩仓闸门未开放或市场数据质量不足。")
     if not sector_turning_strong:
-        add_missing.append("所属板块资金尚未转强并形成正向加速。")
+        add_missing.append("所属板块订单流方向估算尚未转强并形成正向加速。")
     if not stock_reversal_ready:
         add_missing.append("个股尚未完成V形/低点抬高并重新站稳真实VWAP。")
     if not expectation_allows:
@@ -931,14 +931,14 @@ def _holding_execution_signals(
         level="OPPORTUNITY" if add_eligible else "NEUTRAL",
         title="允许评估逆势试错" if add_eligible else "禁止逆势补仓",
         action=(
-            "仅允许评估小仓试错；下单前再次核对VWAP、板块资金和固定止损"
+            "仅允许评估小仓试错；下单前再次核对VWAP、板块订单流方向估算和固定止损"
             if add_eligible
             else "不恐慌卖出不等于允许抄底，四道闸门未齐前禁止补仓"
         ),
         evidence=(
             [
                 f"全市场扩仓闸门开放：{market_regime.regime_name if market_regime else '未知'}。",
-                f"板块资金净流入 {sector_net:.2f} 亿、加速度 {sector_acceleration:.2f}。",
+                f"板块订单流方向净额 {sector_net:.2f} 亿、加速度 {sector_acceleration:.2f}（供应商算法，非账户真实流水）。",
                 f"个股反转确认并站上VWAP {vwap:.2f}。",
                 f"计划兑现位 {reward_target:.2f} / 风险位 {risk_floor:.2f}，风险收益比 {risk_reward:.2f}。",
             ]
@@ -948,7 +948,7 @@ def _holding_execution_signals(
         missing_conditions=add_missing,
         cancel_conditions=[
             "重新跌破VWAP或抬高后的次低点。",
-            "板块资金再次转负/扩仓闸门关闭。",
+            "板块订单流方向估算再次转负/扩仓闸门关闭。",
             "风险收益比跌破1.5或预期再次证伪。",
         ],
         recovery_conditions=["四道闸门必须同时满足；这里只给出评估资格，不自动生成买入指令。"],
@@ -1002,7 +1002,7 @@ def _high_open_failed_breakout_event(
         evidence.append(f"上攻效率仅 {attack_efficiency:.2f}，新增成交对价格推动减弱。")
     if sector_pullback >= 20 or sector_net < 0:
         matched += 1
-        evidence.append("所属板块资金从峰值回落或转为净流出。")
+        evidence.append("所属板块订单流方向估算从峰值回落或转负。")
 
     if matched < 3:
         return None
@@ -1063,11 +1063,11 @@ def _sector_migration_signal(seesaw: Any | None) -> tuple[bool, int, list[str], 
     if sector_net < 0 or pullback >= 20:
         criteria += 1
         score += 25 if sector_net < 0 and pullback >= 20 else 18
-        evidence.append(f"原主线资金弱化：净流入 {sector_net:.2f} 亿，峰值回落 {pullback:.2f}%。")
+        evidence.append(f"原主线订单流方向弱化：方向净额 {sector_net:.2f} 亿，峰值回落 {pullback:.2f}%（供应商算法）。")
     if rank > 10:
         criteria += 1
         score += 12
-        evidence.append(f"原主线资金排名降至第 {rank}，不在前排。")
+        evidence.append(f"原主线订单流方向排名降至第 {rank}，不在前排。")
     if risk_level in {"高", "中高", "中"}:
         criteria += 1
         score += 12
@@ -1087,12 +1087,12 @@ def _sector_migration_signal(seesaw: Any | None) -> tuple[bool, int, list[str], 
     if any(keyword in leader_text for keyword in ("龙头", "核心股", "领涨", "切换")):
         criteria += 1
         score += 15
-        evidence.append("龙头/核心强弱证据支持资金方向切换。")
+        evidence.append("龙头/核心强弱证据支持订单流方向切换。")
 
     confidence = min(95, score)
     confirmed = criteria >= 3 and score >= 55 and (sector_net < 0 or pullback >= 20) and bool(stock_triggers or sector_triggers)
     if confirmed:
-        evidence.insert(0, f"疑似跨板块资金迁移，可信度 {confidence}%。")
+        evidence.insert(0, f"疑似跨板块订单流方向迁移，可信度 {confidence}%；该结论来自供应商算法，不代表账户真实划转。")
     return confirmed, confidence, evidence[:7], sector_net, flow_peak
 
 
@@ -1197,7 +1197,7 @@ def _build_events(
             "previous_value": round(float(getattr(seesaw, "theme_flow_peak", 0) or 0), 2),
             "priority": 55,
             "group_key": "sector:flow",
-            "evidence": [str(getattr(seesaw, "theme_flow_summary", "") or "板块资金从峰值回落。")],
+            "evidence": [str(getattr(seesaw, "theme_flow_summary", "") or "板块订单流方向估算从峰值回落。")],
         })
     if seesaw:
         flow_turning = str(getattr(seesaw, "sector_flow_turning", "") or "")
@@ -1248,7 +1248,7 @@ def _build_events(
                 "group_key": group_key,
                 "evidence": [
                     f"截至 {flow_captured_at.strftime('%H:%M:%S')}，{flow_signal or flow_turning}。",
-                    "，".join(metrics) if metrics else "资金曲线已有至少两个带时点的真实观察。",
+                    "，".join(metrics) if metrics else "订单流方向曲线已有至少两个带时点的真实观察。",
                 ],
             })
         flow_reliable = bool(getattr(seesaw, "sector_flow_kinetics_reliable", False))
@@ -1650,11 +1650,11 @@ def build_position_execution_state(
     counter_evidence: list[str] = []
     invalid_conditions: list[str] = [
         f"放量跌破结构止损 {structure_stop_price:.2f} 且 5-15 分钟不能收回。",
-        "板块资金继续回落且个股反抽 VWAP 失败。",
+        "板块订单流方向估算继续回落且个股反抽 VWAP 失败。",
     ]
     recovery_conditions: list[str] = [
         "重新站回 VWAP 并维持至少一个观察窗口。",
-        "所属板块资金停止流出或重新回到前排。",
+        "所属板块订单流方向估算停止恶化或重新回到前排。",
     ]
     market_regime, market_expansion_frozen, market_data_limited, market_age_minutes = _market_regime_gate(db, now)
     if market_regime is None:
@@ -1810,7 +1810,7 @@ def build_position_execution_state(
         elif risk_level == "中高":
             add_risk("sector", 1)
         elif risk_level in {"低", "安全"}:
-            counter_evidence.append("板块/资金环境风险较低，暂未形成外部共振杀跌。")
+            counter_evidence.append("板块/订单流方向环境风险较低，暂未形成外部共振杀跌。")
             add_positive("sector", 1)
         sector_triggers = list(getattr(seesaw, "sector_ebb_trigger", []) or [])
         stock_triggers = list(getattr(seesaw, "stock_weakening_trigger", []) or [])
@@ -1819,7 +1819,7 @@ def build_position_execution_state(
         if not sector_triggers:
             counter_evidence.append("暂未确认所属板块进入持续退潮。")
     else:
-        sector_state = "资金跷跷板数据缺口"
+        sector_state = "订单流跷跷板数据缺口"
         counter_evidence.append("未取得板块跷跷板数据，本次建议主要依据个股价格和利润保护。")
 
     raw_negative_score = sum(risk_family_scores.values())

@@ -11,6 +11,7 @@ import { CanvasRenderer } from 'echarts/renderers'
 import type { ExpectationChain, ExpectationRule, HoldingOut, StockDecisionCard } from '../types'
 import AiInsightButton from './AiInsightButton'
 import PositionAiAssistant from './PositionAiAssistant'
+import EffectiveCapitalEvidence from './EffectiveCapitalEvidence'
 
 type DecisionCardMode = 'watchlist' | 'holding'
 type WatchlistStock = { code: string; name: string; score: number; tier: string }
@@ -187,6 +188,8 @@ export default function DecisionCard({ mode = 'watchlist' }: { mode?: DecisionCa
             </div>
 
             {card.entry_discipline && <EntryDisciplinePanel gate={card.entry_discipline} holding={mode === 'holding'} />}
+
+            <EffectiveCapitalEvidence evidence={card.effective_capital} />
 
             <ExpectationJourney card={card} />
 

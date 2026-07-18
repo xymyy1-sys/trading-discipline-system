@@ -73,7 +73,7 @@ def test_intraday_sell_triggers_add_turn_out_and_recovery_conditions():
     assert any("由净流入拐为净流出" in item for item in risk["sector_ebb_trigger"])
     assert any("流速-0.800亿/分钟" in item for item in risk["sector_ebb_trigger"])
     assert "板块退潮" in risk["trigger_action"]
-    assert "资金由净流出拐为净流入" in recovery["buyback_trigger"][0]
+    assert "订单流方向由净流出拐为净流入" in recovery["buyback_trigger"][0]
     assert "仍需个股站回真实VWAP" in recovery["buyback_trigger"][0]
 
 

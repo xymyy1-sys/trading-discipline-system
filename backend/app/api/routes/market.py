@@ -233,17 +233,17 @@ def _sector_temperature_snapshot(
         cache_time = max(provider_updates) if provider_updates else "精确更新时间缺失"
         cache_date = f"，缓存日期 {current_cache['trade_date']}" if current_cache["trade_date"] else ""
         notes.append(
-            f"当日板块资金使用 {current_cache['source'] or '未知来源'} 缓存{cache_date}，快照更新时间 {cache_time}。"
+            f"当日板块订单流方向估算使用 {current_cache['source'] or '未知来源'} 缓存{cache_date}，快照更新时间 {cache_time}。"
         )
     result["notes"] = list(dict.fromkeys(notes))
     current_source = str(current.source or "").lower()
     cached_suffix = "缓存" if "cached" in current_source else ""
     fund_source = (
-        f"东方财富板块资金{cached_suffix}"
+        f"东方财富板块订单流算法{cached_suffix}"
         if "eastmoney" in current_source
-        else f"新浪备用板块资金{cached_suffix}"
+        else f"新浪备用板块订单流算法{cached_suffix}"
         if "sina" in current_source
-        else "板块资金暂不可用"
+        else "板块订单流方向估算暂不可用"
     )
     result["source"] = (
         f"{fund_source}+东方财富两融T+1"

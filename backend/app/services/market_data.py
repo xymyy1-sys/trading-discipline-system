@@ -186,7 +186,7 @@ class MarketDataProvider:
                 if _is_trading_time():
                     _record_snapshot(flow_type, rows)
             except Exception as exc:
-                notes.append(f"{theme_type}资金流暂不可用: {exc.__class__.__name__}")
+                notes.append(f"{theme_type}订单流算法暂不可用: {exc.__class__.__name__}")
                 try:
                     rows = self._fetch_sina_sector_flow_raw(flow_type=flow_type, period="今日")
                     for row in rows:
@@ -197,7 +197,7 @@ class MarketDataProvider:
                     if _is_trading_time():
                         _record_snapshot(flow_type, rows)
                 except Exception as sina_exc:
-                    notes.append(f"{theme_type}新浪备用资金流暂不可用: {sina_exc.__class__.__name__}")
+                    notes.append(f"{theme_type}新浪备用订单流算法暂不可用: {sina_exc.__class__.__name__}")
                     cached = _get_cached_flow(f"{flow_type}|今日")
                     if cached:
                         cached_rows, cached_source, _ = cached
@@ -278,7 +278,7 @@ class MarketDataProvider:
             strongest_theme=strongest,
             resonance=resonance,
             themes=ranked[:28],
-            notes=notes or ["板块资金流已按交易主线聚合，原始板块保留为证据链"],
+            notes=notes or ["板块订单流供应商算法已按交易主线聚合，原始板块保留为证据链；结果不代表账户真实流水"],
         )
         _set_response_cache(cache_key, result)
         return result
@@ -400,7 +400,7 @@ class MarketDataProvider:
 
         risk = "核心股断板或容量中军放量回落，会触发题材退潮"
         if float(raw.get("net_inflow") or 0) < 0:
-            risk = "资金净流出，题材可能只是消息脉冲"
+            risk = "供应商订单流方向净额为负，题材可能只是消息脉冲"
         elif stage == "高潮":
             risk = "一致性过强，次日容易高开低走或强分歧"
 
@@ -470,7 +470,7 @@ class MarketDataProvider:
             reverse=True,
         )
         if liquid:
-            add(liquid[0], "容量中军", "成交额靠前，代表大资金承接")
+            add(liquid[0], "容量中军", "成交额靠前，具备容量承接特征")
 
         trend = [
             it for it in liquid
@@ -506,16 +506,16 @@ class MarketDataProvider:
         weak_count = len([it for it in constituents if float(it.get("change_pct") or 0) <= -3])
 
         if net < -1 and change < 0:
-            return "退潮", "板块下跌且资金净流出"
+            return "退潮", "板块下跌且供应商订单流方向净额为负"
         if score >= 86 and (limit_count >= 5 or hot_count >= 8):
             return "高潮", "涨停/大涨扩散较充分，情绪一致性偏高"
         if score >= 78 and net > 5 and change > 2.5:
-            return "加速", "资金与涨幅同步放大"
+            return "加速", "供应商订单流方向估算与涨幅同步放大"
         if weak_count >= 5 and hot_count >= 3:
             return "分歧", "内部强弱分化，需要看核心承接"
         if score >= 64 and net > 1:
-            return "发酵", "资金开始集中，前排个股已出现"
-        return "启动", "资金或涨幅刚开始显现，仍需次日确认"
+            return "发酵", "供应商订单流方向估算开始集中，前排个股已出现"
+        return "启动", "订单流方向估算或涨幅刚开始显现，仍需次日确认"
 
     def _theme_resonance_tags(
         self,
@@ -525,9 +525,9 @@ class MarketDataProvider:
     ) -> list[str]:
         tags: list[str] = []
         if float(raw.get("net_inflow") or 0) >= 3:
-            tags.append("资金净流入放大")
+            tags.append("订单流方向净额放大")
         if float(raw.get("main_inflow") or 0) >= 1.5:
-            tags.append("主力资金确认")
+            tags.append("大单方向估算同向")
         if float(raw.get("change_pct") or 0) >= 2:
             tags.append("板块涨幅共振")
         if int(raw.get("limit_up_count") or 0) >= 3:
@@ -1029,11 +1029,11 @@ class MarketDataProvider:
         )
         source = flow.source
         if normalized in {"风格", "港股"}:
-            notes.append(f"东方财富公开板块资金接口未稳定提供{normalized}资金榜，当前按{flow_type.replace('资金流', '')}资金口径展示")
+            notes.append(f"东方财富公开板块接口未稳定提供{normalized}订单流榜，当前按{flow_type.replace('资金流', '')}供应商算法口径展示")
         if "sina" in source:
-            notes.append("东方财富 push2 当前不可用，已回落到新浪资金流；分层资金可能缺失")
+            notes.append("东方财富 push2 当前不可用，已回落到新浪同类订单流算法；分层字段可能缺失")
         if "diagnostic" in source:
-            notes.append("外部资金流不可用，当前为诊断数据")
+            notes.append("外部订单流算法不可用，当前为诊断数据")
         if not any(item.timeline and len([p for p in item.timeline if p.time != "当前"]) >= 2 for item in flow.inflow + flow.outflow):
             notes.append("当前只有资金快照，主图不会绘制伪曲线；盘中多次刷新后可形成连续曲线")
 
@@ -1044,7 +1044,7 @@ class MarketDataProvider:
             period=period,
             inflow=flow.inflow[:20],
             outflow=flow.outflow[:20],
-            notes=notes or ["东方财富板块资金流已同步"],
+            notes=notes or ["东方财富板块订单流算法已同步；该估算不代表账户真实流水"],
         )
         _set_response_cache(cache_key, result)
         return result
@@ -1062,7 +1062,7 @@ class MarketDataProvider:
             hot_rows = self._fetch_eastmoney_hot_market_raw()
             items = self._build_hot_theme_items(hot_rows)
             if items and not any(abs(item.net_inflow) > 0.01 or abs(item.main_inflow) > 0.01 for item in items):
-                notes.append("热点题材涨幅榜可用，但东方财富板块资金补充当前不可用")
+                notes.append("热点题材涨幅榜可用，但东方财富板块订单流方向估算当前不可用")
         except Exception as exc:
             notes.append(f"东方财富市场热点页暂不可用: {exc.__class__.__name__}")
             radar = self.theme_radar(force_refresh=force_refresh)
@@ -1087,7 +1087,7 @@ class MarketDataProvider:
             source="东方财富市场热点" if items else "数据源不可用",
             updated_at=datetime.utcnow(),
             items=items[:45],
-            notes=notes or ["东方财富市场热点榜已同步；资金字段按板块资金榜补充"],
+            notes=notes or ["东方财富市场热点榜已同步；订单流字段按供应商板块方向估算榜补充"],
         )
         _set_response_cache(cache_key, result)
         return result
@@ -2935,7 +2935,7 @@ class MarketDataProvider:
 
         evidence = [
             f"题材雷达：{radar_theme.name}排名第{rank}，强度{score}分，阶段={stage}。",
-            f"资金证据：板块净流入{net:.2f}亿，主力净流入{main:.2f}亿，涨停扩散{breadth}只。",
+            f"订单流方向证据：板块方向净额{net:.2f}亿，大单方向估算{main:.2f}亿，涨停扩散{breadth}只（供应商算法，非账户真实流水）。",
             f"梯队证据：完整度{completeness_score}分（{completeness_label}）。",
             f"动态定位：{level}；该定位由当日排名、资金、涨停扩散和阶段共同计算。",
         ]

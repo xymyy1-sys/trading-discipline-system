@@ -491,6 +491,40 @@ export interface EntryDiscipline {
   expires_at: string | null;
 }
 
+export interface EffectiveCapitalMetrics {
+  sample_count: number;
+  active_buy_yi: number | null;
+  active_sell_yi: number | null;
+  signed_flow_yi: number | null;
+  buy_ratio: number | null;
+  active_flow_coverage_ratio: number | null;
+  same_time_flow_percentile: number | null;
+  normalization_sample_count: number;
+  price_change_pct: number | null;
+  vwap_distance_pct: number | null;
+  price_response_per_signed_yi: number | null;
+  impact_retention_pct: number | null;
+  persistence_score: number | null;
+  window_minutes: number | null;
+}
+
+export interface EffectiveCapitalEvidence {
+  state: string;
+  state_label: string;
+  confidence: number | null;
+  state_severity: string;
+  data_quality: string;
+  source_label: string;
+  as_of: string | null;
+  estimated: boolean;
+  metrics: EffectiveCapitalMetrics | null;
+  evidence: string[];
+  warnings: string[];
+  invalidation: string[];
+  discipline: string[];
+  reason_codes: string[];
+}
+
 export interface StockDecisionCard {
   code: string;
   name: string;
@@ -511,6 +545,7 @@ export interface StockDecisionCard {
   consensus_risk: ConsensusRisk | null;
   minute_chart: MinuteChartPoint[];
   entry_discipline: EntryDiscipline | null;
+  effective_capital?: EffectiveCapitalEvidence | null;
 }
 
 export interface MinuteChartPoint {

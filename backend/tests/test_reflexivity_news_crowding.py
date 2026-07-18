@@ -114,7 +114,7 @@ def test_consensus_rule_refuses_unreliable_vwap_and_flow_numbers():
 
     assert result["status"] == "DATA_GAP"
     assert result["triggered"] is False
-    assert "分时均价或资金转弱证据" in result["missing_fields"]
+    assert "分时均价或订单流方向转弱证据" in result["missing_fields"]
 
 
 def test_official_negative_news_only_escalates_when_market_and_crowding_confirm():
@@ -213,7 +213,7 @@ def test_news_cannot_be_validated_by_market_evidence_captured_before_publication
     assert result["status"] == "DATA_GAP"
     assert result["market_validation"] == "DATA_GAP"
     assert result["escalate_to_holding_risk"] is False
-    assert "缺少消息发布后的资金量价验证" in result["missing_fields"]
+    assert "缺少消息发布后的订单流与量价验证" in result["missing_fields"]
 
 
 def test_news_cannot_be_validated_by_market_evidence_after_evaluation_time():
@@ -226,4 +226,4 @@ def test_news_cannot_be_validated_by_market_evidence_after_evaluation_time():
     assert result["status"] == "DATA_GAP"
     assert result["market_validation"] == "DATA_GAP"
     assert result["escalate_to_holding_risk"] is False
-    assert "资金量价验证时点晚于评估时点" in result["missing_fields"]
+    assert "订单流与量价验证时点晚于评估时点" in result["missing_fields"]

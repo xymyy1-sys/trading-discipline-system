@@ -580,6 +580,40 @@ class EntryDisciplineOut(BaseModel):
     expires_at: datetime | None = None
 
 
+class EffectiveCapitalMetricsOut(BaseModel):
+    sample_count: int = 0
+    window_minutes: int = 0
+    active_buy_yi: float | None = None
+    active_sell_yi: float | None = None
+    signed_flow_yi: float | None = None
+    buy_ratio: float | None = None
+    active_flow_coverage_ratio: float | None = None
+    same_time_flow_percentile: float | None = None
+    normalization_sample_count: int = 0
+    price_change_pct: float | None = None
+    vwap_distance_pct: float | None = None
+    price_response_per_signed_yi: float | None = None
+    impact_retention_pct: float | None = None
+    persistence_score: float | None = None
+
+
+class EffectiveCapitalEvidenceOut(BaseModel):
+    state: str = "INSUFFICIENT_DATA"
+    state_label: str = "证据不足"
+    confidence: int = 0
+    state_severity: str = "UNKNOWN"
+    data_quality: str = "missing"
+    source_label: str = "分钟成交方向估算"
+    as_of: datetime | None = None
+    estimated: bool = True
+    metrics: EffectiveCapitalMetricsOut = Field(default_factory=EffectiveCapitalMetricsOut)
+    evidence: list[str] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
+    invalidation: list[str] = Field(default_factory=list)
+    discipline: list[str] = Field(default_factory=list)
+    reason_codes: list[str] = Field(default_factory=list)
+
+
 class StockDecisionCardOut(BaseModel):
     code: str
     name: str
@@ -600,6 +634,7 @@ class StockDecisionCardOut(BaseModel):
     consensus_risk: "ConsensusRiskOut | None" = None
     minute_chart: list["MinuteChartPoint"] = Field(default_factory=list)
     entry_discipline: EntryDisciplineOut | None = None
+    effective_capital: EffectiveCapitalEvidenceOut | None = None
 
 
 class ConsensusRiskOut(BaseModel):

@@ -6670,6 +6670,49 @@ h3 {
 .entry-boundary { margin: 10px 0 0; color: var(--ink-muted); font-size: 13px; }
 .entry-discipline-banner { margin: 10px 0 16px; padding: 12px 14px; border: 1px solid #dc2626; border-left-width: 5px; border-radius: 8px; background: color-mix(in srgb, #dc2626 6%, var(--panel)); color: #991b1b; font-weight: 750; }
 
+.effective-capital-panel {
+  margin: 16px 0;
+  padding: 16px;
+  border: 1px solid var(--line);
+  border-left: 5px solid #d97706;
+  border-radius: 12px;
+  background: var(--panel);
+}
+.effective-capital-panel.positive { border-left-color: #059669; background: color-mix(in srgb, #059669 5%, var(--panel)); }
+.effective-capital-panel.support { border-left-color: #2563eb; background: color-mix(in srgb, #2563eb 5%, var(--panel)); }
+.effective-capital-panel.danger { border-left-color: #dc2626; background: color-mix(in srgb, #dc2626 6%, var(--panel)); }
+.effective-capital-panel.waiting { border-left-color: #d97706; background: color-mix(in srgb, #d97706 5%, var(--panel)); }
+.effective-capital-panel.insufficient { border-left-color: #94a3b8; background: color-mix(in srgb, #94a3b8 5%, var(--panel)); }
+.effective-capital-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }
+.effective-capital-head > div:first-child { display: grid; gap: 4px; }
+.effective-capital-head small { color: var(--ink-muted); }
+.effective-capital-head h3 { margin: 0; font-size: 20px; }
+.effective-capital-head p { margin: 2px 0 0; }
+.capital-state.positive { color: #047857; }
+.capital-state.support { color: #1d4ed8; }
+.capital-state.danger { color: #b91c1c; }
+.capital-state.waiting { color: #a16207; }
+.capital-state.insufficient { color: var(--ink-muted); }
+.effective-capital-score { min-width: 130px; display: grid; justify-items: end; gap: 2px; padding: 8px 10px; border-radius: 8px; background: var(--surface); }
+.effective-capital-score span,
+.effective-capital-score small { color: var(--ink-muted); }
+.effective-capital-score b { font-size: 23px; }
+.effective-capital-metrics { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 8px; margin-top: 14px; }
+.effective-capital-metrics > span { min-width: 0; display: grid; gap: 4px; padding: 9px 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); }
+.effective-capital-metrics b { color: var(--ink-muted); font-size: 12px; }
+.effective-capital-metrics strong { overflow-wrap: anywhere; }
+.effective-capital-columns { display: grid; grid-template-columns: 1.2fr 1fr 1fr; gap: 10px; margin-top: 12px; }
+.effective-capital-columns.diagnostic { grid-template-columns: minmax(0, 1fr); }
+.effective-capital-columns > div { padding: 11px 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); }
+.effective-capital-columns p { margin: 6px 0 0; line-height: 1.5; }
+.effective-capital-empty,
+.effective-capital-empty-copy { color: var(--ink-muted); }
+.effective-capital-warnings { display: grid; gap: 5px; margin-top: 11px; padding: 10px 12px; border: 1px solid color-mix(in srgb, #d97706 40%, var(--line)); border-radius: 8px; background: color-mix(in srgb, #d97706 6%, var(--panel)); }
+.effective-capital-warnings span { line-height: 1.5; }
+.effective-capital-meta { display: flex; align-items: center; flex-wrap: wrap; gap: 7px 12px; margin-top: 12px; color: var(--ink-muted); font-size: 12px; }
+.effective-capital-meta strong { padding: 3px 7px; border-radius: 999px; background: #fff7ed; color: #9a3412; }
+.effective-capital-boundary { margin: 9px 0 0; color: var(--ink-muted); font-size: 12px; line-height: 1.5; }
+
 .sector-temperature-board { padding: 16px; }
 .temperature-summary-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; margin-bottom: 16px; }
 .temperature-summary-grid article { padding: 13px; border: 1px solid var(--line); border-radius: 10px; background: var(--panel); }
@@ -6698,6 +6741,8 @@ h3 {
 @media (max-width: 900px) {
   .entry-discipline-metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .entry-discipline-columns { grid-template-columns: minmax(0, 1fr); }
+  .effective-capital-metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .effective-capital-columns { grid-template-columns: minmax(0, 1fr); }
   .temperature-summary-grid,
   .temperature-card-grid { grid-template-columns: minmax(0, 1fr); }
 }
@@ -6719,6 +6764,9 @@ h3 {
 }
 
 @media (max-width: 680px) {
+  .effective-capital-head { flex-direction: column; }
+  .effective-capital-score { width: 100%; justify-items: start; }
+  .effective-capital-metrics { grid-template-columns: minmax(0, 1fr); }
   .cockpit-overview > header,
   .holding-cockpit > header,
   .reflexivity-panel > header,

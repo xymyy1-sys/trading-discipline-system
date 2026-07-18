@@ -72,7 +72,7 @@ def test_news_alone_is_pending_and_never_becomes_buy_signal():
 
     assert item["status"] == STATUS_PENDING
     assert item["buy_signal"] is False
-    assert set(item["missing"]) == {"板块资金", "板块涨幅/相对强度", "可靠板块VWAP"}
+    assert set(item["missing"]) == {"板块订单流方向估算", "板块涨幅/相对强度", "可靠板块VWAP"}
 
 
 def test_negative_funds_relative_price_and_vwap_invalidate_news():
@@ -90,7 +90,7 @@ def test_negative_funds_relative_price_and_vwap_invalidate_news():
 
     assert item["status"] == STATUS_INVALIDATED
     assert item["buy_signal"] is False
-    assert any("净流出" in text for text in item["counter_evidence"])
+    assert any("板块订单流方向净额" in text for text in item["counter_evidence"])
     assert "停止据此开仓" in item["action"]
 
 

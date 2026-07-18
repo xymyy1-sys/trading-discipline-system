@@ -77,6 +77,22 @@ _THEME_RULES: list[dict[str, Any]] = [
     },
 ]
 
+
+def _display_flow_signal(value: str | None) -> str:
+    """Translate legacy provider-flow wording without changing stored/API keys."""
+    return (
+        str(value or "")
+        .replace("主力净流入", "大单方向估算")
+        .replace("主力资金", "大单方向估算")
+        .replace("资金由净流出拐为净流入", "订单流方向由净流出拐为净流入")
+        .replace("资金由净流入拐为净流出", "订单流方向由净流入拐为净流出")
+        .replace("资金流入", "订单流方向流入")
+        .replace("资金流出", "订单流方向流出")
+        .replace("资金边际", "订单流方向边际")
+        .replace("资金价格背离", "订单流与价格背离")
+        .replace("资金转弱", "订单流方向转弱")
+    )
+
 def _market_seesaw_monitor(holdings: list[Holding], force_refresh: bool = False) -> MarketSeesawOut:
     if not holdings:
         return MarketSeesawOut(
@@ -87,7 +103,7 @@ def _market_seesaw_monitor(holdings: list[Holding], force_refresh: bool = False)
             inflow_targets=[],
             outflow_targets=[],
             holding_alerts=[],
-            notes=["暂无持仓，跳过板块资金外部抓取。"],
+            notes=["暂无持仓，跳过板块订单流算法外部抓取。"],
         )
     notes: list[str] = []
     industry_flows: list[Any] = []
@@ -102,9 +118,9 @@ def _market_seesaw_monitor(holdings: list[Holding], force_refresh: bool = False)
             force_refresh=force_refresh,
         )
         concept_flows.extend(concept_flow.inflow + concept_flow.outflow)
-        sources.append(f"概念资金流/{concept_flow.source}")
+        sources.append(f"概念订单流算法/{concept_flow.source}")
     except Exception as exc:
-        notes.append(f"概念资金流不可用：{exc}")
+        notes.append(f"概念订单流算法不可用：{exc}")
     try:
         industry_flow = cached_industry or market_provider.sector_flow(
             flow_type="行业资金流",
@@ -112,9 +128,9 @@ def _market_seesaw_monitor(holdings: list[Holding], force_refresh: bool = False)
             force_refresh=force_refresh,
         )
         industry_flows.extend(industry_flow.inflow + industry_flow.outflow)
-        sources.append(f"行业资金流/{industry_flow.source}")
+        sources.append(f"行业订单流算法/{industry_flow.source}")
     except Exception as exc:
-        notes.append(f"行业资金流不可用：{exc}")
+        notes.append(f"行业订单流算法不可用：{exc}")
 
     unique_industry_flows = _dedupe_sector_flows(industry_flows)
     unique_concept_flows = _dedupe_sector_flows(concept_flows)
@@ -155,7 +171,7 @@ def _market_seesaw_monitor(holdings: list[Holding], force_refresh: bool = False)
         market_mode = "存量资金快速迁移"
     top_target = strong_targets[0].name if strong_targets else (inflow_targets[0].name if inflow_targets else "暂无")
     summary = (
-        f"行业资金流当前最强吸金方向：{top_target}；"
+        f"行业订单流方向估算当前最强方向：{top_target}；"
         f"{'已有持仓出现冲高回落/板块失血，需要保护利润。' if severe_count else '暂未触发持仓级强告警，继续观察板块排名和个股分时均价。'}"
     )
     return MarketSeesawOut(
@@ -170,7 +186,7 @@ def _market_seesaw_monitor(holdings: list[Holding], force_refresh: bool = False)
             key=lambda item: ({"高": 4, "中高": 3, "中": 2, "观察": 1}.get(item.risk_level, 0), item.pullback_from_high_pct),
             reverse=True,
         ),
-        notes=notes or ["主判定口径为行业资金流；概念资金流仅作为辅助证据。"],
+        notes=notes or ["主判定口径为行业订单流供应商算法；概念订单流算法仅作为辅助证据，不代表账户真实流水。"],
     )
 
 def _dedupe_sector_flows(flows: list[Any]) -> list[Any]:
@@ -190,14 +206,14 @@ def _sector_rotation_item(item: Any, rank: int, limit_counts: dict[str, int]) ->
     flow_acceleration = getattr(item, "flow_acceleration", None)
     flow_direction = str(getattr(item, "flow_direction", "") or "") or None
     flow_turning = str(getattr(item, "flow_turning", "") or "") or None
-    flow_signal = str(getattr(item, "flow_signal", "") or "") or None
+    flow_signal = _display_flow_signal(str(getattr(item, "flow_signal", "") or "")) or None
     flow_as_of = str(getattr(item, "flow_as_of", "") or "") or None
     names = _sector_aliases(item)
     limit_count = max(limit_counts.get(name, 0) for name in names) if names else 0
-    direction = "加速流入" if acceleration > 0 else "流入减速" if acceleration < 0 else "资金平稳"
+    direction = "订单流方向加速流入" if acceleration > 0 else "订单流方向流入减速" if acceleration < 0 else "订单流方向平稳"
     evidence = (
-        f"排名第{rank}，涨跌{float(item.change_pct):+.2f}%，净流入{float(item.net_inflow):.2f}亿，"
-        f"主力净流入{float(item.main_inflow):.2f}亿，盘中变化{acceleration:+.2f}亿，涨停{limit_count}只，{direction}。"
+        f"排名第{rank}，涨跌{float(item.change_pct):+.2f}%，订单流方向净额{float(item.net_inflow):.2f}亿，"
+        f"大单方向估算{float(item.main_inflow):.2f}亿，盘中变化{acceleration:+.2f}亿，涨停{limit_count}只，{direction}（供应商算法，非账户真实流水）。"
     )
     return SectorRotationItem(
         name=str(item.name),
@@ -332,11 +348,11 @@ def _holding_seesaw_item(
     if theme_flow_sectors:
         evidence.append(theme_flow_summary)
     else:
-        evidence.append("主资金曲线：未在行业/概念资金流中精确匹配；仅展示个股画像，不强行替代。")
+        evidence.append("板块订单流方向曲线：未在行业/概念供应商算法中精确匹配；仅展示个股画像，不强行替代。")
     if sector_flow_signal:
         flow_time = f"（截至{sector_flow_as_of}）" if sector_flow_as_of else ""
         speed_text = f"，流速{float(sector_flow_speed):+.3f}亿/分钟" if sector_flow_speed is not None else ""
-        evidence.append(f"资金拐点证据{flow_time}：{sector_flow_signal}{speed_text}。")
+        evidence.append(f"订单流方向拐点证据{flow_time}：{_display_flow_signal(sector_flow_signal)}{speed_text}。")
     if concept_flow_sectors:
         evidence.append(concept_flow_summary)
     if strongest:
@@ -396,19 +412,19 @@ def _holding_seesaw_item(
             if external_inflow_target
             else f"{holding_theme}承压，个股冲高回落弱于预期"
         )
-        advice = sell_triggers["trigger_action"] or "优先保护利润：跌破/反抽不过VWAP继续减仓；若板块资金仍流出，不再加仓或买回。"
+        advice = sell_triggers["trigger_action"] or "优先保护利润：跌破/反抽不过VWAP继续减仓；若板块订单流方向估算仍恶化，不再加仓或买回。"
     elif score >= 4:
         risk_level = "中高"
-        signal = "资金跷跷板风险升高"
+        signal = "订单流跷跷板风险升高"
         advice = sell_triggers["trigger_action"] or "持有降为观察：不加仓；若高点回撤扩大或跌破VWAP，先减一部分风险。"
     elif score >= 2:
         risk_level = "中"
         signal = "板块轮动分流"
-        advice = sell_triggers["trigger_action"] or "继续观察板块排名和个股承接，只有重新站稳VWAP且板块资金回流才提高预期。"
+        advice = sell_triggers["trigger_action"] or "继续观察板块排名和个股承接，只有重新站稳VWAP且板块订单流方向估算转强才提高预期。"
     else:
         risk_level = "观察"
         signal = "暂未触发跷跷板风险"
-        advice = "按原计划持有观察，重点看所属板块是否继续在资金榜前列。"
+        advice = "按原计划持有观察，重点看所属板块是否继续在订单流方向榜前列。"
 
     return HoldingSeesawItem(
         code=holding.code,
@@ -494,14 +510,14 @@ def _intraday_sell_triggers(
     profit_triggers: list[str] = []
 
     if sector_net < 0:
-        sector_triggers.append(f"{sector or '所属板块'}净流入转负：{sector_net:.2f}亿。")
+        sector_triggers.append(f"{sector or '所属板块'}订单流方向净额转负：{sector_net:.2f}亿（供应商算法）。")
     if sector_main < 0:
-        sector_triggers.append(f"{sector or '所属板块'}主力净流入转负：{sector_main:.2f}亿。")
+        sector_triggers.append(f"{sector or '所属板块'}大单方向估算转负：{sector_main:.2f}亿（供应商算法）。")
     if sector_acc < -1:
-        sector_triggers.append(f"{sector or '所属板块'}盘中资金变化{sector_acc:+.2f}亿，出现退潮。")
+        sector_triggers.append(f"{sector or '所属板块'}盘中订单流方向变化{sector_acc:+.2f}亿，出现退潮。")
     if sector_flow_turning == "TURN_TO_OUTFLOW":
         speed_text = f"，流速{sector_flow_speed:+.3f}亿/分钟" if sector_flow_speed is not None else ""
-        sector_triggers.append(f"{sector or '所属板块'}资金由净流入拐为净流出{speed_text}。")
+        sector_triggers.append(f"{sector or '所属板块'}订单流方向由净流入拐为净流出{speed_text}。")
     elif sector_flow_turning in {"OUTFLOW_ACCELERATING", "INFLOW_FADING", "FLOW_WEAKENING"}:
         speed_text = f"，流速{sector_flow_speed:+.3f}亿/分钟" if sector_flow_speed is not None else ""
         acceleration_text = (
@@ -509,17 +525,17 @@ def _intraday_sell_triggers(
             if sector_flow_acceleration is not None else ""
         )
         sector_triggers.append(
-            f"{sector or '所属板块'}{sector_flow_signal or '资金边际转弱'}{speed_text}{acceleration_text}。"
+            f"{sector or '所属板块'}{_display_flow_signal(sector_flow_signal) or '订单流方向边际转弱'}{speed_text}{acceleration_text}。"
         )
     if sector_flow_pullback >= 20 or sector_flow_pullback_pct >= 20:
         sector_triggers.append(
-            f"{sector or '所属板块'}主线资金从高点{sector_flow_peak:.2f}亿回落到{sector_flow_current:.2f}亿，"
+            f"{sector or '所属板块'}订单流方向净额从高点{sector_flow_peak:.2f}亿回落到{sector_flow_current:.2f}亿，"
             f"回落{sector_flow_pullback:.2f}亿（{sector_flow_pullback_pct:.1f}%），即使当前仍净流入也按退潮处理。"
         )
     if sector_rank and sector_rank > 10:
-        sector_triggers.append(f"{sector or '所属板块'}资金排名降至第{sector_rank}，不在前排。")
+        sector_triggers.append(f"{sector or '所属板块'}订单流方向排名降至第{sector_rank}，不在前排。")
     if strongest_is_other:
-        sector_triggers.append(f"资金排名切向{strongest_name}，形成跷跷板分流。")
+        sector_triggers.append(f"订单流方向排名切向{strongest_name}，形成跷跷板分流。")
 
     if high_change_pct >= 9 and pullback >= 3:
         stock_triggers.append(f"盘中接近涨停/强冲高后回撤{pullback:.2f}%，冲板失败风险升高。")
@@ -557,19 +573,19 @@ def _intraday_sell_triggers(
     elif profit_triggers:
         action = "进入利润保护状态：回撤达到规则阈值，先兑现一部分，不把盈利票拿成被动票。"
     elif sector_triggers:
-        action = "板块资金出现分流：继续观察个股是否跌破VWAP，未转强前不接回。"
+        action = "板块订单流方向出现分流：继续观察个股是否跌破VWAP，未转强前不接回。"
     else:
         action = ""
 
     buyback = [
-        "板块止跌或资金重新回流。",
+        "板块止跌或订单流方向重新转强。",
         "个股不再创新低，并重新站回分时均价/VWAP。",
         "下跌缩量、反弹放量；买回后设置失败位，跌破日内低点或VWAP不继续补。",
     ]
     if sector_flow_turning in {"TURN_TO_INFLOW", "OUTFLOW_NARROWING", "INFLOW_ACCELERATING", "FLOW_IMPROVING"}:
         buyback.insert(
             0,
-            f"{sector or '所属板块'}{sector_flow_signal or '资金边际改善'}；仍需个股站回真实VWAP后确认。",
+            f"{sector or '所属板块'}{_display_flow_signal(sector_flow_signal) or '订单流方向边际改善'}；仍需个股站回真实VWAP后确认。",
         )
     return {
         "profit_protection_state": protection_state,
@@ -677,7 +693,7 @@ def _holding_theme_flow_profile(
         peak = 0.0
         pullback = 0.0
         pullback_pct = 0.0
-        basis = "资金流缺口"
+        basis = "订单流算法缺口"
     if use_concept_primary:
         selected = [priority_concept]
         primary_flow = selected[0]
@@ -705,9 +721,10 @@ def _holding_theme_flow_profile(
         sector_text = "、".join(sectors[:3])
         rank_name = "概念排名" if basis == "概念资金流" else "行业排名"
         rank_text = f"{rank_name}第{rank}" if rank and rank != 999 else "优先细分板块"
+        basis_label = "概念订单流算法" if basis == "概念资金流" else "行业订单流算法" if basis == "行业资金流" else basis
         summary = (
-            f"主资金曲线：{sector_text}（{basis}）；{rank_text}，当前净流入{current:.2f}亿，"
-            f"主力净流入{main:.2f}亿，盘中变化{acceleration:+.2f}亿."
+            f"板块订单流方向曲线：{sector_text}（{basis_label}）；{rank_text}，当前方向净额{current:.2f}亿，"
+            f"大单方向估算{main:.2f}亿，盘中变化{acceleration:+.2f}亿（供应商算法，非账户真实流水）。"
         )
         if pullback > 0:
             summary += f" 高点{peak:.2f}亿回落至当前，回落{pullback:.2f}亿（{pullback_pct:.1f}%）。"
@@ -717,7 +734,7 @@ def _holding_theme_flow_profile(
         concept_summary = (
             f"概念辅助证据：{'、'.join(concept_sectors[:4])}；"
             f"最佳概念排名第{0 if concept_rank == 999 else concept_rank}，"
-            f"合计净流入{concept_current:.2f}亿，主力净流入{concept_main:.2f}亿。"
+            f"合计订单流方向净额{concept_current:.2f}亿，大单方向估算{concept_main:.2f}亿（供应商算法）。"
         )
     else:
         concept_summary = ""
@@ -845,7 +862,7 @@ def _cached_holding_theme_flow_profile(holding: Holding) -> dict[str, Any]:
     sources.extend(str(getattr(item, "source", "") or "") for item in flow_snapshots)
     sources = list(dict.fromkeys(item for item in sources if item))
     profile["as_of"] = min(source_times).isoformat() if source_times else "未知"
-    profile["source"] = "+".join(sources) or "板块资金缓存不可用"
+    profile["source"] = "+".join(sources) or "板块订单流估算缓存不可用"
     profile["data_quality"] = "cached_source_timestamped" if source_times else "missing"
     return profile
 

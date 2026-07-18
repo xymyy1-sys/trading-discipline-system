@@ -519,7 +519,7 @@ def _build_current_opportunity_radar(
             "source": [],
             "items": [],
             "counts": {"增量已确认": 0, "增量待确认": 0},
-            "notes": [f"涨停梯队或板块资金暂不可用：{exc.__class__.__name__}；本轮不生成模拟增量方向。"],
+            "notes": [f"涨停梯队或板块订单流方向估算暂不可用：{exc.__class__.__name__}；本轮不生成模拟增量方向。"],
         }
         degraded_notes.append(f"盘中板块增量证据暂不可用：{exc.__class__.__name__}。")
 
@@ -647,7 +647,7 @@ def run_intraday_collection_once(trigger: str = "manual") -> IntradayCollectionR
         seesaw_by_code: dict[str, object] = {}
         if holdings:
             monitor = _run_with_resilience(
-                "板块资金拐点",
+                "板块订单流方向拐点",
                 lambda: _market_seesaw_monitor(holdings, force_refresh=True),
                 notes,
                 on_error=db.rollback,

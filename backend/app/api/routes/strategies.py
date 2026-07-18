@@ -52,7 +52,7 @@ def _ensure_defaults(db: Session) -> None:
             buy_confirmation_json=json.dumps(["风险收益比达标后确认"], ensure_ascii=False),
             position_limit=0.2,
             structure_stop_json=json.dumps(["采用与剧本一致的结构失效位"], ensure_ascii=False),
-            invalid_conditions_json=json.dumps(["预期证伪", "板块资金持续转弱"], ensure_ascii=False),
+            invalid_conditions_json=json.dumps(["预期证伪", "板块订单流方向估算持续转弱"], ensure_ascii=False),
             holding_management_json=json.dumps(["按证据状态机持有或减仓"], ensure_ascii=False),
             forbidden_actions_json=json.dumps(["禁止亏损补仓", "禁止数据不足时执行"], ensure_ascii=False),
         ))

@@ -42,6 +42,7 @@ from app.services.t_trading_engine import (
     update_t_plan as engine_update_t_plan,
 )
 from app.services.entry_gate import evaluate_entry_gate
+from app.services.effective_flow import analyze_effective_flow
 from app.services.cache import _get_response_cache
 
 
@@ -309,7 +310,7 @@ def _scenario_rows(revision: ExpectationRevision) -> list[ExpectationScenario]:
         "弱修复": ["低开后快速收回预期下沿", "回踩不破开盘低点", "主动卖压收敛"],
         "延续": ["竞价落在合理区间", "价格与VWAP同向", "题材和个股强弱未背离"],
         "分歧": ["竞价低于区间中枢", "开盘冲高回落", "承接需要二次确认"],
-        "退潮": ["竞价跌破预期下沿", "放量跌破结构支撑", "题材资金同步流出"],
+        "退潮": ["竞价跌破预期下沿", "放量跌破结构支撑", "题材订单流方向同步转弱"],
     }
     actions = {
         "强修复": "只按量价确认执行，不追瞬时高点。",
@@ -819,7 +820,7 @@ def _entry_plan_conditions(
     if any(token in combined_positive for token in ("全市场", "市场闸门")) and not market_open:
         reasons.append("计划要求全市场扩仓闸门开放，当前未通过。")
     if any(token in combined_positive for token in ("板块", "题材", "主线")) and not sector_supportive:
-        reasons.append("计划要求板块/题材同步转强或保持前排，当前没有可验证的正向资金证据。")
+        reasons.append("计划要求板块/题材同步转强或保持前排，当前没有可验证的正向订单流方向证据。")
     if any(token in combined_positive for token in ("VWAP", "分时均价", "回踩", "承接", "V形", "低点抬高", "RETEST", "SUPPORT")) and not retest_confirmed:
         reasons.append("计划要求回踩承接、V形/低点抬高并站回真实VWAP，当前尚未确认。")
     opening_range = re.search(r"高开\s*(\d+(?:\.\d+)?)%\s*[-~～至]\s*(\d+(?:\.\d+)?)%", expected_text)
@@ -1026,12 +1027,12 @@ def _market_entry_context(db: Session, theme: dict[str, Any]) -> tuple[dict[str,
     }
     if theme_names & weakest_names:
         sector_context.update(
-            status="板块资金弱势",
+            status="板块订单流弱势",
             flow_turning="OUTFLOW_ACCELERATING",
         )
     elif theme_names & strongest_names:
         sector_context.update(
-            status="板块资金前排",
+            status="板块订单流前排",
             flow_turning="INFLOW_ACCELERATING",
         )
 
@@ -1178,6 +1179,119 @@ def decision_card(db: Session, code: str) -> StockDecisionCardOut:
         plan_position_cap_pct=plan_execution["position_cap_pct"],
         now=now,
     )
+    minute_trade_date = str(quote.get("minute_bar_trade_date") or _today(now))
+    try:
+        minute_date = datetime.fromisoformat(minute_trade_date).date()
+    except ValueError:
+        minute_date = None
+    today_date = datetime.fromisoformat(_today(now)).date()
+    historical_close_mode = minute_date is not None and minute_date < today_date
+    effective_now = now
+    if historical_close_mode:
+        effective_now = datetime.combine(minute_date, time(15, 0))
+    effective_flow = analyze_effective_flow(
+        quote.get("minute_bars") or [],
+        now=effective_now,
+        trade_date=minute_trade_date,
+        vwap=float(volume_price.vwap or 0),
+        vwap_reliable=bool(volume_price.vwap_reliable),
+        data_quality=(
+            "missing_trade_date"
+            if minute_date is None
+            else "historical_close"
+            if historical_close_mode and bool(volume_price.vwap_reliable)
+            else str(volume_price.data_quality or "missing")
+        ),
+        active_flow_source=str(volume_price.active_flow_source or "unavailable"),
+        active_flow_estimated=bool(volume_price.active_flow_estimated),
+    )
+    signed_flow_yi = (
+        float(effective_flow.signed_active_flow) / 1e8
+        if effective_flow.signed_active_flow is not None else None
+    )
+    impact_per_yi = None
+    if signed_flow_yi is not None and abs(signed_flow_yi) >= 0.01 and effective_flow.price_response_pct is not None:
+        impact_per_yi = abs(float(effective_flow.price_response_pct)) / abs(signed_flow_yi)
+    state_severity = {
+        "ATTACK_CONFIRMED": "POSITIVE",
+        "ABSORPTION_CANDIDATE": "WATCH",
+        "RECOVERY_CANDIDATE": "WATCH",
+        "DISTRIBUTION_RISK": "HIGH",
+        "OUTFLOW_CONFIRMED": "HIGH",
+        "LIQUIDITY_SHOCK": "HIGH",
+        "INCONCLUSIVE": "UNKNOWN",
+        "INSUFFICIENT_DATA": "UNKNOWN",
+    }
+    source_label = {
+        "provider_tick_direction": "东方财富逐笔成交方向分类（非账户身份）",
+        "eastmoney_tick": "东方财富逐笔成交方向分类（非账户身份）",
+        "minute_price_direction_estimate": "分钟价格方向估算（非逐笔成交）",
+    }.get(str(effective_flow.active_flow_source or ""), "成交方向数据口径待确认")
+    if historical_close_mode:
+        source_label = f"{minute_trade_date} 收盘窗口 · {source_label}"
+    flow_evidence = list(effective_flow.evidence)
+    if (
+        effective_flow.state != "INSUFFICIENT_DATA"
+        and effective_flow.active_buy_amount is not None
+        and effective_flow.active_sell_amount is not None
+        and effective_flow.signed_active_flow is not None
+    ):
+        readable_flow = (
+            f"最近{int(effective_flow.exact_flow_bar_count or 0)}个分钟样本：主动买入方向估算 "
+            f"{float(effective_flow.active_buy_amount) / 1e8:.2f} 亿，主动卖出方向估算 "
+            f"{float(effective_flow.active_sell_amount) / 1e8:.2f} 亿，方向差额 "
+            f"{float(effective_flow.signed_active_flow) / 1e8:+.2f} 亿。"
+        )
+        flow_evidence = [readable_flow, *flow_evidence[1:]]
+    effective_capital = {
+        "state": effective_flow.state,
+        "state_label": effective_flow.state_label,
+        "confidence": effective_flow.confidence,
+        "state_severity": state_severity.get(effective_flow.state, "UNKNOWN"),
+        "data_quality": (
+            "realtime" if effective_flow.data_quality in {"realtime", "realtime_exact"}
+            else "historical_close" if effective_flow.data_quality == "historical_close"
+            else effective_flow.data_quality
+        ),
+        "source_label": source_label,
+        "as_of": effective_flow.as_of,
+        "estimated": bool(effective_flow.active_flow_estimated),
+        "metrics": {
+            "sample_count": int(effective_flow.exact_flow_bar_count or 0),
+            "window_minutes": int(effective_flow.window_minutes or 0),
+            "active_buy_yi": (
+                float(effective_flow.active_buy_amount) / 1e8
+                if effective_flow.active_buy_amount is not None else None
+            ),
+            "active_sell_yi": (
+                float(effective_flow.active_sell_amount) / 1e8
+                if effective_flow.active_sell_amount is not None else None
+            ),
+            "signed_flow_yi": signed_flow_yi,
+            "buy_ratio": effective_flow.buy_ratio,
+            "active_flow_coverage_ratio": effective_flow.active_flow_coverage_ratio,
+            "same_time_flow_percentile": effective_flow.same_time_flow_percentile,
+            "normalization_sample_count": effective_flow.normalization_sample_count,
+            "price_change_pct": effective_flow.price_response_pct,
+            "vwap_distance_pct": effective_flow.vwap_response_pct,
+            "price_response_per_signed_yi": round(impact_per_yi, 4) if impact_per_yi is not None else None,
+            "impact_retention_pct": effective_flow.impact_retention_ratio,
+            "persistence_score": effective_flow.directional_persistence,
+        },
+        "evidence": flow_evidence,
+        "warnings": [
+            *list(effective_flow.counter_evidence),
+            "成交方向来自供应商分类算法，不代表机构账户或所谓主力的真实资金流水。",
+            "尚未接入授权Level-2订单簿深度与撤单数据，不判断挂单意图和账户身份。",
+            *(
+                [f"这是 {minute_trade_date} 的收盘窗口证据，不代表当前盘前或盘中的实时状态。"]
+                if historical_close_mode else []
+            ),
+        ],
+        "invalidation": list(effective_flow.invalidation_conditions),
+        "discipline": [item for item in (effective_flow.discipline, effective_flow.advice) if item],
+        "reason_codes": list(effective_flow.reason_codes),
+    }
     if entry_plan:
         entry_discipline["evidence"] = [
             f"已读取当日{entry_plan.plan_type}计划，并实时校验触发价、失效位、风险收益与仓位上限。",
@@ -1246,6 +1360,20 @@ def decision_card(db: Session, code: str) -> StockDecisionCardOut:
         ]
     if t_eligibility and not t_eligibility.eligible:
         forbidden.extend(t_eligibility.forbidden_reasons[:2])
+    if effective_flow.state == "ABSORPTION_CANDIDATE" and execution:
+        allowed.append("下方承接仍待确认：避免在窗口低点恐慌清仓，等待收回分时均价和低点抬高。")
+        forbidden.append("承接候选不等于允许抄底；未重新站回分时均价前禁止逆势加仓。")
+    elif effective_flow.state == "RECOVERY_CANDIDATE" and execution:
+        allowed.append("深水修复候选：避免在窗口低点附近恐慌卖出，等待收回分时均价和首次回踩确认。")
+        forbidden.append("修复候选不等于反转；未站稳分时均价前禁止追高、补仓或取消原失效条件。")
+    elif effective_flow.state == "ATTACK_CONFIRMED":
+        forbidden.append("买向成交与上涨同步不等于允许追高；偏离分时均价时仍须等待计划内回踩确认。")
+    elif effective_flow.state == "DISTRIBUTION_RISK":
+        forbidden.append("主动买入较多但价格推不动，禁止追高；已有利润按计划提高保护。")
+    elif effective_flow.state == "OUTFLOW_CONFIRMED":
+        forbidden.append("卖出方向与价格下移同步，禁止接飞刀；只按预设失效位处理风险。")
+    elif effective_flow.state == "LIQUIDITY_SHOCK":
+        forbidden.append("流动性冲击尚未稳定，禁止追涨、抄底和即时反手。")
     return StockDecisionCardOut(
         code=code,
         name=name,
@@ -1266,4 +1394,5 @@ def decision_card(db: Session, code: str) -> StockDecisionCardOut:
         consensus_risk=consensus_risk,
         minute_chart=minute_chart,
         entry_discipline=entry_discipline,
+        effective_capital=effective_capital,
     )

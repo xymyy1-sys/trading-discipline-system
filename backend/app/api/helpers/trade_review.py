@@ -609,9 +609,9 @@ def _generate_trade_review(trade: TradeLog, db: Session) -> TradeReview:
             avoid_actions.append("卖出前区分：止盈、止损、弱于预期、板块退潮，不能只凭感觉。")
             weakness_tags.append("恐惧")
 
-    if "未在资金流/题材雷达/涨停天梯中找到明确支持" in sector_context and side in {"买入", "加仓", "做T"}:
+    if "未在订单流方向估算/题材雷达/涨停天梯中找到明确支持" in sector_context and side in {"买入", "加仓", "做T"}:
         mistakes.append("当前系统证据未确认板块共振，买入证据不足。")
-        avoid_actions.append("没有板块资金或涨停天梯支撑时，默认降低仓位或只观察。")
+        avoid_actions.append("没有板块订单流方向估算或涨停天梯支撑时，默认降低仓位或只观察。")
     if not mistakes:
         mistakes.append("未发现明显纪律错误，但仍需盘后核对实际走势是否符合预期。")
         avoid_actions.append("保留本次计划模板，盘后复盘是否按计划执行。")
@@ -639,7 +639,7 @@ def _generate_trade_review(trade: TradeLog, db: Session) -> TradeReview:
 
 def _trade_market_context(trade: TradeLog) -> tuple[str, str, str]:
     market_context = "行情数据暂不可用，先按交易理由和纪律规则复盘。"
-    sector_context = "未在资金流/题材雷达/涨停天梯中找到明确支持。"
+    sector_context = "未在订单流方向估算/题材雷达/涨停天梯中找到明确支持。"
     stock_context = f"{trade.name} {trade.code}：价格{trade.price:.2f}，金额{trade.amount:.2f}，仓位{trade.position_ratio * 100:.1f}%。"
     radar = _get_response_cache("theme-radar")
     if radar is not None:

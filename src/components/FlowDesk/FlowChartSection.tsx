@@ -129,7 +129,7 @@ export default function FlowChartSection({
   }, [drawableItems, xData, selected, onSelect, onOpenDetail])
 
   if (!items.length) {
-    return <div className="chart-surface-large chart-empty-state">暂无资金流数据</div>
+    return <div className="chart-surface-large chart-empty-state">暂无订单流方向数据</div>
   }
 
   if (!drawableItems.length) {
@@ -141,7 +141,7 @@ export default function FlowChartSection({
     )
   }
 
-  return <div className="chart-surface-large" ref={ref} aria-label="主力行业资金流入流出前10名曲线" />
+  return <div className="chart-surface-large" ref={ref} aria-label="板块订单流估算流入流出前10名曲线" />
 }
 
 function timeOrder(label: string) {

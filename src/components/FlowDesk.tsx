@@ -111,7 +111,7 @@ export default function FlowDesk() {
       .then(({ data, fetchedAt }) => {
         setSectorTemperature(data)
         setFetchedAt(fetchedAt)
-        setApiNote(data.items.length ? `${temperatureBoardType}冷热模型 · 当日/5日/10日资金 + T+1两融` : '板块冷热证据暂不可用')
+        setApiNote(data.items.length ? `${temperatureBoardType}冷热模型 · 当日/5日/10日订单流方向 + T+1两融` : '板块冷热证据暂不可用')
       })
       .catch(() => setApiNote('板块冷热模型暂不可用'))
       .finally(() => setLoading(false))
@@ -143,13 +143,13 @@ export default function FlowDesk() {
       <section className="flow-board flow-terminal">
         <div className="flow-header">
           <div className="flow-title-block">
-            <h2>资金流证据</h2>
-            <p>东方财富板块资金、热点题材、成交拆单估算分开展示；没有连续分时数据时只给榜单，不画假曲线。</p>
+            <h2>订单流方向证据</h2>
+            <p>东方财富板块订单流算法、热点题材、成交拆单估算分开展示；无法识别账户身份，没有连续分时数据时只给榜单，不画假曲线。</p>
           </div>
 
           <div className="segmented">
             <button className={tab === 'funds' ? 'selected' : ''} type="button" onClick={() => setTab('funds')}>
-              <TrendingUp size={14} /> 主力资金
+              <TrendingUp size={14} /> 板块订单流估算
             </button>
             <button className={tab === 'temperature' ? 'selected' : ''} type="button" onClick={() => setTab('temperature')}>
               <Gauge size={14} /> 冷热拥挤
@@ -222,7 +222,7 @@ export default function FlowDesk() {
             </div>
             <div className="flow-side-panels">
               <SectorRanking
-                title={`${boardType}资金流入榜`}
+                title={`${boardType}订单流方向流入榜`}
                 items={boardFlow?.inflow ?? []}
                 direction="in"
                 selected={selected}
@@ -230,7 +230,7 @@ export default function FlowDesk() {
                 onOpenDetail={setDetailTarget}
               />
               <SectorRanking
-                title={`${boardType}资金流出榜`}
+                title={`${boardType}订单流方向流出榜`}
                 items={boardFlow?.outflow ?? []}
                 direction="out"
                 selected={selected}
@@ -255,38 +255,38 @@ export default function FlowDesk() {
         <Panel title="当前最强证据">
           {tab === 'funds' && topIn && (
             <>
-              <KV label="流入第一" value={topIn.name} />
-              <KV label="净流入" value={`${fmtYi(topIn.net_inflow)}亿`} tone="up" />
-              <KV label="主力净流入" value={`${fmtYi(topIn.main_inflow)}亿`} tone={topIn.main_inflow >= 0 ? 'up' : 'down'} />
+              <KV label="方向净额第一" value={topIn.name} />
+              <KV label="订单流方向净额" value={`${fmtYi(topIn.net_inflow)}亿`} tone="up" />
+              <KV label="大单方向估算" value={`${fmtYi(topIn.main_inflow)}亿`} tone={topIn.main_inflow >= 0 ? 'up' : 'down'} />
             </>
           )}
           {tab === 'hot' && hotTop && (
             <>
               <KV label="热点第一" value={`${hotTop.period} · ${hotTop.name}`} />
               <KV label="涨幅" value={`${fmtPct(hotTop.change_pct)}`} tone={hotTop.change_pct >= 0 ? 'up' : 'down'} />
-              <KV label="资金补充" value={`${fmtYi(hotTop.net_inflow)}亿`} tone={hotTop.net_inflow >= 0 ? 'up' : 'down'} />
+              <KV label="订单流方向" value={`${fmtYi(hotTop.net_inflow)}亿`} tone={hotTop.net_inflow >= 0 ? 'up' : 'down'} />
             </>
           )}
           {tab === 'dark' && darkTop && (
             <>
               <KV label="拆单估算第一" value={darkTop.name} />
               <KV label="隐性资金估算" value={`${fmtYi(darkTop.dark_amount)}亿`} tone={darkTop.dark_amount >= 0 ? 'up' : 'down'} />
-              <KV label="合计主力估算" value={`${fmtYi(darkTop.main_net_inflow_with_dark)}亿`} tone={darkTop.main_net_inflow_with_dark >= 0 ? 'up' : 'down'} />
+              <KV label="合计订单流估算" value={`${fmtYi(darkTop.main_net_inflow_with_dark)}亿`} tone={darkTop.main_net_inflow_with_dark >= 0 ? 'up' : 'down'} />
             </>
           )}
           {tab === 'temperature' && temperatureTop && (
             <>
               <KV label="热度最高" value={`${temperatureTop.name} · ${temperatureTop.heat_score}分`} />
               <KV label="当前状态" value={temperatureTop.status} tone={temperatureTop.risk_level === 'HIGH' ? 'down' : undefined} />
-              <KV label="纪律" value={temperatureTop.actions[0] || '等待量价与资金共同确认'} />
+              <KV label="纪律" value={temperatureTop.actions[0] || '等待量价与订单流方向共同确认'} />
             </>
           )}
         </Panel>
         <Panel title="风险方向">
           {tab === 'funds' && topOut && (
             <>
-              <KV label="流出第一" value={topOut.name} tone="down" />
-              <KV label="净流出" value={`${fmtYi(topOut.net_inflow)}亿`} tone="down" />
+              <KV label="方向净额末位" value={topOut.name} tone="down" />
+              <KV label="订单流方向净额" value={`${fmtYi(topOut.net_inflow)}亿`} tone="down" />
             </>
           )}
           {tab === 'temperature' && overheatedTop && (
@@ -295,14 +295,15 @@ export default function FlowDesk() {
               <KV label="状态" value={overheatedTop.status} tone="down" />
             </>
           )}
-          <p className="plain-text">资金证据只负责回答“钱在哪、哪里失血”，买卖动作仍要叠加持仓计划、个股强弱和利润保护触发器。</p>
+          <p className="plain-text">订单流证据只描述供应商算法估算的成交方向偏向及其强弱变化，不代表账户真实流水；买卖动作仍要叠加持仓计划、个股强弱和利润保护触发器。</p>
         </Panel>
         <Panel title="口径说明">
           <div className="rule-list">
-            <span>主力资金：东方财富板块资金流，失败才回落新浪</span>
-            <span>热点题材：东方财富市场热点榜，资金字段按板块资金补充</span>
+            <span>板块订单流估算：东方财富供应商算法字段，失败时回落新浪同类算法；两者都不是交易所账户流水，也不能识别机构或所谓“主力”身份</span>
+            <span>热点题材：东方财富市场热点榜，订单流字段按供应商板块方向估算补充</span>
             <span>成交拆单估算：东方财富算法榜单，非夜市委托、非交易所真实暗盘</span>
-            <span>冷热拥挤：当日/5日/10日趋势与资金、盘中拐点，加上5/10/20日T+1融资慢变量；过冷不等于抄底，过热不等于立刻卖出</span>
+            <span>冷热拥挤：当日/5日/10日趋势与供应商订单流方向、盘中拐点，加上5/10/20日T+1融资慢变量；过冷不等于抄底，过热不等于立刻卖出</span>
+            <span>供应商限制：行情延迟、字段调整、限流或快照不足时只显示可追溯数据质量，不用旧值冒充实时结论</span>
           </div>
         </Panel>
       </section>
@@ -320,13 +321,13 @@ export default function FlowDesk() {
 }
 
 function SectorTemperaturePanel({ data, loading }: { data: SectorTemperatureOut | null; loading: boolean }) {
-  if (loading && !data) return <EmptyState title="板块冷热计算中" body="正在合并当日/5日/10日趋势、资金拐点与5/10/20日T+1融资拥挤证据。" />
+  if (loading && !data) return <EmptyState title="板块冷热计算中" body="正在合并当日/5日/10日趋势、订单流方向拐点与5/10/20日T+1融资拥挤证据。" />
   if (!data?.items.length) return <EmptyState title="板块冷热证据不足" body="不会用缺失数据生成虚假的过热或超跌结论。" />
   return (
     <div className="flow-data-panel sector-temperature-board">
       <div className="temperature-summary-grid">
         <TemperatureGroup title="过热/兑现风险" items={data.overheated} empty="当前没有联合证据确认的过热拐头" />
-        <TemperatureGroup title="企稳/修复观察" items={data.stabilizing} empty="当前没有同时通过止跌与资金回流确认的板块" />
+        <TemperatureGroup title="企稳/修复观察" items={data.stabilizing} empty="当前没有同时通过止跌与订单流方向改善确认的板块" />
         <TemperatureGroup title="超跌观察（不是买点）" items={data.oversold_watch} empty="当前没有达到超跌观察阈值的板块" />
       </div>
       <div className="temperature-card-grid">
@@ -354,13 +355,13 @@ function TemperatureCard({ item }: { item: SectorTemperatureItem }) {
     <article className={`temperature-card ${tone}`}>
       <header><div><strong>{item.name}</strong><span>{item.status}</span></div><b>{item.heat_score}</b></header>
       <div className="temperature-factor-row">
-        <span>趋势 {item.trend_score.toFixed(0)}</span><span>资金 {item.flow_score.toFixed(0)}</span>
+        <span>趋势 {item.trend_score.toFixed(0)}</span><span>订单流 {item.flow_score.toFixed(0)}</span>
         <span>拥挤 {item.crowding_score === null ? '--' : item.crowding_score.toFixed(0)}</span>
       </div>
       <div className="temperature-window-row">
         <span>今日 {maybe(item.change_pct, '%')}</span><span>5日 {maybe(item.change_pct_5d, '%')}</span><span>10日 {maybe(item.change_pct_10d, '%')}</span>
       </div>
-      <p>当日资金 {maybe(item.net_inflow, '亿')} · 5日 {maybe(item.net_inflow_5d, '亿')} · 10日 {maybe(item.net_inflow_10d, '亿')}</p>
+      <p>当日订单流 {maybe(item.net_inflow, '亿')} · 5日 {maybe(item.net_inflow_5d, '亿')} · 10日 {maybe(item.net_inflow_10d, '亿')}</p>
       <p>融资余额 {maybe(item.financing_balance, '亿')} · 当日/5日/10日/20日净买入 {maybe(item.financing_net_buy, '亿')} / {maybe(item.financing_net_buy_5d, '亿')} / {maybe(item.financing_net_buy_10d, '亿')} / {maybe(item.financing_net_buy_20d, '亿')}</p>
       <small>板块行情日期 {item.provider_trade_date || '未标注'} · 数据质量 {item.data_quality === 'stale' ? '非当日快照' : item.data_quality === 'high' ? '高' : item.data_quality === 'good' ? '良好' : item.data_quality === 'partial' ? '部分' : '不足'}</small>
       <small>两融日期 {item.margin_as_of || '缺失'} · {item.margin_realtime ? '实时' : 'T+1慢变量'}</small>
@@ -429,7 +430,7 @@ function DarkTradePanel({ data, loading, query }: { data: DarkTradeOut | null; l
               <th>涨幅</th>
               <th className="num">隐性资金估算</th>
               <th className="num">显性资金估算</th>
-              <th className="num">合计主力估算</th>
+              <th className="num">合计订单流估算</th>
               <th className="num">活跃度</th>
               <th className="num">流入比例</th>
               <th>领涨/行业</th>
@@ -492,16 +493,16 @@ function KV({ label, value, tone }: { label: string; value: string; tone?: 'up' 
 }
 
 function sourceLabel(source: string, notes: string[]) {
-  if (source.includes('unavailable')) return '真实资金数据源不可用'
-  if (source.includes('sina')) return '新浪资金流兜底'
-  if (source.includes('eastmoney-fflow')) return '东方财富板块资金 · 分时'
+  if (source.includes('unavailable')) return '板块订单流估算源不可用'
+  if (source.includes('sina')) return '新浪板块订单流算法兜底'
+  if (source.includes('eastmoney-fflow')) return '东方财富板块订单流算法 · 分时'
   if (source.includes('snapshots')) {
     const n = source.split('snapshots:')[1]?.split('|')[0] || '?'
     return `东方财富 · ${n} 个快照`
   }
   if (source.includes('estimates')) return '东方财富 · 快照累积中'
-  if (notes.some(note => note.includes('分层资金可能缺失'))) return '东方财富板块资金 · 分层资金受限'
-  return '东方财富板块资金'
+  if (notes.some(note => note.includes('分层字段可能缺失') || note.includes('分层资金可能缺失'))) return '东方财富板块订单流算法 · 分层字段受限'
+  return '东方财富板块订单流算法'
 }
 
 function boardTypeToFlowType(boardType: BoardType) {

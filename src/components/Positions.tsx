@@ -654,24 +654,24 @@ export default function Positions({ mode = 'overview' }: { mode?: 'overview' | '
         <section className="panel seesaw-panel">
           <div className="selected-theme-head">
             <div>
-              <strong>盘中资金跷跷板监控 · {seesaw.market_mode}</strong>
+              <strong>盘中订单流跷跷板监控（供应商算法） · {seesaw.market_mode.replace('存量资金', '存量订单流')}</strong>
               <SensitiveEvidenceText value={seesaw.summary} />
             </div>
           </div>
           <div className="auction-evidence-grid">
             <div>
-              <b>行业流入前10名</b>
+              <b>行业订单流方向净额前10名</b>
               <ul>
                 {seesaw.inflow_targets.slice(0, 4).map(item => (
-                  <li key={item.name}>{item.name}：净流入 {item.net_inflow.toFixed(2)} 亿，主力 {item.main_inflow.toFixed(2)} 亿，涨停 {item.limit_up_count} 只</li>
+                  <li key={item.name}>{item.name}：方向净额 {item.net_inflow.toFixed(2)} 亿，大单方向估算 {item.main_inflow.toFixed(2)} 亿，涨停 {item.limit_up_count} 只</li>
                 ))}
               </ul>
             </div>
             <div>
-              <b>行业流出前10名</b>
+              <b>行业订单流方向净额后10名</b>
               <ul>
                 {(seesaw.outflow_targets.length ? seesaw.outflow_targets : [{ name: '暂无明显流出板块', net_inflow: 0, main_inflow: 0, limit_up_count: 0 } as RotationItem]).slice(0, 4).map(item => (
-                  <li key={item.name}>{item.name}：净流入 {item.net_inflow.toFixed(2)} 亿，主力 {item.main_inflow.toFixed(2)} 亿</li>
+                  <li key={item.name}>{item.name}：方向净额 {item.net_inflow.toFixed(2)} 亿，大单方向估算 {item.main_inflow.toFixed(2)} 亿</li>
                 ))}
               </ul>
             </div>
@@ -694,9 +694,9 @@ export default function Positions({ mode = 'overview' }: { mode?: 'overview' | '
                 <p className="seesaw-signal"><SensitiveEvidenceText value={item.signal} /></p>
                 <div className="seesaw-facts">
                   <div>
-                    <b>主资金曲线</b>
+                    <b>板块订单流方向曲线</b>
                     <span>
-                      {item.flow_basis || '资金流'} · {(item.primary_industry_sector || item.matched_flow_sector || '未匹配')} · 当前 {item.theme_flow_current.toFixed(2)} 亿
+                      {(item.flow_basis || '订单流方向估算').replace('资金流', '订单流算法')} · {(item.primary_industry_sector || item.matched_flow_sector || '未匹配')} · 当前 {item.theme_flow_current.toFixed(2)} 亿
                       {item.theme_flow_pullback > 0 ? ` / 回落 ${item.theme_flow_pullback.toFixed(2)} 亿` : ''}
                     </span>
                   </div>
@@ -740,7 +740,7 @@ export default function Positions({ mode = 'overview' }: { mode?: 'overview' | '
                 </ul>
               </article>
             )) : (
-              <p className="plain-text">暂无持仓触发明显资金抽血风险。</p>
+              <p className="plain-text">暂无持仓触发明显订单流转弱风险。</p>
             )}
           </div>
         </section>
@@ -856,7 +856,7 @@ export default function Positions({ mode = 'overview' }: { mode?: 'overview' | '
             <thead>
               <tr>
                   <th>代码</th><th>名称</th><th>数量</th><th>成本</th><th>现价</th><th>市值</th>
-                  <th className="num">盈亏金额</th><th className="num">浮盈%</th><th className="num">今日盈亏</th><th className="num">今日盈亏%</th><th>资金跷跷板</th><th>执行状态</th><th className="num">仓位%</th><th className="num">止损价</th><th className="num">利润保护</th>
+                  <th className="num">盈亏金额</th><th className="num">浮盈%</th><th className="num">今日盈亏</th><th className="num">今日盈亏%</th><th>订单流跷跷板</th><th>执行状态</th><th className="num">仓位%</th><th className="num">止损价</th><th className="num">利润保护</th>
                 <th>仓位类型</th><th>下一步</th><th>操作</th>
               </tr>
             </thead>
@@ -897,7 +897,7 @@ export default function Positions({ mode = 'overview' }: { mode?: 'overview' | '
                           <span>{alert.holding_theme || alert.sector || '待确认主线'}</span>
                         </div>
                         <div className="seesaw-cell-meta">
-                          <span>主资金曲线：{alert.flow_basis || '资金流'} · {alert.primary_industry_sector || alert.matched_flow_sector || '未匹配'}，当前 {alert.theme_flow_current.toFixed(2)} 亿{alert.theme_flow_pullback > 0 ? `，高位回落 ${alert.theme_flow_pullback.toFixed(2)} 亿` : ''}</span>
+                          <span>板块订单流方向曲线：{(alert.flow_basis || '订单流方向估算').replace('资金流', '订单流算法')} · {alert.primary_industry_sector || alert.matched_flow_sector || '未匹配'}，当前 {alert.theme_flow_current.toFixed(2)} 亿{alert.theme_flow_pullback > 0 ? `，高位回落 ${alert.theme_flow_pullback.toFixed(2)} 亿` : ''}</span>
                           <span>个股画像：{alert.stock_industry || '未抓到行业'} / {(alert.stock_concepts || []).slice(0, 4).join('、') || '未抓到概念'}</span>
                           <span>概念辅助：{(alert.concept_flow_sectors?.length ? alert.concept_flow_sectors.slice(0, 3).join('、') : '不参与主曲线')}</span>
                           <span>外部吸金：{alert.external_inflow_target || '暂无'}</span>
@@ -908,7 +908,7 @@ export default function Positions({ mode = 'overview' }: { mode?: 'overview' | '
                           {alert.profit_protection_state && <span><SensitiveEvidenceText value={alert.profit_protection_state} /></span>}
                           <span>触发：<SensitiveEvidenceText value={alert.trigger_action || alert.stock_weakening_trigger[0] || alert.sector_ebb_trigger[0] || '继续观察'} /></span>
                         </div>
-                        <small>个股高点回撤 {alert.pullback_from_high_pct.toFixed(2)}% · 主线主力 {alert.sector_main_inflow.toFixed(2)} 亿</small>
+                        <small>个股高点回撤 {alert.pullback_from_high_pct.toFixed(2)}% · 主线大单方向估算 {alert.sector_main_inflow.toFixed(2)} 亿</small>
                       </div>
                     ) : '--'}
                   </td>

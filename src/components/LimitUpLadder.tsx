@@ -238,7 +238,7 @@ export default function LimitUpLadder() {
         </article>
         <article className="panel">
           <h3>观察顺序</h3>
-          <p className="plain-text">先看最高板竞价和封单，再看同题材二板晋级，最后看首板是否继续扩散。资金流入板块和天梯聚类重叠时，优先级提高。</p>
+          <p className="plain-text">先看最高板竞价和封单，再看同题材二板晋级，最后看首板是否继续扩散。供应商订单流方向转强的板块与天梯聚类重叠时，优先级提高；该估算不代表账户真实流水。</p>
         </article>
         <article className="panel">
           <h3>数据说明</h3>

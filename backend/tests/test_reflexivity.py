@@ -77,8 +77,8 @@ def test_market_detects_rebound_absorption_and_keeps_counter_evidence():
     ))
 
     assert result["current_scenario"] == "REBOUND_ABSORPTION"
-    assert any("资金净流向较前一快照改善" in item for item in result["current_evidence"])
-    assert any("仍净流出" in item for item in result["current_counter_evidence"])
+    assert any("大单方向估算较前一快照改善" in item for item in result["current_evidence"])
+    assert any("仍为负" in item for item in result["current_counter_evidence"])
     assert any("回踩" in item for item in result["next_validation_points"])
     assert any("主要指数涨跌方向一致率" in item for item in result["current_evidence"])
 
@@ -115,7 +115,7 @@ def test_market_leading_scenario_requires_its_own_core_evidence():
     assert result["scenarios"][0]["code"] == "REBOUND_ABSORPTION"
     assert result["current_scenario"] == "DATA_GAP"
     assert result["scenario_match_score"] is None
-    assert "资金净流向较前一快照变化" in result["missing_fields"]
+    assert "大单方向估算较前一快照变化" in result["missing_fields"]
 
 
 def test_market_scenario_gate_does_not_require_unrelated_optional_fields():
@@ -256,5 +256,5 @@ def test_stock_reflexivity_uses_reliable_sector_flow_turning_as_dynamic_evidence
     ))
 
     failed_rebound = _scenario(result, "REBOUND_FAILURE_SUPPLY")
-    assert any("板块资金仍在边际转弱" in item for item in failed_rebound["evidence"])
+    assert any("板块订单流方向仍在边际转弱" in item for item in failed_rebound["evidence"])
     assert result["crowding"]["side"] == "SELL_PRESSURE"

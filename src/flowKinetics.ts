@@ -22,21 +22,21 @@ export type FlowKineticsView = {
 }
 
 const DIRECTION_LABELS: Record<string, string> = {
-  NET_INFLOW: '当前净流入',
-  NET_OUTFLOW: '当前净流出',
-  NEUTRAL: '资金方向中性',
+  NET_INFLOW: '订单流方向净流入',
+  NET_OUTFLOW: '订单流方向净流出',
+  NEUTRAL: '订单流方向中性',
   UNKNOWN: '方向待确认',
 }
 
 const TURNING_LABELS: Record<string, string> = {
-  TURN_TO_INFLOW: '由净流出拐为净流入',
-  TURN_TO_OUTFLOW: '由净流入拐为净流出',
-  OUTFLOW_NARROWING: '净流出快速收窄',
-  INFLOW_FADING: '净流入快速回落',
-  INFLOW_ACCELERATING: '资金流入加速',
-  OUTFLOW_ACCELERATING: '资金流出加速',
-  FLOW_IMPROVING: '资金边际改善',
-  FLOW_WEAKENING: '资金边际转弱',
+  TURN_TO_INFLOW: '订单流方向由净流出拐为净流入',
+  TURN_TO_OUTFLOW: '订单流方向由净流入拐为净流出',
+  OUTFLOW_NARROWING: '订单流方向净流出快速收窄',
+  INFLOW_FADING: '订单流方向净流入快速回落',
+  INFLOW_ACCELERATING: '订单流方向流入加速',
+  OUTFLOW_ACCELERATING: '订单流方向流出加速',
+  FLOW_IMPROVING: '订单流方向边际改善',
+  FLOW_WEAKENING: '订单流方向边际转弱',
 }
 
 const POSITIVE_TURNS = new Set([
@@ -66,7 +66,7 @@ function formatAsOf(value?: string | null) {
 export function flowTurningLabel(value?: string | null) {
   const key = String(value || '').toUpperCase()
   if (!key) return ''
-  return TURNING_LABELS[key] ?? '资金拐点待识别'
+  return TURNING_LABELS[key] ?? '订单流方向拐点待识别'
 }
 
 export function buildFlowKineticsView(fields: FlowKineticsFields): FlowKineticsView {
@@ -94,10 +94,10 @@ export function buildFlowKineticsView(fields: FlowKineticsFields): FlowKineticsV
     }
   }
 
-  const fallbackSignal = flowTurningLabel(turning) || DIRECTION_LABELS[direction] || '资金变化暂未形成显著拐点'
+  const fallbackSignal = flowTurningLabel(turning) || DIRECTION_LABELS[direction] || '订单流方向变化暂未形成显著拐点'
   return {
     reliable: true,
-    signal: fields.flow_signal || fallbackSignal,
+    signal: normalizeFlowSignalLabel(fields.flow_signal) || fallbackSignal,
     direction: DIRECTION_LABELS[direction] ?? '方向已确认',
     speed: speedPresent ? `${formatSigned(Number(fields.flow_speed), 3)} 亿/分钟` : null,
     acceleration: fields.flow_acceleration !== null && fields.flow_acceleration !== undefined
@@ -113,6 +113,19 @@ export function buildFlowKineticsView(fields: FlowKineticsFields): FlowKineticsV
         ? 'positive'
         : 'neutral',
   }
+}
+
+function normalizeFlowSignalLabel(value?: string | null) {
+  return String(value || '')
+    .replaceAll('主力净流入', '大单方向估算')
+    .replaceAll('主力资金', '大单方向估算')
+    .replaceAll('资金由净流出拐为净流入', '订单流方向由净流出拐为净流入')
+    .replaceAll('资金由净流入拐为净流出', '订单流方向由净流入拐为净流出')
+    .replaceAll('资金流入', '订单流方向流入')
+    .replaceAll('资金流出', '订单流方向流出')
+    .replaceAll('资金边际', '订单流方向边际')
+    .replaceAll('资金价格背离', '订单流与价格背离')
+    .replaceAll('资金转弱', '订单流方向转弱')
 }
 
 export function holdingFlowKineticsFields(fields: {

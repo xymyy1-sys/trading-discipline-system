@@ -123,7 +123,7 @@ class TTradingEngine:
                 "先卖出计划数量，不先低吸；接回必须等回踩缩量企稳。",
                 "重新站回真实分钟VWAP，或至少连续3根1分钟K线不再创新低。",
                 "主动卖出额下降，主动买入重新占优。",
-                "所属板块资金停止下降或重新回流。",
+                "所属板块订单流方向估算停止下降或重新转强。",
             ]
         else:
             buyback_low = round(current * 0.975, 2) if current else 0
@@ -132,7 +132,7 @@ class TTradingEngine:
             conditions = [
                 "回踩VWAP附近缩量企稳。",
                 "5分钟内重新站回VWAP。",
-                "所属板块资金停止下降或重新回流。",
+                "所属板块订单流方向估算停止下降或重新转强。",
                 "主动买入重新占优，不能继续创新低。",
             ]
 
@@ -183,7 +183,7 @@ class TTradingEngine:
             buyback_conditions_json=_json_dumps(payload.buyback_conditions or eligibility.buyback_conditions),
             cancel_conditions_json=_json_dumps(payload.cancel_conditions or [
                 "跌破结构止损或反抽VWAP失败。",
-                "板块资金继续流出。",
+                "板块订单流方向估算继续走弱。",
                 "接回条件未满足，T仓卖出转为永久减仓。",
                 "倒T低吸后未确认修复，不允许继续加第二笔。",
             ]),

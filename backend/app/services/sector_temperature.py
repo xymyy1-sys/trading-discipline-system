@@ -315,11 +315,11 @@ def _status_and_risk(
 def _actions_for(status: str) -> list[str]:
     actions = {
         "过热兑现风险": [
-            "禁止追高，等待回踩承接、资金止跌并重新拐头后再评估。",
+            "禁止追高，等待回踩承接、订单流方向止跌并重新拐头后再评估。",
             "已有仓位按交易计划保护利润；过热标签本身不构成机械清仓指令。",
         ],
         "过热分歧": [
-            "暂停追高，观察资金流速与加速度能否修复。",
+            "暂停追高，观察供应商订单流方向流速与加速度能否修复。",
             "若已有仓位，按结构止损和原计划执行，不因拥挤指标单独卖出。",
         ],
         "偏热趋势健康": [
@@ -330,11 +330,11 @@ def _actions_for(status: str) -> list[str]:
             "按计划等待缩量回踩不破或放量突破确认，避免随手追涨。",
         ],
         "过冷仍下跌": [
-            "禁止接飞刀，等待止跌、资金拐头和量价承接共同确认。",
+            "禁止接飞刀，等待止跌、订单流方向拐头和量价承接共同确认。",
             "过冷不等于买点。",
         ],
         "过冷企稳观察": [
-            "仅列入观察，不抢第一根反弹；等待回踩不破与资金持续回流。",
+            "仅列入观察，不抢第一根反弹；等待回踩不破与订单流方向持续改善。",
             "过冷不等于买入。",
         ],
         "修复初步确认": [
@@ -446,17 +446,17 @@ def _build_item(
     if change_10d is not None:
         evidence.append(f"近10日涨跌 {change_10d:+.2f}%")
     if current_net is not None:
-        evidence.append(f"当日资金净流 {current_net:+.2f}亿")
+        evidence.append(f"当日订单流方向净额 {current_net:+.2f}亿（供应商算法）")
     if net_5d is not None:
-        evidence.append(f"近5日资金净流 {net_5d:+.2f}亿")
+        evidence.append(f"近5日订单流方向净额 {net_5d:+.2f}亿（供应商算法）")
     if net_10d is not None:
-        evidence.append(f"近10日资金净流 {net_10d:+.2f}亿")
+        evidence.append(f"近10日订单流方向净额 {net_10d:+.2f}亿（供应商算法）")
     if speed is not None:
-        evidence.append(f"资金流速 {speed:+.3f}亿/分钟")
+        evidence.append(f"订单流方向流速 {speed:+.3f}亿/分钟（供应商算法）")
     if acceleration is not None:
-        evidence.append(f"资金加速度 {acceleration:+.4f}亿/分钟²")
+        evidence.append(f"订单流方向加速度 {acceleration:+.4f}亿/分钟²（供应商算法）")
     if turning:
-        evidence.append("资金出现向上拐点" if turning == "up" else "资金出现向下拐点")
+        evidence.append("订单流方向出现向上拐点" if turning == "up" else "订单流方向出现向下拐点")
     if limit_up_count:
         evidence.append(f"板块涨停 {limit_up_count} 只")
 
@@ -473,7 +473,7 @@ def _build_item(
         evidence.append(f"融资拥挤度 {margin_score:.0f}分（截至{as_of}，T+1慢变量）")
         counter_evidence.append("融资数据不是盘中实时数据，不能单独触发买入或卖出。")
     if coverage < 6:
-        counter_evidence.append("多周期价格或资金窗口不完整，结论已降级。")
+        counter_evidence.append("多周期价格或订单流方向窗口不完整，结论已降级。")
 
     kinetics_count = sum(value is not None for value in (speed, acceleration)) + int(bool(turning))
     provider_trade_date = str(_value(current, "provider_trade_date", default="") or "")[:10]
@@ -616,7 +616,7 @@ def build_sector_temperature(
         updated = str(updated_at)
 
     return {
-        "source": "东方财富多周期板块资金+T+1融资拥挤度+关注度代理",
+        "source": "东方财富多周期板块订单流方向估算+T+1融资拥挤度+关注度代理",
         "updated_at": updated,
         "board_type": board_type,
         "lookback_windows": [1, 5, 10, 20],
@@ -625,7 +625,7 @@ def build_sector_temperature(
         "stabilizing": stabilizing,
         "oversold_watch": oversold_watch,
         "notes": [
-            "板块冷热使用当日、5日、10日涨跌与资金、盘中流速/加速度综合判断；20日仅用于融资拥挤慢变量，不伪装成20日实时资金。",
+            "板块冷热使用当日、5日、10日涨跌与供应商订单流方向估算、盘中流速/加速度综合判断；20日仅用于融资拥挤慢变量，不伪装成20日实时订单流。",
             "过热只表示拥挤与追涨赔率下降，不构成机械卖出；过冷不等于买点，必须等待止跌和量价确认。",
             "融资数据为T+1慢变量，关注度仅为热度代理，二者都不能单独触发交易动作。",
         ],
