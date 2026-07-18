@@ -1,7 +1,75 @@
 from datetime import datetime, timedelta
+from types import SimpleNamespace
 from zoneinfo import ZoneInfo
 
 from app.models.trading import MarketRegimeSnapshot
+
+
+def test_sector_temperature_route_keeps_margin_as_t_plus_one(monkeypatch):
+    from app.api.routes import market
+
+    def panel(_board_type, period, _force):
+        change = {"今日": -1.2, "5日": 8.0, "10日": 15.0}[period]
+        net = {"今日": -12.0, "5日": 50.0, "10日": 90.0}[period]
+        item = SimpleNamespace(
+            name="测试行业",
+            display_name="测试行业",
+            raw_name="测试行业",
+            board_code="BK0001",
+            change_pct=change,
+            net_inflow=net,
+            flow_speed=-0.8 if period == "今日" else None,
+            flow_acceleration=-0.1 if period == "今日" else None,
+            flow_turning="OUTFLOW_ACCELERATING" if period == "今日" else None,
+        )
+        return SimpleNamespace(
+            source="eastmoney+cached",
+            updated_at=datetime(2026, 7, 17, 10, 30),
+            inflow=[item] if net > 0 else [],
+            outflow=[item] if net < 0 else [],
+        )
+
+    monkeypatch.setattr(market.market_provider, "board_flow_panel", panel)
+    monkeypatch.setattr(market.market_provider, "hot_themes", lambda _force: SimpleNamespace(items=[]))
+    def cached_flow(key):
+        period = key.split("|")[-1]
+        change = {"今日": -1.2, "5日": 8.0, "10日": 15.0}[period]
+        net = {"今日": -12.0, "5日": 50.0, "10日": 90.0}[period]
+        return ([{
+            "name": "测试行业",
+            "board_code": "BK0001",
+            "change_pct": change,
+            "net_inflow": net,
+            "provider_trade_date": "2026-07-17",
+            "provider_updated_at": "2026-07-17T10:29:00+08:00",
+        }], "eastmoney", "2026-07-17")
+
+    monkeypatch.setattr(market, "_get_cached_flow", cached_flow)
+    monkeypatch.setattr(market, "fetch_sector_margin", lambda _board_type, _force: {
+        "items": {
+            "测试行业": {
+                "as_of": "2026-07-16",
+                "financing_balance": 120.0,
+                "financing_net_buy": 4.0,
+                "financing_balance_ratio": 3.5,
+                "net_buy_5d": 12.0,
+                "net_buy_10d": 20.0,
+            }
+        },
+        "notes": ["T+1测试口径"],
+    })
+
+    result = market.sector_temperature.__wrapped__(request=None, board_type="行业", force_refresh=True)
+
+    assert result.items[0].name == "测试行业"
+    assert result.items[0].margin_realtime is False
+    assert result.items[0].margin_as_of == "2026-07-16"
+    assert result.items[0].flow_speed == -0.8
+    assert result.items[0].flow_turning == "OUTFLOW_ACCELERATING"
+    assert "东方财富两融T+1" in result.source
+    assert "板块资金缓存" in result.source
+    assert result.updated_at.isoformat() == "2026-07-17T10:29:00+08:00"
+    assert any("使用 eastmoney 缓存" in note and "10:29:00" in note for note in result.notes)
 
 
 def test_capital_rotation_uses_shanghai_generated_at(db_session, monkeypatch):

@@ -1,10 +1,19 @@
-from datetime import datetime
+from datetime import datetime, timedelta
+import json
 from types import SimpleNamespace
 
-from app.api.helpers.decision import build_expectation_snapshot, build_t_eligibility, create_t_plan
+from app.api.helpers.decision import (
+    _entry_plan_context,
+    _entry_plan_execution_context,
+    _market_entry_context,
+    build_expectation_snapshot,
+    build_t_eligibility,
+    create_t_plan,
+)
+from app.core.trading_clock import shanghai_now_naive, shanghai_today
 from app.api.helpers.plan_calc import _default_next_day_plan, refresh_limit_expectation_stage
 from app.api.helpers.volume_price import _minute_reversal_signals, build_volume_price_snapshot
-from app.models.trading import ExpectationRule, Holding, TTradePlan
+from app.models.trading import ExpectationRule, Holding, MarketRegimeSnapshot, NextDayPlan, TTradePlan
 from app.schemas.trading import TTradePlanUpdate
 from app.services.t_trading_engine import update_t_plan
 
@@ -24,6 +33,173 @@ def _execution_plan(db_session):
     db_session.commit()
     db_session.refresh(plan)
     return plan
+
+
+def test_entry_plan_context_accepts_mainline_limit_plan_max_position_ratio(db_session):
+    plan = NextDayPlan(
+        plan_date=shanghai_today().isoformat(),
+        plan_type="limit_up_auction",
+        code="600123",
+        name="mainline plan",
+        confirm_price=10.0,
+        limit_up_price=11.0,
+        final_risk_price=9.5,
+        expected_condition="板块资金转强后 confirm retest",
+        underperform_condition="cancel when support fails",
+        auction_plan=json.dumps({
+            "max_position_ratio": 0.05,
+            "is_mainline": True,
+            "keep_order_condition": "板块保持前排并 confirm retest support",
+            "cancel_condition": "cancel when support fails",
+        }),
+    )
+    db_session.add(plan)
+    db_session.commit()
+
+    has_plan, mode_match, loaded = _entry_plan_context(db_session, "600123", is_holding=False)
+
+    assert loaded is not None
+    assert has_plan is True
+    assert mode_match is True
+
+    condition_context = {
+        "volume_price": {
+            "vwap": 9.95,
+            "vwap_reliable": True,
+            "data_quality": "realtime",
+            "pattern": "回踩不破后重新站回VWAP",
+        },
+        "sector_context": {
+            "crowding_evaluated": True,
+            "status": "健康趋势",
+            "flow_turning": "INFLOW_ACCELERATING",
+        },
+        "market_context": {"entry_gate": "OPEN_WITH_DISCIPLINE", "expansion_frozen": False},
+    }
+    live = _entry_plan_execution_context(
+        loaded, {"price": 10.0}, is_holding=False, **condition_context,
+    )
+    not_triggered = _entry_plan_execution_context(
+        loaded, {"price": 9.8}, is_holding=False, **condition_context,
+    )
+    assert live["triggered"] is True
+    assert live["risk_reward_passed"] is True
+    assert live["risk_reward"] == 2.0
+    assert live["position_cap_pct"] == 5.0
+    assert not_triggered["triggered"] is False
+
+    neutral_sector = dict(condition_context)
+    neutral_sector["sector_context"] = {"crowding_evaluated": True, "status": "震荡中性"}
+    condition_failed = _entry_plan_execution_context(
+        loaded, {"price": 10.0}, is_holding=False, **neutral_sector,
+    )
+    assert condition_failed["triggered"] is False
+    assert any("板块/题材" in item for item in condition_failed["evidence"])
+
+
+def test_holding_buyback_quantity_is_converted_to_account_position_cap():
+    plan = NextDayPlan(
+        plan_date=shanghai_today().isoformat(),
+        plan_type="holding",
+        code="600124",
+        name="holding plan",
+        allow_buyback=True,
+        buyback_price=10.0,
+        max_buyback_quantity=100,
+        trim_price=12.0,
+        final_risk_price=9.0,
+        expected_condition="板块未退潮，个股回踩分时均价有承接",
+        underperform_condition="跌破确认位并弱于板块时取消",
+        buyback_condition="全市场闸门开放、板块资金转强、V形低点抬高并站回真实VWAP、风险收益比不低于1.5",
+        auction_plan=json.dumps({"cancel_condition": "板块转弱或跌破VWAP时取消买回"}),
+    )
+    context = _entry_plan_execution_context(
+        plan,
+        {"price": 10.0},
+        is_holding=True,
+        expectation={"expectation_gap_score": 0, "expectation_result": "MATCHED"},
+        volume_price={
+            "vwap": 9.95,
+            "vwap_reliable": True,
+            "data_quality": "realtime",
+            "pattern": "V形低点抬高并重新站回VWAP",
+        },
+        sector_context={
+            "crowding_evaluated": True,
+            "status": "修复初步确认",
+            "flow_turning": "INFLOW_ACCELERATING",
+        },
+        market_context={"entry_gate": "OPEN_WITH_DISCIPLINE", "expansion_frozen": False},
+        account_total_asset=100_000,
+    )
+
+    assert context["triggered"] is True
+    assert context["position_cap_pct"] == 1.0
+
+
+def test_market_entry_context_blocks_same_day_expired_snapshot(db_session):
+    db_session.add(MarketRegimeSnapshot(
+        trade_date=shanghai_today().isoformat(),
+        captured_at=shanghai_now_naive() - timedelta(minutes=16),
+        data_quality="complete",
+        regime_code="HEALTHY_ROTATION",
+        regime_name="健康轮动",
+        risk_level="LOW",
+        forbidden_actions_json="[]",
+        strongest_sectors_json="[]",
+        weakest_sectors_json="[]",
+    ))
+    db_session.commit()
+
+    market, _sector = _market_entry_context(db_session, {"industry": "", "concepts": []})
+
+    assert market["entry_gate"] == "BLOCK"
+    assert market["expansion_frozen"] is True
+    assert market["data_quality"] == "stale"
+
+
+def test_market_entry_context_builds_temperature_without_user_opening_tab(db_session, monkeypatch):
+    from app.api.helpers import decision
+    from app.api.routes import market
+
+    db_session.add(MarketRegimeSnapshot(
+        trade_date=shanghai_today().isoformat(),
+        captured_at=datetime.now(),
+        data_quality="realtime",
+        regime_code="HEALTHY_ROTATION",
+        regime_name="健康轮动",
+        risk_level="LOW",
+        forbidden_actions_json="[]",
+        strongest_sectors_json='[{"name":"半导体"}]',
+        weakest_sectors_json="[]",
+    ))
+    db_session.commit()
+    calls = []
+    monkeypatch.setattr(decision, "_get_response_cache", lambda _key: None)
+    monkeypatch.setattr(
+        market,
+        "_sector_temperature_snapshot",
+        lambda board_type, force_refresh=False: calls.append(board_type) or {
+            "items": [{
+                "name": "半导体",
+                "status": "过热分歧",
+                "heat_score": 82,
+                "flow_turning": "INFLOW_FADING",
+                "data_quality": "good",
+                "provider_trade_date": shanghai_today().isoformat(),
+            }]
+        },
+    )
+
+    _market, sector = _market_entry_context(
+        db_session,
+        {"industry": "半导体", "concepts": []},
+    )
+
+    assert calls == ["行业"]
+    assert sector["crowding_evaluated"] is True
+    assert sector["overheated"] is True
+    assert sector["flow_turning"] == "INFLOW_FADING"
 
 
 def test_expectation_snapshot_uses_editable_threshold_rule(db_session):
@@ -409,6 +585,10 @@ def test_decision_card_includes_volume_price(client, monkeypatch):
     payload = response.json()
     assert payload["volume_price"]["code"] == "600004"
     assert payload["volume_price"]["pattern"]
+    assert payload["entry_discipline"]["decision"] == "BLOCK"
+    assert payload["entry_discipline"]["allowed_position_ratio"] == 0
+    assert payload["allowed_actions"] == ["只允许观察，不下单"]
+    assert payload["forbidden_actions"][0] == payload["entry_discipline"]["label"]
 
 
 def test_expectation_create_and_update_routes(client, monkeypatch):

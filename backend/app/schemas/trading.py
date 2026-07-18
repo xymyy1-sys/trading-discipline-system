@@ -558,6 +558,28 @@ class TEligibilityOut(BaseModel):
     current_action: str = ""
 
 
+class EntryDisciplineOut(BaseModel):
+    decision: str = "BLOCK"
+    label: str = "禁止买入"
+    risk_level: str = "HIGH"
+    hard_blocked: bool = True
+    chase_score: int = 0
+    allowed_position_ratio: float = 0
+    reason_codes: list[str] = Field(default_factory=list)
+    evidence: list[str] = Field(default_factory=list)
+    counter_evidence: list[str] = Field(default_factory=list)
+    missing_conditions: list[str] = Field(default_factory=list)
+    recheck_conditions: list[str] = Field(default_factory=list)
+    cooldown_until: datetime | None = None
+    pulse_1m: float | None = None
+    pulse_3m: float | None = None
+    pulse_5m: float | None = None
+    distance_vwap_pct: float | None = None
+    distance_high_pct: float | None = None
+    data_quality: str = "missing"
+    expires_at: datetime | None = None
+
+
 class StockDecisionCardOut(BaseModel):
     code: str
     name: str
@@ -577,6 +599,7 @@ class StockDecisionCardOut(BaseModel):
     data_quality: str = "manual"
     consensus_risk: "ConsensusRiskOut | None" = None
     minute_chart: list["MinuteChartPoint"] = Field(default_factory=list)
+    entry_discipline: EntryDisciplineOut | None = None
 
 
 class ConsensusRiskOut(BaseModel):
@@ -1423,6 +1446,7 @@ class SectorFlowItem(BaseModel):
     change_pct: float
     net_inflow: float
     main_inflow: float
+    limit_up_count: int = 0
     strength: int
     rank: int
     rank_change: int | None = None
@@ -1465,6 +1489,56 @@ class BoardFlowPanelOut(BaseModel):
     period: str
     inflow: list[SectorFlowItem]
     outflow: list[SectorFlowItem]
+    notes: list[str] = Field(default_factory=list)
+
+
+class SectorTemperatureItemOut(BaseModel):
+    name: str
+    board_code: str | None = None
+    board_type: str = "行业"
+    heat_score: int = 0
+    status: str = "数据不足"
+    risk_level: str = "UNKNOWN"
+    trend_score: float = 0
+    flow_score: float = 0
+    crowding_score: float | None = None
+    margin_score: float | None = None
+    attention_score: float | None = None
+    change_pct: float | None = None
+    change_pct_5d: float | None = None
+    change_pct_10d: float | None = None
+    net_inflow: float | None = None
+    net_inflow_5d: float | None = None
+    net_inflow_10d: float | None = None
+    flow_speed: float | None = None
+    flow_acceleration: float | None = None
+    flow_turning: str | None = None
+    provider_trade_date: str | None = None
+    provider_updated_at: str | None = None
+    limit_up_count: int = 0
+    financing_balance: float | None = None
+    financing_net_buy: float | None = None
+    financing_balance_ratio: float | None = None
+    financing_net_buy_5d: float | None = None
+    financing_net_buy_10d: float | None = None
+    financing_net_buy_20d: float | None = None
+    margin_as_of: str = ""
+    margin_realtime: bool = False
+    evidence: list[str] = Field(default_factory=list)
+    counter_evidence: list[str] = Field(default_factory=list)
+    actions: list[str] = Field(default_factory=list)
+    data_quality: str = "missing"
+
+
+class SectorTemperatureOut(BaseModel):
+    source: str
+    updated_at: datetime
+    board_type: str = "行业"
+    lookback_windows: list[int] = Field(default_factory=lambda: [1, 5, 10, 20])
+    items: list[SectorTemperatureItemOut] = Field(default_factory=list)
+    overheated: list[SectorTemperatureItemOut] = Field(default_factory=list)
+    stabilizing: list[SectorTemperatureItemOut] = Field(default_factory=list)
+    oversold_watch: list[SectorTemperatureItemOut] = Field(default_factory=list)
     notes: list[str] = Field(default_factory=list)
 
 

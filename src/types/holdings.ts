@@ -469,6 +469,28 @@ export interface TTradePlan {
   updated_at: string;
 }
 
+export interface EntryDiscipline {
+  decision: 'BLOCK' | 'WAIT_RETEST' | 'ALLOW_SMALL' | 'ALLOW';
+  label: string;
+  risk_level: 'HIGH' | 'MEDIUM' | 'LOW' | 'UNKNOWN';
+  hard_blocked: boolean;
+  chase_score: number;
+  allowed_position_ratio: number;
+  reason_codes: string[];
+  evidence: string[];
+  counter_evidence: string[];
+  missing_conditions: string[];
+  recheck_conditions: string[];
+  cooldown_until: string | null;
+  pulse_1m: number | null;
+  pulse_3m: number | null;
+  pulse_5m: number | null;
+  distance_vwap_pct: number | null;
+  distance_high_pct: number | null;
+  data_quality: string;
+  expires_at: string | null;
+}
+
 export interface StockDecisionCard {
   code: string;
   name: string;
@@ -488,6 +510,7 @@ export interface StockDecisionCard {
   data_quality: string;
   consensus_risk: ConsensusRisk | null;
   minute_chart: MinuteChartPoint[];
+  entry_discipline: EntryDiscipline | null;
 }
 
 export interface MinuteChartPoint {

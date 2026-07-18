@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import type { ReactNode } from 'react'
-import { Flame, MoonStar, RefreshCcw, Search, TrendingUp } from 'lucide-react'
+import { Flame, Gauge, MoonStar, RefreshCcw, Search, TrendingUp } from 'lucide-react'
 import { API_BASE } from '../api'
 import { cachedJson } from '../apiCache'
 import type {
@@ -10,13 +10,15 @@ import type {
   HotThemeItem,
   HotThemesOut,
   SectorFlowItem,
+  SectorTemperatureItem,
+  SectorTemperatureOut,
 } from '../types'
 
 import FlowChartSection from './FlowDesk/FlowChartSection'
 import SectorRanking from './FlowDesk/SectorRanking'
 import SectorDetailDrawer from './FlowDesk/SectorDetailDrawer'
 
-type MainTab = 'funds' | 'hot' | 'dark'
+type MainTab = 'funds' | 'temperature' | 'hot' | 'dark'
 type BoardType = '行业' | '概念' | '风格' | '地域' | '港股'
 type DarkScope = '个股' | '行业' | '概念'
 
@@ -32,6 +34,8 @@ export default function FlowDesk() {
   const [boardFlow, setBoardFlow] = useState<BoardFlowPanel | null>(null)
   const [hotThemes, setHotThemes] = useState<HotThemesOut | null>(null)
   const [darkTrade, setDarkTrade] = useState<DarkTradeOut | null>(null)
+  const [sectorTemperature, setSectorTemperature] = useState<SectorTemperatureOut | null>(null)
+  const [temperatureBoardType, setTemperatureBoardType] = useState<'行业' | '概念'>('行业')
   const [loading, setLoading] = useState(true)
   const [apiNote, setApiNote] = useState('同步中')
   const [selected, setSelected] = useState<string | null>(null)
@@ -95,14 +99,34 @@ export default function FlowDesk() {
       .finally(() => setLoading(false))
   }, [darkScope])
 
+  const loadTemperature = useCallback((force = false) => {
+    setLoading(true)
+    const query = new URLSearchParams({ board_type: temperatureBoardType })
+    if (force) query.set('force_refresh', 'true')
+    cachedJson<SectorTemperatureOut>(
+      `sector-temperature:${temperatureBoardType}`,
+      `${API_BASE}/api/market/sector-temperature?${query.toString()}`,
+      force,
+    )
+      .then(({ data, fetchedAt }) => {
+        setSectorTemperature(data)
+        setFetchedAt(fetchedAt)
+        setApiNote(data.items.length ? `${temperatureBoardType}冷热模型 · 当日/5日/10日资金 + T+1两融` : '板块冷热证据暂不可用')
+      })
+      .catch(() => setApiNote('板块冷热模型暂不可用'))
+      .finally(() => setLoading(false))
+  }, [temperatureBoardType])
+
   useEffect(() => {
     if (tab === 'funds') loadFunds()
+    if (tab === 'temperature') loadTemperature()
     if (tab === 'hot') loadHot()
     if (tab === 'dark') loadDark()
-  }, [loadDark, loadFunds, loadHot, tab])
+  }, [loadDark, loadFunds, loadHot, loadTemperature, tab])
 
   const refresh = () => {
     if (tab === 'funds') loadFunds(true)
+    if (tab === 'temperature') loadTemperature(true)
     if (tab === 'hot') loadHot(true)
     if (tab === 'dark') loadDark(true)
   }
@@ -111,6 +135,8 @@ export default function FlowDesk() {
   const topOut = boardFlow?.outflow[0]
   const hotTop = hotThemes?.items[0]
   const darkTop = darkTrade?.items[0]
+  const temperatureTop = sectorTemperature?.items[0]
+  const overheatedTop = sectorTemperature?.overheated[0]
 
   return (
     <>
@@ -124,6 +150,9 @@ export default function FlowDesk() {
           <div className="segmented">
             <button className={tab === 'funds' ? 'selected' : ''} type="button" onClick={() => setTab('funds')}>
               <TrendingUp size={14} /> 主力资金
+            </button>
+            <button className={tab === 'temperature' ? 'selected' : ''} type="button" onClick={() => setTab('temperature')}>
+              <Gauge size={14} /> 冷热拥挤
             </button>
             <button className={tab === 'hot' ? 'selected' : ''} type="button" onClick={() => setTab('hot')}>
               <Flame size={14} /> 热点题材
@@ -156,6 +185,16 @@ export default function FlowDesk() {
             <div className="segmented compact">
               {DARK_SCOPES.map(item => (
                 <button className={darkScope === item ? 'selected' : ''} key={item} type="button" onClick={() => setDarkScope(item)}>
+                  {item}
+                </button>
+              ))}
+            </div>
+          )}
+
+          {tab === 'temperature' && (
+            <div className="segmented compact">
+              {(['行业', '概念'] as const).map(item => (
+                <button className={temperatureBoardType === item ? 'selected' : ''} key={item} type="button" onClick={() => setTemperatureBoardType(item)}>
                   {item}
                 </button>
               ))}
@@ -203,6 +242,7 @@ export default function FlowDesk() {
         )}
 
         {tab === 'hot' && <HotThemePanel data={hotThemes} loading={loading} />}
+        {tab === 'temperature' && <SectorTemperaturePanel data={sectorTemperature} loading={loading} />}
         {tab === 'dark' && (
           <>
             {darkScope === '个股' && <label className="dark-stock-search"><Search size={15} /><input value={darkQuery} onChange={event => setDarkQuery(event.target.value)} placeholder="输入股票名称或代码查询" /></label>}
@@ -234,12 +274,25 @@ export default function FlowDesk() {
               <KV label="合计主力估算" value={`${fmtYi(darkTop.main_net_inflow_with_dark)}亿`} tone={darkTop.main_net_inflow_with_dark >= 0 ? 'up' : 'down'} />
             </>
           )}
+          {tab === 'temperature' && temperatureTop && (
+            <>
+              <KV label="热度最高" value={`${temperatureTop.name} · ${temperatureTop.heat_score}分`} />
+              <KV label="当前状态" value={temperatureTop.status} tone={temperatureTop.risk_level === 'HIGH' ? 'down' : undefined} />
+              <KV label="纪律" value={temperatureTop.actions[0] || '等待量价与资金共同确认'} />
+            </>
+          )}
         </Panel>
         <Panel title="风险方向">
           {tab === 'funds' && topOut && (
             <>
               <KV label="流出第一" value={topOut.name} tone="down" />
               <KV label="净流出" value={`${fmtYi(topOut.net_inflow)}亿`} tone="down" />
+            </>
+          )}
+          {tab === 'temperature' && overheatedTop && (
+            <>
+              <KV label="拥挤风险" value={overheatedTop.name} tone="down" />
+              <KV label="状态" value={overheatedTop.status} tone="down" />
             </>
           )}
           <p className="plain-text">资金证据只负责回答“钱在哪、哪里失血”，买卖动作仍要叠加持仓计划、个股强弱和利润保护触发器。</p>
@@ -249,6 +302,7 @@ export default function FlowDesk() {
             <span>主力资金：东方财富板块资金流，失败才回落新浪</span>
             <span>热点题材：东方财富市场热点榜，资金字段按板块资金补充</span>
             <span>成交拆单估算：东方财富算法榜单，非夜市委托、非交易所真实暗盘</span>
+            <span>冷热拥挤：当日/5日/10日趋势与资金、盘中拐点，加上5/10/20日T+1融资慢变量；过冷不等于抄底，过热不等于立刻卖出</span>
           </div>
         </Panel>
       </section>
@@ -262,6 +316,57 @@ export default function FlowDesk() {
         />
       )}
     </>
+  )
+}
+
+function SectorTemperaturePanel({ data, loading }: { data: SectorTemperatureOut | null; loading: boolean }) {
+  if (loading && !data) return <EmptyState title="板块冷热计算中" body="正在合并当日/5日/10日趋势、资金拐点与5/10/20日T+1融资拥挤证据。" />
+  if (!data?.items.length) return <EmptyState title="板块冷热证据不足" body="不会用缺失数据生成虚假的过热或超跌结论。" />
+  return (
+    <div className="flow-data-panel sector-temperature-board">
+      <div className="temperature-summary-grid">
+        <TemperatureGroup title="过热/兑现风险" items={data.overheated} empty="当前没有联合证据确认的过热拐头" />
+        <TemperatureGroup title="企稳/修复观察" items={data.stabilizing} empty="当前没有同时通过止跌与资金回流确认的板块" />
+        <TemperatureGroup title="超跌观察（不是买点）" items={data.oversold_watch} empty="当前没有达到超跌观察阈值的板块" />
+      </div>
+      <div className="temperature-card-grid">
+        {data.items.slice(0, 18).map(item => <TemperatureCard item={item} key={`${item.board_type}-${item.board_code || item.name}`} />)}
+      </div>
+      <p className="flow-note-line">{data.notes.join('；')}</p>
+    </div>
+  )
+}
+
+function TemperatureGroup({ title, items, empty }: { title: string; items: SectorTemperatureItem[]; empty: string }) {
+  return (
+    <article>
+      <h3>{title}</h3>
+      {items.slice(0, 5).map(item => <p key={item.name}><b>{item.name}</b><span>{item.status} · {item.heat_score}分</span></p>)}
+      {!items.length && <small>{empty}</small>}
+    </article>
+  )
+}
+
+function TemperatureCard({ item }: { item: SectorTemperatureItem }) {
+  const tone = item.risk_level === 'HIGH' ? 'risk' : item.status.includes('企稳') || item.status.includes('修复') ? 'repair' : item.status.includes('过冷') ? 'cold' : 'normal'
+  const maybe = (value: number | null, suffix = '') => value === null ? '--' : `${value >= 0 ? '+' : ''}${value.toFixed(2)}${suffix}`
+  return (
+    <article className={`temperature-card ${tone}`}>
+      <header><div><strong>{item.name}</strong><span>{item.status}</span></div><b>{item.heat_score}</b></header>
+      <div className="temperature-factor-row">
+        <span>趋势 {item.trend_score.toFixed(0)}</span><span>资金 {item.flow_score.toFixed(0)}</span>
+        <span>拥挤 {item.crowding_score === null ? '--' : item.crowding_score.toFixed(0)}</span>
+      </div>
+      <div className="temperature-window-row">
+        <span>今日 {maybe(item.change_pct, '%')}</span><span>5日 {maybe(item.change_pct_5d, '%')}</span><span>10日 {maybe(item.change_pct_10d, '%')}</span>
+      </div>
+      <p>当日资金 {maybe(item.net_inflow, '亿')} · 5日 {maybe(item.net_inflow_5d, '亿')} · 10日 {maybe(item.net_inflow_10d, '亿')}</p>
+      <p>融资余额 {maybe(item.financing_balance, '亿')} · 当日/5日/10日/20日净买入 {maybe(item.financing_net_buy, '亿')} / {maybe(item.financing_net_buy_5d, '亿')} / {maybe(item.financing_net_buy_10d, '亿')} / {maybe(item.financing_net_buy_20d, '亿')}</p>
+      <small>板块行情日期 {item.provider_trade_date || '未标注'} · 数据质量 {item.data_quality === 'stale' ? '非当日快照' : item.data_quality === 'high' ? '高' : item.data_quality === 'good' ? '良好' : item.data_quality === 'partial' ? '部分' : '不足'}</small>
+      <small>两融日期 {item.margin_as_of || '缺失'} · {item.margin_realtime ? '实时' : 'T+1慢变量'}</small>
+      <ul>{item.evidence.slice(0, 3).map(value => <li key={value}>{value}</li>)}</ul>
+      <b className="temperature-action">{item.actions[0] || '等待更多证据'}</b>
+    </article>
   )
 }
 

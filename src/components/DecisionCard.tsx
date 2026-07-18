@@ -108,7 +108,7 @@ export default function DecisionCard({ mode = 'watchlist' }: { mode?: DecisionCa
       <header className="pos-header">
         <div>
           <h2>个股决策卡</h2>
-          <p>把盘前预期、实际表现、持仓执行、事件时间线和做T资格合并到一张卡。</p>
+          <p>把盘前预期、实际表现、量价证据、入场纪律和持仓执行合并到一张卡；观察池不等于买点。</p>
         </div>
         <div className="decision-search">
           <input value={code} onChange={e => setCode(e.target.value)} placeholder="输入股票代码" />
@@ -185,6 +185,8 @@ export default function DecisionCard({ mode = 'watchlist' }: { mode?: DecisionCa
               <div><b>合理开盘</b><span>{card.expectation.expected_open_low.toFixed(1)}% - {card.expectation.expected_open_high.toFixed(1)}%</span></div>
               <div><b>可信度</b><span>{(card.expectation.confidence * 100).toFixed(0)}%</span></div>
             </div>
+
+            {card.entry_discipline && <EntryDisciplinePanel gate={card.entry_discipline} holding={mode === 'holding'} />}
 
             <ExpectationJourney card={card} />
 
@@ -315,6 +317,36 @@ export default function DecisionCard({ mode = 'watchlist' }: { mode?: DecisionCa
       ) : (
         <div className="panel"><p className="plain-text">输入股票代码后生成个股决策卡。</p></div>
       )}
+    </section>
+  )
+}
+
+function EntryDisciplinePanel({ gate, holding }: { gate: NonNullable<StockDecisionCard['entry_discipline']>; holding: boolean }) {
+  const tone = gate.decision === 'BLOCK' ? 'blocked' : gate.decision === 'WAIT_RETEST' ? 'waiting' : gate.decision === 'ALLOW_SMALL' ? 'small' : 'allowed'
+  const percent = (value: number | null) => value === null ? '--' : `${value >= 0 ? '+' : ''}${value.toFixed(2)}%`
+  return (
+    <section className={`entry-discipline-panel ${tone}`}>
+      <header>
+        <div>
+          <small>{holding ? '加仓纪律闸门' : '新开仓纪律闸门'}</small>
+          <strong>{gate.label}</strong>
+          <span>追高风险 {gate.chase_score}/100 · {gate.data_quality === 'realtime' ? '实时证据' : chineseLabel(gate.data_quality)}</span>
+        </div>
+        <b>{gate.allowed_position_ratio > 0 ? `最多${gate.allowed_position_ratio.toFixed(0)}%仓位` : '下单上限 0%'}</b>
+      </header>
+      <div className="entry-discipline-metrics">
+        <span><b>1分钟脉冲</b>{percent(gate.pulse_1m)}</span>
+        <span><b>3分钟脉冲</b>{percent(gate.pulse_3m)}</span>
+        <span><b>5分钟脉冲</b>{percent(gate.pulse_5m)}</span>
+        <span><b>偏离均价</b>{percent(gate.distance_vwap_pct)}</span>
+        <span><b>距日内高点</b>{percent(gate.distance_high_pct)}</span>
+      </div>
+      <div className="entry-discipline-columns">
+        <div><b>为什么</b>{gate.evidence.slice(0, 4).map(item => <p key={item}>• {item}</p>)}</div>
+        <div><b>重新评估条件</b>{gate.recheck_conditions.slice(0, 4).map(item => <p key={item}>• {item}</p>)}</div>
+      </div>
+      {gate.cooldown_until && <p className="entry-cooldown">冷静期至少到 {new Date(gate.cooldown_until).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', hour12: false })}；期间宁可错过，不追直线。</p>}
+      <p className="entry-boundary">观察池不等于买点；只有计划触发、模式、市场、板块、真实量价和风险收益同时通过才给出限仓建议。本闸门目前约束系统建议，无法阻止模拟盘的独立委托入口或券商软件中的手工委托。</p>
     </section>
   )
 }

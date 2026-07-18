@@ -98,6 +98,14 @@ def _install_context_dependencies(monkeypatch, db_session) -> Holding:
         severity="info",
         evidence=["10:35收复分时均价"],
     )]
+    entry_discipline = DumpNamespace(
+        decision="WAIT_RETEST",
+        label="等待回踩确认，当前不下单",
+        risk_level="MEDIUM",
+        allowed_position_ratio=0,
+        evidence=["当前仍在冲高后的确认窗口"],
+        recheck_conditions=["回踩分时均价不破后重新抬高"],
+    )
     card = DumpNamespace(
         code=holding.code,
         name=holding.name,
@@ -109,6 +117,7 @@ def _install_context_dependencies(monkeypatch, db_session) -> Holding:
         expectation=expectation,
         volume_price=volume,
         execution_state=execution,
+        entry_discipline=entry_discipline,
         timeline=timeline,
         minute_chart=[
             {"time": "09:31", "price": 98.0, "vwap": 98.0, "amount": 0.2},
@@ -175,6 +184,7 @@ def test_position_context_contains_traceable_decision_evidence(db_session, monke
     assert context["expectation_version_chain"]["data"]["versions"][0]["version"] == 1
     assert context["minute_volume_price"]["data"]["vwap_reliable"] is True
     assert context["execution_state"]["data"]["sellable_quantity"] == 200
+    assert context["entry_discipline"]["data"]["decision"] == "WAIT_RETEST"
     assert context["reflexivity"]["data"]["stock"]["current_scenario"] == "REBOUND_ABSORPTION"
     assert context["related_news"]["data"][0]["url"] == "https://example.test/news"
     assert context["missing_fields"] == []

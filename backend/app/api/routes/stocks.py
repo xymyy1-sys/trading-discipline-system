@@ -486,6 +486,52 @@ def watchlist_recommendations(db: Session = Depends(get_db)) -> list[WatchlistRe
         item.code for item in active_entries
         if item.source == "manual" or item.snapshot_date == display_snapshot_date
     }
+    entry_by_code = {item.code: item for item in active_entries}
+    for code in active_codes:
+        if code in output_by_code:
+            continue
+        entry = entry_by_code[code]
+        expectation = (
+            db.query(ExpectationSnapshot)
+            .filter(ExpectationSnapshot.code.in_([code, code.lstrip("0")]))
+            .order_by(ExpectationSnapshot.created_at.desc())
+            .first()
+        )
+        volume = (
+            db.query(VolumePriceSnapshot)
+            .filter(VolumePriceSnapshot.code.in_([code, code.lstrip("0")]))
+            .order_by(VolumePriceSnapshot.captured_at.desc())
+            .first()
+        )
+        expectation_status = _candidate_state_label(expectation.expectation_result) if expectation else "等待建立预期"
+        volume_status = _candidate_state_label(volume.pattern) if volume else "等待真实分钟量价"
+        missing = []
+        if expectation is None or expectation.expectation_result not in {"STRONGER", "MATCHED"}:
+            missing.append("预期差尚未确认不为负")
+        if volume is None or not volume.vwap_reliable:
+            missing.append("真实分钟量价尚未确认")
+        missing.append("尚未绑定计划内买点与失效条件")
+        output_by_code[code] = WatchlistRecommendationOut(
+            code=code,
+            name=entry.name or code,
+            score=50,
+            tier="等待确认",
+            expectation_status=expectation_status,
+            volume_price_status=volume_status,
+            expectation_gap=expectation.expectation_gap_score if expectation else None,
+            gate_passed=False,
+            missing_conditions=missing,
+            risks=["手动加入观察池不等于形成买点；通过入场纪律闸门前禁止追高"],
+            source="用户手动观察池+真实行情证据",
+            category=entry.category or "手动自选",
+            entry_reason=entry.entry_reason or "用户手动加入观察池",
+            observation_days=max(1, (shanghai_today() - entry.created_at.date()).days + 1),
+            converted=bool(entry.converted_at),
+            updated_at=max(
+                [value for value in (expectation.created_at if expectation else None, volume.captured_at if volume else None, entry.updated_at) if value is not None],
+                default=None,
+            ),
+        )
     if not active_codes and radar is None and ladder is None:
         raise HTTPException(status_code=503, detail="主线题材与涨停行情源暂不可用，请稍后重试；已有观察池和持仓数据未受影响")
     return sorted(

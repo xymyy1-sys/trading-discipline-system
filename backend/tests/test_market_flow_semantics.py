@@ -3,6 +3,25 @@ from datetime import datetime
 from app.services.market_data import MarketDataProvider, SectorFlowPoint, _sanitize_flow_timeline
 
 
+def test_historical_sector_flow_never_falls_back_to_sina_today(monkeypatch):
+    provider = MarketDataProvider()
+    sina_called = []
+    monkeypatch.setattr(
+        provider,
+        "_fetch_direct_eastmoney_sector_flow_raw",
+        lambda **_kwargs: (_ for _ in ()).throw(RuntimeError("eastmoney unavailable")),
+    )
+    monkeypatch.setattr(provider, "_fetch_sina_sector_flow_raw", lambda **_kwargs: sina_called.append(True) or [])
+    monkeypatch.setattr("app.services.market_data._get_cached_flow", lambda _key: None)
+    monkeypatch.setattr("app.services.market_data._get_snapshots", lambda _flow_type: [])
+
+    result = provider.sector_flow(flow_type="行业资金流", period="5日", force_refresh=True)
+
+    assert result.source.startswith("unavailable")
+    assert result.inflow == [] and result.outflow == []
+    assert sina_called == []
+
+
 def test_sector_flow_outflow_is_negative_and_snapshot_only(monkeypatch):
     provider = MarketDataProvider()
 
@@ -23,6 +42,7 @@ def test_sector_flow_outflow_is_negative_and_snapshot_only(monkeypatch):
                 "net_inflow": 52.3,
                 "main_inflow": 44.1,
                 "change_pct": 2.1,
+                "limit_up_count": 3,
                 "strength": 72,
                 "leaders": [],
             },
@@ -35,6 +55,7 @@ def test_sector_flow_outflow_is_negative_and_snapshot_only(monkeypatch):
     flow = provider.sector_flow(flow_type="行业资金流", period="今日", force_refresh=True)
 
     assert [item.name for item in flow.inflow] == ["IT服务"]
+    assert flow.inflow[0].limit_up_count == 3
     assert [item.name for item in flow.outflow] == ["半导体"]
     assert flow.outflow[0].timeline == [SectorFlowPoint(time="当前", value=-248.78)]
     assert flow.outflow[0].timeline_reliable is False
@@ -210,6 +231,61 @@ def test_eastmoney_sector_flow_fetches_all_pages(monkeypatch):
     assert len(rows) == 101
     assert rows[-1]["name"] == "半导体"
     assert rows[-1]["net_inflow"] == -248.78
+
+
+def test_eastmoney_sector_flow_uses_period_specific_change_field(monkeypatch):
+    provider = MarketDataProvider()
+
+    class FakeResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {
+                "data": {
+                    "total": 1,
+                    "diff": [{
+                        "f12": "BK1036",
+                        "f14": "半导体",
+                        "f109": -6.25,
+                        "f160": 11.8,
+                        "f164": -12_300_000_000,
+                        "f166": -8_000_000_000,
+                        "f167": -4.5,
+                        "f168": -4_300_000_000,
+                        "f169": -2.4,
+                        "f170": 7_000_000_000,
+                        "f171": 3.9,
+                        "f172": 5_300_000_000,
+                        "f173": 3.0,
+                        "f174": 22_000_000_000,
+                        "f176": 15_000_000_000,
+                        "f177": 7.5,
+                        "f178": 7_000_000_000,
+                        "f179": 3.5,
+                        "f180": -12_000_000_000,
+                        "f181": -6.0,
+                        "f182": -10_000_000_000,
+                        "f183": -5.0,
+                    }],
+                }
+            }
+
+    monkeypatch.setattr("app.services.market_data.requests.get", lambda *_args, **_kwargs: FakeResponse())
+
+    five_day = provider._fetch_direct_eastmoney_sector_flow_raw("行业资金流", "5日")[0]
+    ten_day = provider._fetch_direct_eastmoney_sector_flow_raw("行业资金流", "10日")[0]
+
+    assert five_day["change_pct"] == -6.25
+    assert five_day["net_inflow"] == -123.0
+    assert five_day["main_inflow"] == -123.0
+    assert five_day["flow_breakdown"][0] == {"name": "超大单", "net": -80.0, "ratio": -4.5}
+    assert five_day["high_price"] is None
+    assert ten_day["change_pct"] == 11.8
+    assert ten_day["net_inflow"] == 220.0
+    assert ten_day["main_inflow"] == 220.0
+    assert ten_day["flow_breakdown"][0] == {"name": "超大单", "net": 150.0, "ratio": 7.5}
+    assert ten_day["prev_close"] is None
 
 
 def test_dark_trade_maps_eastmoney_fields_to_yi(monkeypatch):

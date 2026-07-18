@@ -311,6 +311,17 @@ def build_position_context(db: Session, code: str) -> dict[str, Any]:
     if execution is None:
         missing.append("持仓执行状态")
     volume_price = card.volume_price.model_dump(mode="json") if card.volume_price else None
+    gate = getattr(card, "entry_discipline", None)
+    if gate is None:
+        entry_discipline = None
+    elif hasattr(gate, "model_dump"):
+        entry_discipline = gate.model_dump(mode="json")
+    elif isinstance(gate, dict):
+        entry_discipline = gate
+    else:
+        entry_discipline = None
+    if entry_discipline is None:
+        missing.append("新增/加仓纪律闸门")
     if not volume_price:
         missing.append("分钟量价快照")
     elif not bool(volume_price.get("vwap_reliable")):
@@ -431,6 +442,11 @@ def build_position_context(db: Session, code: str) -> dict[str, Any]:
             "VP-1", volume_as_of,
             volume_price.get("data_source") if volume_price else "缺失",
             volume_price,
+        ),
+        "entry_discipline": _source_item(
+            "ENTRY-1", volume_as_of,
+            "计划+预期+分钟量价+市场/板块联合入场闸门",
+            entry_discipline,
         ),
         "intraday_timeline": _source_item(
             "EVT-1",

@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, time
+import re
+from datetime import datetime, time, timedelta
 from typing import Any
 
 from sqlalchemy.orm import Session
 
 from app.api.helpers.execution import build_position_execution_state
-from app.api.helpers.holdings_calc import _find_holding_by_code
+from app.api.helpers.holdings_calc import _account_total_asset, _find_holding_by_code
 from app.api.helpers.quotes import _latest_a_share_quotes, _quote_lookup_code, _safe_float
 from app.api.helpers.seesaw import _holding_theme_profile
 from app.api.helpers.volume_price import build_volume_price_snapshot
@@ -19,6 +20,8 @@ from app.models.trading import (
     ExpectationSnapshot,
     Holding,
     IntradayEvidenceEvent,
+    MarketRegimeSnapshot,
+    NextDayPlan,
     TTradePlan,
     VolumePriceSnapshot,
 )
@@ -38,6 +41,8 @@ from app.services.t_trading_engine import (
     normalize_t_type,
     update_t_plan as engine_update_t_plan,
 )
+from app.services.entry_gate import evaluate_entry_gate
+from app.services.cache import _get_response_cache
 
 
 def _today(now: datetime | None = None) -> str:
@@ -670,6 +675,409 @@ def update_t_plan(db: Session, row: TTradePlan, payload: Any) -> TTradePlanOut:
     return engine_update_t_plan(db, row, payload)
 
 
+def _entry_plan_context(db: Session, code: str, *, is_holding: bool) -> tuple[bool, bool, NextDayPlan | None]:
+    """Return whether today's plan explicitly permits a new/add order.
+
+    Holding membership and watch-list membership are deliberately ignored.  A
+    holding needs an explicit buyback plan; a non-holding needs a generated
+    limit-up plan whose mainline/stage rules still allow a position.
+    """
+
+    normalized = str(code or "").strip()
+    candidates = {normalized, normalized.lstrip("0")}
+    plan = (
+        db.query(NextDayPlan)
+        .filter(
+            NextDayPlan.code.in_([item for item in candidates if item]),
+            NextDayPlan.plan_date == _today(),
+            NextDayPlan.plan_type == ("holding" if is_holding else "limit_up_auction"),
+        )
+        .order_by(NextDayPlan.updated_at.desc(), NextDayPlan.id.desc())
+        .first()
+    )
+    if not plan:
+        return False, False, None
+    if is_holding:
+        permitted = bool(
+            plan.allow_buyback
+            and int(plan.max_buyback_quantity or 0) > 0
+            and str(plan.buyback_condition or "").strip()
+        )
+        return permitted, permitted, plan
+
+    auction = _json_dict(plan.auction_plan)
+    approved_cap = _safe_float(
+        auction.get("max_position_ratio")
+        if auction.get("max_position_ratio") is not None
+        else auction.get("approved_position_cap")
+    )
+    is_mainline = auction.get("is_mainline") is True
+    has_plan = bool(
+        float(plan.confirm_price or 0) > 0
+        and float(plan.final_risk_price or 0) > 0
+        and str(plan.expected_condition or "").strip()
+        and str(plan.underperform_condition or "").strip()
+    )
+    # A generated plan outside the mainline/stage boundary remains a research
+    # record, not an executable trading mode.
+    mode_match = bool(has_plan and approved_cap > 0 and is_mainline)
+    return has_plan, mode_match, plan
+
+
+def _entry_object(value: Any) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return value
+    if value is None:
+        return {}
+    dumper = getattr(value, "model_dump", None)
+    if callable(dumper):
+        dumped = dumper()
+        return dumped if isinstance(dumped, dict) else {}
+    return {}
+
+
+def _entry_plan_conditions(
+    plan: NextDayPlan,
+    quote: dict[str, Any],
+    expectation: Any,
+    volume_price: Any,
+    sector_context: dict[str, Any],
+    market_context: dict[str, Any],
+    *,
+    is_holding: bool,
+    risk_reward_passed: bool,
+) -> tuple[bool, list[str]]:
+    """Evaluate only observable plan clauses; unknown prose is fail-closed."""
+
+    expectation_data = _entry_object(expectation)
+    volume_data = _entry_object(volume_price)
+    auction = _json_dict(plan.auction_plan)
+    current = _safe_float(quote.get("price"))
+    open_price = _safe_float(quote.get("open"))
+    prev_close = _safe_float(quote.get("prev_close"))
+    open_pct = ((open_price / prev_close - 1) * 100) if open_price > 0 and prev_close > 0 else None
+    vwap = _safe_float(volume_data.get("vwap"))
+    volume_quality = str(volume_data.get("data_quality") or "").lower()
+    vwap_reliable = bool(volume_data.get("vwap_reliable")) and vwap > 0 and volume_quality not in {"", "missing", "manual"}
+    above_vwap = bool(vwap_reliable and current >= vwap * 0.998)
+    pattern = str(volume_data.get("pattern") or "").upper()
+    positive_pattern = any(
+        token in pattern
+        for token in ("V形", "低点抬高", "站回VWAP", "重新站回", "回踩不破", "支撑确认", "REVERSAL_CONFIRMED")
+    )
+    weak_pattern = any(
+        token in pattern
+        for token in ("冲高回落", "跌破VWAP", "量价转弱", "放量下跌", "VWAP_BREAKDOWN", "VOLUME_PRICE_WEAKENING")
+    )
+    retest_confirmed = bool(above_vwap and positive_pattern)
+
+    sector_text = " ".join(
+        str(sector_context.get(key) or "")
+        for key in ("status", "flow_turning", "turning", "signal", "flow_signal")
+    ).upper()
+    sector_ready = sector_context.get("crowding_evaluated") is True
+    sector_negative = any(
+        token in sector_text
+        for token in ("OUTFLOW_ACCELERATING", "TURN_TO_OUTFLOW", "INFLOW_FADING", "退潮", "流出", "转弱", "弱势")
+    )
+    sector_supportive = sector_ready and not sector_negative and any(
+        token in sector_text
+        for token in ("INFLOW_ACCELERATING", "TURN_TO_INFLOW", "FLOW_IMPROVING", "前排", "健康", "修复", "企稳", "转强", "流入")
+    )
+    market_open = not bool(market_context.get("expansion_frozen")) and str(market_context.get("entry_gate") or "").upper() not in {"", "BLOCK"}
+
+    expectation_text = " ".join(
+        str(expectation_data.get(key) or "")
+        for key in ("expectation_result", "state_transition", "actual_performance", "status")
+    ).upper()
+    gap = _safe_float(expectation_data.get("expectation_gap_score"))
+    expectation_negative = gap <= -8 or any(
+        token in expectation_text
+        for token in ("INVALIDATED", "WEAKER", "SEVERE_UNDERPERFORM", "预期证伪", "弱于预期", "转弱")
+    )
+
+    expected_text = str(plan.expected_condition or "").strip()
+    underperform_text = str(plan.underperform_condition or "").strip()
+    buyback_text = str(plan.buyback_condition or "").strip() if is_holding else ""
+    cancel_text = str(auction.get("cancel_condition") or "").strip()
+    keep_text = str(auction.get("keep_order_condition") or "").strip() if not is_holding else ""
+    required_texts = [expected_text, underperform_text, cancel_text]
+    if is_holding:
+        required_texts.append(buyback_text)
+    else:
+        required_texts.append(keep_text)
+    structured_markers = (
+        "VWAP", "分时均价", "回踩", "承接", "确认位", "高开", "低开", "板块", "资金", "风险收益",
+        "止损", "撤单", "炸板", "回封", "支撑", "RETEST", "SUPPORT", "BREAKOUT",
+    )
+    unstructured = [text for text in required_texts if not text or not any(marker in text.upper() for marker in structured_markers)]
+    reasons: list[str] = []
+    if unstructured:
+        reasons.append("计划存在空白或无法可靠结构化的条件，系统不猜测其含义。")
+
+    combined_positive = " ".join([expected_text, buyback_text, keep_text]).upper()
+    if any(token in combined_positive for token in ("全市场", "市场闸门")) and not market_open:
+        reasons.append("计划要求全市场扩仓闸门开放，当前未通过。")
+    if any(token in combined_positive for token in ("板块", "题材", "主线")) and not sector_supportive:
+        reasons.append("计划要求板块/题材同步转强或保持前排，当前没有可验证的正向资金证据。")
+    if any(token in combined_positive for token in ("VWAP", "分时均价", "回踩", "承接", "V形", "低点抬高", "RETEST", "SUPPORT")) and not retest_confirmed:
+        reasons.append("计划要求回踩承接、V形/低点抬高并站回真实VWAP，当前尚未确认。")
+    opening_range = re.search(r"高开\s*(\d+(?:\.\d+)?)%\s*[-~～至]\s*(\d+(?:\.\d+)?)%", expected_text)
+    if opening_range:
+        low, high = float(opening_range.group(1)), float(opening_range.group(2))
+        if open_pct is None or not low <= open_pct <= high:
+            actual = "缺失" if open_pct is None else f"{open_pct:+.2f}%"
+            reasons.append(f"计划要求高开{low:g}%-{high:g}%，实际开盘为{actual}。")
+
+    invalidation_active = bool(
+        expectation_negative
+        or weak_pattern
+        or sector_negative
+        or (float(plan.final_risk_price or 0) > 0 and current <= float(plan.final_risk_price or 0))
+        or (float(plan.reduce_price or 0) > 0 and current <= float(plan.reduce_price or 0))
+    )
+    if invalidation_active:
+        reasons.append("弱于预期/撤单条件已触发：预期、量价、板块或风险位至少一项失效。")
+    if not risk_reward_passed:
+        reasons.append("计划风险收益比未达到1.50。")
+    return not reasons, reasons
+
+
+def _entry_plan_execution_context(
+    plan: NextDayPlan | None,
+    quote: dict[str, Any],
+    *,
+    is_holding: bool,
+    expectation: Any = None,
+    volume_price: Any = None,
+    sector_context: dict[str, Any] | None = None,
+    market_context: dict[str, Any] | None = None,
+    account_total_asset: float | None = None,
+) -> dict[str, Any]:
+    """Validate the live trigger, observable plan clauses, odds and cap."""
+
+    if plan is None:
+        return {
+            "triggered": None,
+            "risk_reward_passed": None,
+            "risk_reward": None,
+            "position_cap_pct": None,
+            "evidence": [],
+        }
+    current = _safe_float(quote.get("price"))
+    stop = float(plan.final_risk_price or 0)
+    auction = _json_dict(plan.auction_plan)
+    raw_cap = _safe_float(
+        auction.get("max_position_ratio")
+        if auction.get("max_position_ratio") is not None
+        else auction.get("approved_position_cap")
+    )
+    position_cap_pct = None
+    if not is_holding:
+        position_cap_pct = raw_cap * 100 if 0 < raw_cap <= 1 else raw_cap
+        position_cap_pct = max(0.0, min(100.0, position_cap_pct))
+    elif current > 0 and float(account_total_asset or 0) > 0 and int(plan.max_buyback_quantity or 0) > 0:
+        position_cap_pct = min(
+            100.0,
+            int(plan.max_buyback_quantity or 0) * current / float(account_total_asset) * 100,
+        )
+
+    if is_holding:
+        trigger_price = float(plan.buyback_price or 0)
+        price_triggered = bool(
+            current > 0
+            and trigger_price > 0
+            and current <= trigger_price * 1.005
+            and (stop <= 0 or current > stop)
+        )
+        trigger_label = f"买回触发价 {trigger_price:.2f}"
+    else:
+        trigger_price = float(plan.confirm_price or 0)
+        limit_price = float(plan.limit_up_price or auction.get("limit_up_price") or 0)
+        price_triggered = bool(
+            current > 0
+            and trigger_price > 0
+            and current >= trigger_price * 0.997
+            and (limit_price <= 0 or current <= limit_price * 1.001)
+            and (stop <= 0 or current > stop)
+        )
+        trigger_label = f"确认触发价 {trigger_price:.2f}"
+
+    target_candidates = [
+        float(plan.trim_price or 0),
+        float(plan.limit_up_price or auction.get("limit_up_price") or 0),
+    ]
+    target = min((value for value in target_candidates if value > current), default=0.0)
+    risk = current - stop if current > 0 and stop > 0 and current > stop else 0.0
+    reward = target - current if target > current else 0.0
+    risk_reward = reward / risk if risk > 0 and reward > 0 else None
+    risk_reward_passed = bool(risk_reward is not None and risk_reward >= 1.5)
+    conditions_passed, condition_reasons = _entry_plan_conditions(
+        plan,
+        quote,
+        expectation,
+        volume_price,
+        sector_context or {},
+        market_context or {},
+        is_holding=is_holding,
+        risk_reward_passed=risk_reward_passed,
+    )
+    triggered = bool(price_triggered and conditions_passed)
+    evidence = [
+        f"计划实时校验：现价 {current:.2f}，{trigger_label}，风险位 {stop:.2f}。",
+        (
+            f"计划目标位 {target:.2f}，风险收益比 {risk_reward:.2f}（门槛1.50）。"
+            if risk_reward is not None
+            else "计划缺少高于现价的目标位或有效风险位，风险收益比无法通过。"
+        ),
+        *[f"计划条件未通过：{reason}" for reason in condition_reasons],
+    ]
+    return {
+        "triggered": triggered,
+        "risk_reward_passed": risk_reward_passed,
+        "risk_reward": round(risk_reward, 3) if risk_reward is not None else None,
+        "position_cap_pct": position_cap_pct,
+        "evidence": evidence,
+    }
+
+
+def _market_entry_context(db: Session, theme: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+    latest = (
+        db.query(MarketRegimeSnapshot)
+        .order_by(MarketRegimeSnapshot.captured_at.desc(), MarketRegimeSnapshot.id.desc())
+        .first()
+    )
+    if not latest:
+        return (
+            {
+                "entry_gate": "BLOCK",
+                "risk_level": "UNKNOWN",
+                "regime": "MISSING",
+                "data_quality": "missing",
+                "expansion_frozen": True,
+            },
+            {"status": "数据不足"},
+        )
+
+    forbidden = _json_list(latest.forbidden_actions_json)
+    stale = str(latest.trade_date or "") != _today()
+    captured_at = latest.captured_at
+    if captured_at and captured_at.tzinfo is not None:
+        captured_at = shanghai_now_naive(captured_at)
+    snapshot_age_seconds = (
+        (shanghai_now_naive() - captured_at).total_seconds()
+        if captured_at
+        else None
+    )
+    snapshot_expired = bool(
+        snapshot_age_seconds is None
+        or snapshot_age_seconds > timedelta(minutes=15).total_seconds()
+        or snapshot_age_seconds < -60
+    )
+    blocked_regimes = {"EXTREME_SHRINK_DECLINE", "VOLUME_SELL_OFF", "UNKNOWN"}
+    explicit_open_block = any(
+        token in str(item)
+        for item in forbidden
+        for token in ("禁止新开仓", "禁止开仓", "冻结扩仓", "禁止主动扩大仓位")
+    )
+    missing_quality = str(latest.data_quality or "").lower() in {"", "missing", "unavailable"}
+    blocked = stale or snapshot_expired or missing_quality or latest.regime_code in blocked_regimes or explicit_open_block
+    market_context = {
+        "entry_gate": "BLOCK" if blocked else "OPEN_WITH_DISCIPLINE",
+        "risk_level": latest.risk_level,
+        "regime": latest.regime_code,
+        "status": latest.regime_name,
+        "data_quality": "stale" if stale or snapshot_expired else latest.data_quality,
+        "expansion_frozen": blocked,
+        "captured_at": latest.captured_at.isoformat() if latest.captured_at else None,
+        "age_seconds": round(snapshot_age_seconds, 1) if snapshot_age_seconds is not None else None,
+    }
+
+    theme_names = {
+        str(theme.get("industry") or "").strip(),
+        *[str(item).strip() for item in theme.get("concepts", []) if str(item).strip()],
+    }
+    try:
+        strongest_raw = json.loads(latest.strongest_sectors_json or "[]")
+    except Exception:
+        strongest_raw = []
+    try:
+        weakest_raw = json.loads(latest.weakest_sectors_json or "[]")
+    except Exception:
+        weakest_raw = []
+    strongest = strongest_raw if isinstance(strongest_raw, list) else []
+    weakest = weakest_raw if isinstance(weakest_raw, list) else []
+
+    def names(rows: list[Any]) -> set[str]:
+        output: set[str] = set()
+        for row in rows:
+            if isinstance(row, dict):
+                output.add(str(row.get("name") or row.get("sector") or "").strip())
+            else:
+                output.add(str(row).strip())
+        return {item for item in output if item}
+
+    strongest_names = names(strongest)
+    weakest_names = names(weakest)
+    sector_context: dict[str, Any] = {
+        "status": "中性或尚未形成可确认方向",
+        "crowding_evaluated": False,
+        "temperature_data_quality": "missing",
+    }
+    if theme_names & weakest_names:
+        sector_context.update(
+            status="板块资金弱势",
+            flow_turning="OUTFLOW_ACCELERATING",
+        )
+    elif theme_names & strongest_names:
+        sector_context.update(
+            status="板块资金前排",
+            flow_turning="INFLOW_ACCELERATING",
+        )
+
+    matched_temperature: dict[str, Any] | None = None
+    board_types: list[str] = []
+    if str(theme.get("industry") or "").strip():
+        board_types.append("行业")
+    if any(str(item).strip() for item in theme.get("concepts", [])):
+        board_types.append("概念")
+    for board_type in board_types:
+        cached = _get_response_cache(f"sector-temperature|{board_type}")
+        if cached is None:
+            try:
+                # Build the shared five-minute snapshot on demand.  Entry
+                # discipline must not depend on whether the user happened to
+                # open the "冷热拥挤" tab first.
+                from app.api.routes.market import _sector_temperature_snapshot
+
+                cached = _sector_temperature_snapshot(board_type=board_type, force_refresh=False)
+            except Exception:
+                cached = None
+        cached_items = cached.get("items") if isinstance(cached, dict) else getattr(cached, "items", None)
+        for item in cached_items or []:
+            data = item.model_dump() if hasattr(item, "model_dump") else item
+            if not isinstance(data, dict) or str(data.get("name") or "").strip() not in theme_names:
+                continue
+            if matched_temperature is None or int(data.get("heat_score") or 0) > int(matched_temperature.get("heat_score") or 0):
+                matched_temperature = data
+    if matched_temperature:
+        temperature_quality = str(matched_temperature.get("data_quality") or "missing").lower()
+        crowding_evaluated = temperature_quality in {"high", "good"}
+        sector_context.update(
+            status=str(matched_temperature.get("status") or sector_context["status"]),
+            heat_status=str(matched_temperature.get("status") or ""),
+            heat_score=int(matched_temperature.get("heat_score") or 0),
+            flow_turning=matched_temperature.get("flow_turning") or sector_context.get("flow_turning"),
+            margin_score=matched_temperature.get("margin_score"),
+            attention_score=matched_temperature.get("attention_score"),
+            overheated="过热" in str(matched_temperature.get("status") or ""),
+            crowding_evaluated=crowding_evaluated,
+            temperature_data_quality=temperature_quality,
+            provider_trade_date=matched_temperature.get("provider_trade_date"),
+        )
+    return market_context, sector_context
+
+
 def decision_card(db: Session, code: str) -> StockDecisionCardOut:
     from app.api.helpers.quotes import _daily_history_metrics
     from app.services.consensus_risk import build_consensus_risk
@@ -730,6 +1138,52 @@ def decision_card(db: Session, code: str) -> StockDecisionCardOut:
         })
     execution = build_position_execution_state(db, holding, quote=quote, expectation=expectation, volume_price=volume_price, persist=during_market) if holding else None
     t_eligibility = build_t_eligibility(db, holding) if holding else None
+    has_plan, mode_match, entry_plan = _entry_plan_context(db, code, is_holding=bool(holding))
+    if entry_plan and not holding:
+        auction = _json_dict(entry_plan.auction_plan)
+        if not str(theme.get("industry") or "").strip():
+            theme["industry"] = str(auction.get("industry") or "").strip()
+        if not theme.get("concepts"):
+            theme["concepts"] = [str(item) for item in auction.get("concepts", []) if str(item).strip()]
+    market_context, sector_context = _market_entry_context(db, theme)
+    if execution and str(execution.sector_state or "").strip():
+        sector_context["status"] = execution.sector_state
+    plan_execution = _entry_plan_execution_context(
+        entry_plan,
+        quote,
+        is_holding=bool(holding),
+        expectation=expectation,
+        volume_price=volume_price,
+        sector_context=sector_context,
+        market_context=market_context,
+        account_total_asset=(
+            float(holding.total_asset or 0) or _account_total_asset(db)
+            if holding
+            else None
+        ),
+    )
+    entry_discipline = evaluate_entry_gate(
+        code,
+        quote,
+        expectation,
+        volume_price,
+        consensus_risk,
+        sector_context,
+        market_context,
+        is_holding=bool(holding),
+        has_plan=has_plan,
+        mode_match=mode_match,
+        plan_triggered=plan_execution["triggered"],
+        risk_reward_passed=plan_execution["risk_reward_passed"],
+        plan_position_cap_pct=plan_execution["position_cap_pct"],
+        now=now,
+    )
+    if entry_plan:
+        entry_discipline["evidence"] = [
+            f"已读取当日{entry_plan.plan_type}计划，并实时校验触发价、失效位、风险收益与仓位上限。",
+            *plan_execution["evidence"],
+            *entry_discipline.get("evidence", []),
+        ]
     events: list[IntradayEvidenceEventOut] = minute_evidence_timeline(code, name, quote)
     rows = (
         db.query(IntradayEvidenceEvent)
@@ -775,10 +1229,21 @@ def decision_card(db: Session, code: str) -> StockDecisionCardOut:
                 metadata=_json_dict(getattr(row, "metadata_json", "{}")),
             )
         )
-    allowed = ["按计划持有观察"] if not execution else [execution.recommended_action]
-    if t_eligibility and t_eligibility.eligible:
+    gate_open = entry_discipline.get("decision") in {"ALLOW", "ALLOW_SMALL"}
+    allowed = ["只允许观察，不下单"] if not execution else [execution.recommended_action]
+    if gate_open:
+        allowed.append(
+            f"入场纪律通过：限价且仓位不超过{float(entry_discipline.get('allowed_position_ratio') or 0):.0f}%"
+        )
+    if t_eligibility and t_eligibility.eligible and gate_open:
         allowed.append("允许小比例正T")
     forbidden = ["禁止无计划追高", "数据缺口时不生成确定性结论"]
+    if not gate_open:
+        forbidden = [
+            str(entry_discipline.get("label") or "当前禁止买入/加仓"),
+            *[str(item) for item in entry_discipline.get("evidence", [])[:3]],
+            *forbidden,
+        ]
     if t_eligibility and not t_eligibility.eligible:
         forbidden.extend(t_eligibility.forbidden_reasons[:2])
     return StockDecisionCardOut(
@@ -800,4 +1265,5 @@ def decision_card(db: Session, code: str) -> StockDecisionCardOut:
         data_quality="realtime" if quote else "manual",
         consensus_risk=consensus_risk,
         minute_chart=minute_chart,
+        entry_discipline=entry_discipline,
     )

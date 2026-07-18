@@ -769,20 +769,27 @@ class MarketDataProvider:
             raw_items = self._fetch_direct_eastmoney_sector_flow_raw(flow_type=flow_type, period=period)
             _cache_good_flow(cache_key, raw_items, "eastmoney")
         except Exception:
-            try:
-                raw_items = self._fetch_sina_sector_flow_raw(flow_type=flow_type, period="今日")
-                source = "sina"
-                _cache_good_flow(cache_key, raw_items, "sina")
-            except Exception:
+            # Sina only exposes the current snapshot.  Reusing it for a 5/10
+            # day request would fabricate a historical window, so historical
+            # failures may only use a same-period cache or stay unavailable.
+            if period == "今日":
+                try:
+                    raw_items = self._fetch_sina_sector_flow_raw(flow_type=flow_type, period="今日")
+                    source = "sina"
+                    _cache_good_flow(cache_key, raw_items, "sina")
+                except Exception:
+                    raw_items = []
+                    source = "unavailable"
+            else:
+                raw_items = []
+                source = "unavailable"
+            if not raw_items:
                 cached = _get_cached_flow(cache_key)
                 if cached:
                     raw_items, source, data_date = cached
                     if not _is_trading_day():
                         data_date = _last_trading_day()
                     source = f"{source}+cached"
-                else:
-                    raw_items = []
-                    source = "unavailable"
 
         snapshot_recorded = _is_trading_time()
         if snapshot_recorded:
@@ -936,6 +943,7 @@ class MarketDataProvider:
                     change_pct=round(float(raw.get("change_pct") or 0), 2),
                     net_inflow=round(net, 2),
                     main_inflow=round(float(raw.get("main_inflow") or 0), 2),
+                    limit_up_count=int(raw.get("limit_up_count") or 0),
                     strength=max(0, min(100, int(raw.get("strength") or 50))),
                     rank=idx,
                     rank_change=(old_rank - idx) if old_rank is not None else None,
@@ -2025,16 +2033,22 @@ class MarketDataProvider:
     ) -> list[dict[str, Any]]:
         sector_type_map = {"行业资金流": "m:90 s:4", "概念资金流": "m:90 t:3", "地域资金流": "m:90 t:1"}
         indicator_map = {
-            "今日": ("f62", "1", "f62", "f66", "f204", "f3",
+            "今日": ("f62", "1", "f62", "f62", "f204", "f3",
                      "f12,f14,f2,f3,f15,f17,f18,f62,f184,f66,f69,f72,f75,f78,f81,f84,f87,f100,f102,f104,f204,f205,f124,f1,f13"),
-            "5日": ("f164", "5", "f164", "f166", "f257", "f109",
+            "5日": ("f164", "5", "f164", "f164", "f257", "f109",
                      "f12,f14,f2,f100,f102,f104,f109,f164,f165,f166,f167,f168,f169,f170,f171,f172,f173,f257,f258,f124,f1,f13"),
-            "10日": ("f174", "10", "f174", "f176", "f260", "f160",
+            "10日": ("f174", "10", "f174", "f174", "f260", "f160",
                      "f12,f14,f2,f100,f102,f104,f160,f174,f175,f176,f177,f178,f179,f180,f181,f182,f183,f260,f261,f124,f1,f13"),
+        }
+        breakdown_key_map = {
+            "今日": (("f66", "f69"), ("f72", "f75"), ("f78", "f81"), ("f84", "f87")),
+            "5日": (("f166", "f167"), ("f168", "f169"), ("f170", "f171"), ("f172", "f173")),
+            "10日": (("f176", "f177"), ("f178", "f179"), ("f180", "f181"), ("f182", "f183")),
         }
         fid, stat, net_key, main_key, leader_key, change_key, fields = indicator_map.get(
             period, indicator_map["今日"]
         )
+        breakdown_keys = breakdown_key_map.get(period, breakdown_key_map["今日"])
         params = {
             "pn": "1",
             "pz": "100",
@@ -2108,40 +2122,31 @@ class MarketDataProvider:
                 "provider_updated_at": provider_updated_at,
                 "provider_trade_date": provider_trade_date,
                 "latest": _safe_float(row.get("f2")),
-                "high_price": _safe_float(row.get("f15")),
-                "open_price": _safe_float(row.get("f17")),
-                "prev_close": _safe_float(row.get("f18")),
-                "change_pct": _safe_float(row.get("f3")),
+                "high_price": _safe_float(row.get("f15")) if period == "今日" else None,
+                "open_price": _safe_float(row.get("f17")) if period == "今日" else None,
+                "prev_close": _safe_float(row.get("f18")) if period == "今日" else None,
+                # Eastmoney uses a different cumulative change field for every
+                # aggregation window (today=f3, 5d=f109, 10d=f160). Reading f3
+                # unconditionally turns the missing historical field into 0.0
+                # and falsely labels a sector as neutral.
+                "change_pct": _safe_float(row.get(change_key)),
                 "net_inflow": round(_safe_float(row.get(net_key)) / 1e8, 2),
                 "main_inflow": round(_safe_float(row.get(main_key)) / 1e8, 2),
                 "flow_breakdown": [
                     {
-                        "name": "超大单",
-                        "net": round(_safe_float(row.get("f66")) / 1e8, 2),
-                        "ratio": round(_safe_float(row.get("f69")), 2),
-                    },
-                    {
-                        "name": "大单",
-                        "net": round(_safe_float(row.get("f72")) / 1e8, 2),
-                        "ratio": round(_safe_float(row.get("f75")), 2),
-                    },
-                    {
-                        "name": "中单",
-                        "net": round(_safe_float(row.get("f78")) / 1e8, 2),
-                        "ratio": round(_safe_float(row.get("f81")), 2),
-                    },
-                    {
-                        "name": "小单",
-                        "net": round(_safe_float(row.get("f84")) / 1e8, 2),
-                        "ratio": round(_safe_float(row.get("f87")), 2),
-                    },
+                        "name": name,
+                        "net": round(_safe_float(row.get(keys[0])) / 1e8, 2),
+                        "ratio": round(_safe_float(row.get(keys[1])), 2),
+                    }
+                    for name, keys in zip(
+                        ("超大单", "大单", "中单", "小单"),
+                        breakdown_keys,
+                    )
                 ],
                 "strength": max(0, min(100, int(
                     50 + _safe_float(row.get(change_key)) * 8 + _safe_float(row.get(net_key)) / 2e7
                 ))),
                 "leaders": [str(row.get(leader_key) or "待识别")],
-                "change_pct_5": _safe_float(row.get("f109") or row.get("f160")),
-                "net_5d": round(_safe_float(row.get("f164") or row.get("f174")) / 1e8, 2),
                 "limit_up_count": _safe_int(row.get("f100")),
                 "stock_count": _safe_int(row.get("f104")),
                 "avg_change": _safe_float(row.get("f102")),

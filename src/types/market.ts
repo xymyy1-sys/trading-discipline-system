@@ -375,6 +375,7 @@ export interface SectorFlowItem {
   change_pct: number;
   net_inflow: number;
   main_inflow: number;
+  limit_up_count: number;
   strength: number;
   rank: number;
   rank_change: number | null;
@@ -419,6 +420,56 @@ export type SectorFlow = SectorFlowOut;
 export interface BoardFlowPanel extends SectorFlowOut {
   board_type: string;
   period: string;
+  notes: string[];
+}
+
+export interface SectorTemperatureItem {
+  name: string;
+  board_code: string | null;
+  board_type: string;
+  heat_score: number;
+  status: string;
+  risk_level: 'HIGH' | 'MEDIUM' | 'LOW' | 'UNKNOWN';
+  trend_score: number;
+  flow_score: number;
+  crowding_score: number | null;
+  margin_score: number | null;
+  attention_score: number | null;
+  change_pct: number | null;
+  change_pct_5d: number | null;
+  change_pct_10d: number | null;
+  net_inflow: number | null;
+  net_inflow_5d: number | null;
+  net_inflow_10d: number | null;
+  flow_speed: number | null;
+  flow_acceleration: number | null;
+  flow_turning: string | null;
+  provider_trade_date: string | null;
+  provider_updated_at: string | null;
+  limit_up_count: number;
+  financing_balance: number | null;
+  financing_net_buy: number | null;
+  financing_balance_ratio: number | null;
+  financing_net_buy_5d: number | null;
+  financing_net_buy_10d: number | null;
+  financing_net_buy_20d: number | null;
+  margin_as_of: string;
+  margin_realtime: boolean;
+  evidence: string[];
+  counter_evidence: string[];
+  actions: string[];
+  data_quality: string;
+}
+
+export interface SectorTemperatureOut {
+  source: string;
+  updated_at: string;
+  board_type: string;
+  lookback_windows: number[];
+  items: SectorTemperatureItem[];
+  overheated: SectorTemperatureItem[];
+  stabilizing: SectorTemperatureItem[];
+  oversold_watch: SectorTemperatureItem[];
   notes: string[];
 }
 

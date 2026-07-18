@@ -1,3 +1,5 @@
+from concurrent.futures import ThreadPoolExecutor
+
 from fastapi import APIRouter, Depends, Request
 from sqlalchemy.orm import Session
 from app.core.database import get_db
@@ -9,6 +11,7 @@ from app.schemas.trading import (
     HotThemesOut,
     SectorFlowOut,
     SectorDetailOut,
+    SectorTemperatureOut,
     LimitUpAtmosphereOut,
     LimitUpLadderOut,
     ThemeRadarOut,
@@ -21,6 +24,9 @@ from app.schemas.trading import (
     CapitalRotationAssessment,
 )
 from app.services.market_data import MarketDataProvider
+from app.services.sector_margin import fetch_sector_margin
+from app.services.sector_temperature import build_sector_temperature
+from app.services.cache import _get_cached_flow, _get_response_cache, _set_response_cache
 from app.services.market_regime import get_market_regime
 from app.api.helpers.reflexivity import build_market_reflexivity
 from app.services.global_market import global_market_service
@@ -112,6 +118,153 @@ def limit_up_ladder(
         trade_date=trade_date,
         force_refresh=force_refresh,
     )
+
+
+def _sector_temperature_snapshot(
+    board_type: str = "行业",
+    force_refresh: bool = False,
+) -> SectorTemperatureOut:
+    normalized = "概念" if board_type == "概念" else "行业"
+    response_cache_key = f"sector-temperature|{normalized}"
+    if not force_refresh:
+        cached = _get_response_cache(response_cache_key)
+        if cached is not None:
+            return cached
+
+    with ThreadPoolExecutor(max_workers=5) as executor:
+        current_future = executor.submit(market_provider.board_flow_panel, normalized, "今日", force_refresh)
+        five_future = executor.submit(market_provider.board_flow_panel, normalized, "5日", force_refresh)
+        ten_future = executor.submit(market_provider.board_flow_panel, normalized, "10日", force_refresh)
+        margin_future = executor.submit(fetch_sector_margin, normalized, force_refresh)
+        attention_future = executor.submit(market_provider.hot_themes, force_refresh)
+        current = current_future.result()
+        five_day = five_future.result()
+        ten_day = ten_future.result()
+        margin = margin_future.result()
+        try:
+            attention_rows = attention_future.result().items
+        except Exception:
+            attention_rows = []
+
+    attention_by_name: dict[str, dict[str, object]] = {}
+    for row in attention_rows:
+        previous = attention_by_name.get(row.name)
+        score = max(0, 100 - max(0, int(row.rank) - 1) * 3)
+        if previous is None or score > int(previous.get("score") or 0):
+            attention_by_name[row.name] = {
+                "score": score,
+                "rank": row.rank,
+                "period": row.period,
+                "source": row.source,
+            }
+
+    flow_type = market_provider._board_type_to_flow_type(normalized)
+
+    def all_rows(panel, period: str):
+        panel_items = [*panel.inflow, *panel.outflow]
+
+        def item_dict(item):
+            if hasattr(item, "model_dump"):
+                return item.model_dump()
+            if isinstance(item, dict):
+                return dict(item)
+            return dict(vars(item))
+
+        enriched_by_name = {
+            str(getattr(item, "name", "") or "").strip(): item_dict(item)
+            for item in panel_items
+            if str(getattr(item, "name", "") or "").strip()
+        }
+        cached_full = _get_cached_flow(f"{flow_type}|{period}")
+        panel_source = str(panel.source or "")
+        cache_used = "cached" in panel_source.lower()
+        if cached_full and cached_full[0]:
+            # Full raw rows preserve all boards and provider timestamps.  The
+            # panel rows add the real intraday curve-derived speed, acceleration
+            # and turning point for the visible leaders/laggards.  Merge both;
+            # otherwise preferring the raw cache silently drops those kinetics.
+            rows = [
+                {
+                    **raw,
+                    **enriched_by_name.get(str(raw.get("name") or "").strip(), {}),
+                    "_cache_used": cache_used,
+                    "_cache_source": str(cached_full[1] or ""),
+                    "_cache_trade_date": str(cached_full[2] or "")[:10],
+                }
+                for raw in cached_full[0]
+            ]
+            return rows, {
+                "used": cache_used,
+                "source": str(cached_full[1] or ""),
+                "trade_date": str(cached_full[2] or "")[:10],
+            }
+        return [
+            {
+                **item_dict(item),
+                "_cache_used": cache_used,
+                "_cache_source": panel_source,
+                "_cache_trade_date": "",
+            }
+            for item in panel_items
+        ], {"used": cache_used, "source": panel_source, "trade_date": ""}
+
+    current_rows, current_cache = all_rows(current, "今日")
+    five_rows, _ = all_rows(five_day, "5日")
+    ten_rows, _ = all_rows(ten_day, "10日")
+    provider_updates = [
+        str(row.get("provider_updated_at") or "").strip()
+        for row in current_rows
+        if str(row.get("provider_updated_at") or "").strip()
+    ]
+    effective_updated_at = max(provider_updates) if provider_updates else current.updated_at
+
+    result = build_sector_temperature(
+        current_rows,
+        five_rows,
+        ten_rows,
+        margin_by_name=margin.get("items") or {},
+        attention_by_name=attention_by_name,
+        board_type=normalized,
+        updated_at=effective_updated_at,
+    )
+    notes = list(result.get("notes") or [])
+    notes.extend(margin.get("notes") or [])
+    if current_cache["used"]:
+        cache_time = max(provider_updates) if provider_updates else "精确更新时间缺失"
+        cache_date = f"，缓存日期 {current_cache['trade_date']}" if current_cache["trade_date"] else ""
+        notes.append(
+            f"当日板块资金使用 {current_cache['source'] or '未知来源'} 缓存{cache_date}，快照更新时间 {cache_time}。"
+        )
+    result["notes"] = list(dict.fromkeys(notes))
+    current_source = str(current.source or "").lower()
+    cached_suffix = "缓存" if "cached" in current_source else ""
+    fund_source = (
+        f"东方财富板块资金{cached_suffix}"
+        if "eastmoney" in current_source
+        else f"新浪备用板块资金{cached_suffix}"
+        if "sina" in current_source
+        else "板块资金暂不可用"
+    )
+    result["source"] = (
+        f"{fund_source}+东方财富两融T+1"
+        if margin.get("items")
+        else fund_source
+    )
+    validated = SectorTemperatureOut.model_validate(result)
+    _set_response_cache(response_cache_key, validated)
+    return validated
+
+
+@router.get("/market/sector-temperature", response_model=SectorTemperatureOut)
+@limiter.limit("12/minute")
+def sector_temperature(
+    request: Request,
+    board_type: str = "行业",
+    force_refresh: bool = False,
+) -> SectorTemperatureOut:
+    """Combine multi-window real flows with explicitly T+1 crowding data."""
+
+    return _sector_temperature_snapshot(board_type=board_type, force_refresh=force_refresh)
 
 
 @router.get("/market/limit-up-atmosphere", response_model=LimitUpAtmosphereOut)
