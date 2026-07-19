@@ -5892,6 +5892,30 @@ h3 {
 .data-gap-state { margin: 8px 0; padding: 12px; border: 1px dashed var(--ink-muted); border-radius: 8px; background: var(--surface); color: var(--ink-muted); }
 .data-gap-state b { color: var(--ink); }
 .data-gap-state p { margin: 5px 0 0; line-height: 1.55; }
+
+.limit-up-catcher { display: grid; gap: 16px; }
+.limit-up-catcher-header { align-items: flex-start; }
+.limit-up-catcher-header h2 { display: flex; align-items: center; gap: 8px; margin: 5px 0 4px; }
+.limit-up-catcher-header p { max-width: 900px; margin: 0; }
+.limit-up-catcher-criteria,
+.limit-up-catcher-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.limit-up-catcher-criteria span,
+.limit-up-catcher-meta span,
+.limit-up-catcher-meta strong { padding: 7px 10px; border: 1px solid var(--border-dim); border-radius: 7px; background: var(--bg-surface); font-size: 13px; }
+.limit-up-catcher-meta strong { color: var(--info); }
+.limit-up-catcher-table-wrap { max-width: 100%; overflow-x: auto; border: 1px solid var(--border-dim); border-radius: 9px; }
+.limit-up-catcher-table { min-width: 1180px; margin: 0; }
+.limit-up-catcher-table th { white-space: nowrap; }
+.limit-up-refresh-gap { border-color: #d4942f; background: #fff8e8; }
+.limit-up-sort-button { display: inline-flex; align-items: center; justify-content: flex-end; gap: 4px; width: 100%; padding: 0; border: 0; background: transparent; color: inherit; font: inherit; font-weight: 700; cursor: pointer; }
+.limit-up-sort-button:hover { color: var(--info); }
+.limit-up-catcher-empty { padding: 24px; border: 1px dashed var(--border-dim); border-radius: 9px; background: var(--bg-surface); text-align: center; }
+.limit-up-catcher-empty p { margin: 7px 0 0; color: var(--ink-muted); }
+
+@media (max-width: 720px) {
+  .limit-up-catcher-header { gap: 12px; }
+  .limit-up-catcher-header .refresh-btn { width: 100%; justify-content: center; }
+}
 .news-verification-line { display: block; margin-top: 5px; color: #52677a; font-weight: 650; }
 .global-evidence-summary, .opportunity-discipline { margin: 0 0 12px; padding: 10px 12px; border-left: 3px solid var(--accent); background: var(--surface); line-height: 1.6; }
 .global-cue-groups { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }

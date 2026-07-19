@@ -3,7 +3,7 @@ import csv
 import io
 import json
 import re
-from datetime import datetime
+from datetime import datetime, timezone
 from uuid import uuid4
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
@@ -53,7 +53,8 @@ from app.api.helpers.holdings_calc import (
     _holding_out,
     _refresh_holding_prices,
     _rebuild_holdings_from_trades,
-    _holding_account_summary
+    _holding_account_summary,
+    _next_holding_id,
 )
 from app.api.helpers.execution import read_persisted_execution_state, read_persisted_execution_states
 from app.api.helpers.seesaw import _holding_theme_profile, _sector_family
@@ -67,12 +68,14 @@ from app.api.helpers.decision import (
 from app.models.trading import (
     ActionRecommendation,
     ActionRecommendationRevision,
+    HoldingSyncBaseline,
     IntradayCollectionRun,
     IntradayEvidenceEvent,
     PositionExecutionState,
     PositionStateHistory,
     ProfitProtectionSnapshot,
     RecommendationFeedback,
+    NextDayPlan,
     TTradePlan,
     TimeStopRule,
     DataCaptureSnapshot,
@@ -82,6 +85,7 @@ from app.services.intraday_collector import (
     collector_status,
     run_intraday_collection_once,
 )
+from app.api.helpers.quotes import _normalize_code, _quote_code_candidates
 from app.services.recommendation_feedback import (
     rematch_execution_feedback_for_codes,
     resolve_feedback_execution,
@@ -391,8 +395,52 @@ def create_holding(payload: HoldingCreate, db: Session = Depends(get_db)) -> Hol
     account_total_asset = _account_total_asset(db)
     if not data.get("total_asset"):
         data["total_asset"] = account_total_asset
-    holding = Holding(**data)
+    # Never let SQLite reuse a deleted holding id: historical execution and
+    # profit-protection rows deliberately remain available for audit.
+    holding = Holding(id=_next_holding_id(db), **data)
+    normalized_code = _normalize_code(holding.code)
+    code_candidates = set(_quote_code_candidates(holding.code)) | {
+        normalized_code,
+        str(holding.code or "").strip(),
+    }
+    lifecycle_started_at = datetime.now(timezone.utc).replace(tzinfo=None)
+
+    # A manual add is an authoritative opening snapshot for a fresh position
+    # lifecycle.  Replace a zero baseline produced by a sync while the stock
+    # was absent (and any older baseline) so later trade rebuilds restore this
+    # exact snapshot before applying only trades recorded after this boundary.
+    (
+        db.query(HoldingSyncBaseline)
+        .filter(HoldingSyncBaseline.code.in_(list(code_candidates)))
+        .delete(synchronize_session="fetch")
+    )
     db.add(holding)
+    db.add(HoldingSyncBaseline(
+        code=normalized_code,
+        name=holding.name,
+        quantity=max(0, int(holding.quantity or 0)),
+        cost_price=float(holding.cost_price or 0),
+        current_price=float(holding.current_price or holding.cost_price or 0),
+        total_asset=float(holding.total_asset or account_total_asset),
+        position_type=holding.position_type,
+        next_discipline=holding.next_discipline,
+    ))
+    db.add(DataCaptureSnapshot(
+        trade_date=shanghai_today().isoformat(),
+        captured_at=lifecycle_started_at,
+        source="holding-create",
+        data_type="holding_lifecycle_start",
+        target_code=normalized_code,
+        target_name=holding.name,
+        raw_value_json=json.dumps({"holding_id": holding.id}, ensure_ascii=False),
+        normalized_value_json=json.dumps(
+            {"started_at": lifecycle_started_at.isoformat()},
+            ensure_ascii=False,
+        ),
+        quality="manual",
+        is_complete=True,
+        status="active",
+    ))
     db.commit()
     db.refresh(holding)
     return _holding_out(holding, account_total_asset=account_total_asset)
@@ -1101,6 +1149,79 @@ def delete_holding(holding_id: int, db: Session = Depends(get_db)) -> dict[str, 
     holding = db.get(Holding, holding_id)
     if holding is None:
         raise HTTPException(status_code=404, detail="holding not found")
+    normalized_code = _normalize_code(holding.code)
+    code_candidates = set(_quote_code_candidates(holding.code)) | {normalized_code}
+    if normalized_code.lstrip("0"):
+        code_candidates.add(normalized_code.lstrip("0"))
+    # Trade logs use UTC-naive persistence while live recommendations use the
+    # Shanghai wall clock.  Keep both cutoffs explicit so neither comparison is
+    # shifted by eight hours when SQLite drops timezone information.
+    lifecycle_reset_at = datetime.now(timezone.utc).replace(tzinfo=None)
+    deleted_at = shanghai_now_naive()
+
+    # A manual delete is a position lifecycle boundary, not a request to erase
+    # trade history.  Drop the old sync baseline and record an immutable cutoff
+    # so a later "sync from trades" cannot replay trades from the closed
+    # lifecycle into a newly-added position with the same code.
+    (
+        db.query(HoldingSyncBaseline)
+        .filter(HoldingSyncBaseline.code.in_(list(code_candidates)))
+        .delete(synchronize_session=False)
+    )
+    db.add(DataCaptureSnapshot(
+        trade_date=shanghai_today().isoformat(),
+        captured_at=lifecycle_reset_at,
+        source="holding-delete",
+        data_type="holding_lifecycle_reset",
+        target_code=normalized_code,
+        target_name=holding.name,
+        raw_value_json=json.dumps({"holding_id": holding.id}, ensure_ascii=False),
+        normalized_value_json=json.dumps({"deleted_at": lifecycle_reset_at.isoformat()}, ensure_ascii=False),
+        quality="manual",
+        is_complete=True,
+        status="deleted",
+    ))
+
+    # Current/future plans belong to the deleted lifecycle.  Historical plans,
+    # execution states, profit snapshots, recommendations and trades stay in
+    # place as audit evidence; the fresh holding id prevents them reattaching.
+    (
+        db.query(NextDayPlan)
+        .filter(
+            NextDayPlan.plan_type == "holding",
+            NextDayPlan.plan_date >= shanghai_today().isoformat(),
+            or_(
+                NextDayPlan.holding_id == holding_id,
+                NextDayPlan.code.in_(list(code_candidates)),
+            ),
+        )
+        .delete(synchronize_session=False)
+    )
+    # Recommendations remain immutable audit evidence, but an alert for a
+    # position that no longer exists must stop appearing immediately.
+    (
+        db.query(ActionRecommendation)
+        .filter(
+            ActionRecommendation.holding_id == holding_id,
+            ActionRecommendation.expires_at.is_not(None),
+            ActionRecommendation.expires_at >= deleted_at,
+        )
+        .update(
+            {ActionRecommendation.expires_at: deleted_at},
+            synchronize_session=False,
+        )
+    )
+    for plan in (
+        db.query(TTradePlan)
+        .filter(
+            TTradePlan.holding_id == holding_id,
+            TTradePlan.status.in_(("planned", "sold_wait_buyback", "partially_bought_back")),
+        )
+        .all()
+    ):
+        plan.status = "cancelled"
+        plan.execution_note = "持仓已删除，原持仓做T计划自动终止。"
+
     db.delete(holding)
     db.commit()
     return {"status": "deleted"}

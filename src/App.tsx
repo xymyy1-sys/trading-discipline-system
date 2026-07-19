@@ -28,6 +28,7 @@ import TradeLog from './components/TradeLog'
 import MonthlyReview from './components/MonthlyReview'
 import ReviewCalibration from './components/ReviewCalibration'
 import CandidatePool from './components/CandidatePool'
+import LimitUpCatcher from './components/LimitUpCatcher'
 import StrategyTemplates from './components/StrategyTemplates'
 import HistoricalReplay from './components/HistoricalReplay'
 import {
@@ -228,15 +229,15 @@ function StockSelectionWorkspace() {
     <WorkspacePage
       title="选股中心"
       subtitle="盘前发现与观察池管理"
-      objective="从主线、题材强度、订单流方向与涨停质量中发现新标的，形成少而精的观察池。"
+      objective="从主线、题材强度、订单流方向与盘中动能中发现新标的，形成少而精的观察池。"
       allowed={['主线前排', '订单流与价格确认', '量价健康', '预期差不为负']}
       forbidden={['后排跟风', '数据质量不合格', '高位巨量滞涨', '板块订单流方向持续转弱']}
       modules={[
-        { key: 'candidates', label: '自动观察池', description: '主线、涨停质量、订单流方向与风险综合推荐', Component: CandidatePool },
+        { key: 'candidates', label: '自动观察池', description: '主线、封板结构、订单流方向与风险综合推荐', Component: CandidatePool },
         { key: 'intel', label: '行业要闻', description: '东方财富、央视及行业资讯原文与市场验证', Component: IntelDesk },
         { key: 'radar', label: '主线题材', description: '主线强度、共振方向、核心股', Component: Dashboard },
         { key: 'flow', label: '订单流证据', description: '板块订单流方向拐点、排名与强弱', Component: FlowDesk },
-        { key: 'ladder', label: '涨停质量', description: '查看打板氛围摘要并进入唯一的完整天梯', Component: LimitUpQualityShortcut },
+        { key: 'catcher', label: '抓涨停', description: '量比、涨幅、换手率与分时均价共振候选', Component: LimitUpCatcher },
         { key: 'card', label: '个股研判', description: '预期、实际、事件与失效条件', Component: DecisionCard },
       ]}
     />
@@ -323,19 +324,6 @@ function BrandIcon() {
       <path className="brand-bars" d="M15 27v6M24 23v10M33 16v17" />
     </svg>
   </span>
-}
-
-function LimitUpQualityShortcut() {
-  return (
-    <section className="panel ladder-shortcut-panel">
-      <div>
-        <span className="eyebrow">唯一数据入口</span>
-        <h2>完整涨停天梯已归入“打板预期”</h2>
-        <p>选股中心只把涨停质量作为观察池的一项证据，不再重复加载整套天梯。连板高度、题材梯队、封板质量和打板预案统一在打板预期查看。</p>
-      </div>
-      <button type="button" onClick={() => window.dispatchEvent(new CustomEvent('nav', { detail: '打板预期' }))}>进入打板预期</button>
-    </section>
-  )
 }
 
 function Metric({ label, value, tone }: { label: string; value: string; tone: 'neutral' | 'muted' }) {

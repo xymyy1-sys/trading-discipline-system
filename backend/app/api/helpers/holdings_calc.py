@@ -1,7 +1,20 @@
 from datetime import datetime, time, timezone
 from typing import Any
+from sqlalchemy import func
 from sqlalchemy.orm import Session
-from app.models.trading import AccountState, Holding, HoldingSyncBaseline, TradeLog
+from app.models.trading import (
+    AccountState,
+    ActionRecommendation,
+    DataCaptureSnapshot,
+    Holding,
+    HoldingSyncBaseline,
+    NextDayPlan,
+    PositionExecutionState,
+    PositionStateHistory,
+    ProfitProtectionSnapshot,
+    TTradePlan,
+    TradeLog,
+)
 from app.core.trading_clock import shanghai_day_bounds_utc_naive
 from app.schemas.trading import HoldingOut
 from app.services.rules import profit_guard_price
@@ -52,6 +65,71 @@ def _find_holding_sync_baseline(db: Session, code: str) -> HoldingSyncBaseline |
         candidates.append(stripped)
     return db.query(HoldingSyncBaseline).filter(HoldingSyncBaseline.code.in_(candidates)).first()
 
+
+def _next_holding_id(db: Session) -> int:
+    """Allocate an identity that cannot reconnect a new position to old state.
+
+    SQLite may reuse the largest deleted integer primary key.  Holding-derived
+    state is intentionally retained for audit, so reusing that key would make a
+    newly opened position inherit the old execution state and profit peak.
+    Include every historical holding reference when choosing the next id.
+    """
+
+    columns = (
+        Holding.id,
+        PositionExecutionState.holding_id,
+        PositionStateHistory.holding_id,
+        ProfitProtectionSnapshot.holding_id,
+        NextDayPlan.holding_id,
+        TTradePlan.holding_id,
+        ActionRecommendation.holding_id,
+    )
+    maxima = [db.query(func.max(column)).scalar() or 0 for column in columns]
+    pending_ids = [
+        int(row.id)
+        for row in db.new
+        if isinstance(row, Holding) and row.id is not None
+    ]
+    return max([0, *[int(value) for value in maxima], *pending_ids]) + 1
+
+
+def _holding_reset_at(db: Session, code: str) -> datetime | None:
+    """Return the latest explicit position-lifecycle boundary for ``code``.
+
+    Both a manual deletion and a later manual re-addition start a new replay
+    window.  Reading only deletion markers would let trades entered between
+    those two user actions be applied on top of the newly entered manual
+    snapshot.
+    """
+
+    candidates = set(_quote_code_candidates(code)) | {_normalize_code(code)}
+    return (
+        db.query(DataCaptureSnapshot.captured_at)
+        .filter(
+            DataCaptureSnapshot.data_type.in_((
+                "holding_lifecycle_reset",
+                "holding_lifecycle_start",
+            )),
+            DataCaptureSnapshot.target_code.in_(list(candidates)),
+        )
+        .order_by(DataCaptureSnapshot.captured_at.desc(), DataCaptureSnapshot.id.desc())
+        .limit(1)
+        .scalar()
+    )
+
+
+def _after_holding_reset(trade: TradeLog, reset_at: datetime | None) -> bool:
+    if reset_at is None:
+        return True
+    traded_at = trade.traded_at
+    if traded_at is None:
+        return False
+    if traded_at.tzinfo is not None:
+        traded_at = traded_at.astimezone(timezone.utc).replace(tzinfo=None)
+    if reset_at.tzinfo is not None:
+        reset_at = reset_at.astimezone(timezone.utc).replace(tzinfo=None)
+    return traded_at > reset_at
+
 def _ensure_holding_sync_baselines(db: Session, codes: set[str]) -> None:
     for code in {_normalize_code(item) for item in codes if item}:
         if _find_holding_sync_baseline(db, code):
@@ -70,11 +148,22 @@ def _ensure_holding_sync_baselines(db: Session, codes: set[str]) -> None:
         db.add(baseline)
     db.flush()
 
-def _restore_holding_from_baseline(baseline: HoldingSyncBaseline, db: Session) -> None:
+def _restore_holding_from_baseline(
+    baseline: HoldingSyncBaseline,
+    db: Session,
+    *,
+    holding_id: int | None = None,
+) -> None:
     if int(baseline.quantity or 0) <= 0:
         return
     db.add(
         Holding(
+            # A trade-led rebuild is not a new position lifecycle.  Reuse the
+            # identity captured before the rebuild so execution state, profit
+            # protection and current plans remain attached.  A genuinely new
+            # lifecycle (there is no current row after a manual delete) still
+            # receives a fresh identity.
+            id=holding_id if holding_id is not None else _next_holding_id(db),
             code=baseline.code,
             name=baseline.name,
             quantity=int(baseline.quantity or 0),
@@ -86,10 +175,25 @@ def _restore_holding_from_baseline(baseline: HoldingSyncBaseline, db: Session) -
         )
     )
 
-def _apply_trade_to_holding(trade: TradeLog, db: Session, reverse: bool = False) -> None:
-    _apply_trade_effect_to_holding(_trade_effect_data(trade), db, reverse=reverse)
+def _apply_trade_to_holding(
+    trade: TradeLog,
+    db: Session,
+    reverse: bool = False,
+    preferred_holding_ids: dict[str, int] | None = None,
+) -> None:
+    _apply_trade_effect_to_holding(
+        _trade_effect_data(trade),
+        db,
+        reverse=reverse,
+        preferred_holding_ids=preferred_holding_ids,
+    )
 
-def _apply_trade_effect_to_holding(data: dict[str, Any], db: Session, reverse: bool = False) -> None:
+def _apply_trade_effect_to_holding(
+    data: dict[str, Any],
+    db: Session,
+    reverse: bool = False,
+    preferred_holding_ids: dict[str, int] | None = None,
+) -> None:
     direction = _trade_position_direction(str(data.get("side") or ""))
     if direction == 0:
         return
@@ -110,7 +214,9 @@ def _apply_trade_effect_to_holding(data: dict[str, Any], db: Session, reverse: b
 
     if qty_delta > 0:
         if holding is None:
+            preferred_id = (preferred_holding_ids or {}).get(_normalize_code(code))
             holding = Holding(
+                id=preferred_id if preferred_id is not None else _next_holding_id(db),
                 code=code,
                 name=name,
                 quantity=qty_delta,
@@ -157,7 +263,13 @@ def _rebuild_holdings_from_trades(trades: list[TradeLog], db: Session, reset_cod
         return ["没有可同步的买入/卖出/加仓/减仓交易记录。"]
     _ensure_holding_sync_baselines(db, trade_codes)
     lookup_codes = list(trade_codes | {code.lstrip("0") for code in trade_codes if code.lstrip("0")})
-    for holding in db.query(Holding).filter(Holding.code.in_(lookup_codes)).all():
+    current_holdings = db.query(Holding).filter(Holding.code.in_(lookup_codes)).all()
+    current_ids = {
+        _normalize_code(holding.code): int(holding.id)
+        for holding in current_holdings
+        if holding.id is not None
+    }
+    for holding in current_holdings:
         db.delete(holding)
     db.flush()
     baselines = [
@@ -166,11 +278,22 @@ def _rebuild_holdings_from_trades(trades: list[TradeLog], db: Session, reset_cod
         if _normalize_code(item.code) in trade_codes
     ]
     for baseline in baselines:
-        _restore_holding_from_baseline(baseline, db)
+        normalized_code = _normalize_code(baseline.code)
+        _restore_holding_from_baseline(
+            baseline,
+            db,
+            holding_id=current_ids.get(normalized_code),
+        )
     db.flush()
+    reset_by_code = {code: _holding_reset_at(db, code) for code in trade_codes}
     for trade in trades:
-        if _normalize_code(trade.code) in trade_codes:
-            _apply_trade_to_holding(trade, db)
+        normalized_code = _normalize_code(trade.code)
+        if normalized_code in trade_codes and _after_holding_reset(trade, reset_by_code.get(normalized_code)):
+            _apply_trade_to_holding(
+                trade,
+                db,
+                preferred_holding_ids=current_ids,
+            )
     db.commit()
     baseline_count = sum(1 for item in baselines if int(item.quantity or 0) > 0)
     return [

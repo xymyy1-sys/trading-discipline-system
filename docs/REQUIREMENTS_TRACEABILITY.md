@@ -15,6 +15,8 @@ This matrix is derived from all three supplied requirement documents. A feature 
 | Recommendation feedback | one current recommendation per stock/day, immutable material revisions, revision-scoped/idempotent feedback, direction/time/quantity trade matching and de-duplicated review statistics |
 | Capital migration | multi-evidence weighted confirmation and `/api/market/capital-rotation` |
 | Candidate pools | evidence-based A/B/C/D classification |
+| Limit-up catcher | Real Eastmoney full-A scan with strict volume-ratio/change/turnover/intraday-average filters, explicit refresh, completeness gates, cache preservation and sortable numeric columns |
+| Holding lifecycle deletion | Deletion reset boundary, sync-baseline removal, fresh non-reused holding identity, current-plan/alert cancellation, retained historical audit evidence and stable identity during ordinary trade resync |
 | Trading scripts | 12 seeded editable and versioned templates |
 | Replay and calibration | persisted replay, effectiveness APIs, sample gates and 600584 acceptance checkpoints |
 | Governed parameter calibration | 20-sample and 45%-deviation gates, field-level proposal, explicit confirmation, persisted before/after snapshots and one-click rollback |

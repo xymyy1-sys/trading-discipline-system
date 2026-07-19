@@ -94,6 +94,6 @@ export default function CandidatePool() {
       {item.risks.slice(0, 3).map(reason => <p className="candidate-negative" key={reason}>- {chineseEvidence(reason)}</p>)}
       {item.missing_conditions.slice(0, 3).map(reason => <p className="candidate-negative" key={`gate-${reason}`}>待补：{reason}</p>)}
     </article>)}</div>
-    {!loading && !recommendations.length && !error && <p className="plain-text">当前主线与涨停质量没有产生合格的新观察标的，不用为了凑数量强行入池。</p>}
+    {!loading && !recommendations.length && !error && <p className="plain-text">当前主线、封板结构与盘中量价没有产生合格的新观察标的，不用为了凑数量强行入池。</p>}
   </section>
 }

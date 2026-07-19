@@ -1890,6 +1890,40 @@ class LimitUpLadderOut(BaseModel):
     notes: list[str] = Field(default_factory=list)
 
 
+class LimitUpCatcherCriteria(BaseModel):
+    volume_ratio_min: float = 3
+    change_pct_min: float = 0
+    change_pct_max: float = 5
+    turnover_rate_min: float = 3
+    turnover_rate_max: float = 8
+    above_intraday_average: bool = True
+
+
+class LimitUpCatcherItem(BaseModel):
+    code: str
+    name: str
+    volume_ratio: float
+    change_pct: float
+    turnover_rate: float
+    price: float
+    intraday_average: float
+    average_deviation_pct: float
+    source: str
+    updated_at: datetime
+
+
+class LimitUpCatcherOut(BaseModel):
+    source: str
+    updated_at: datetime
+    trade_date: str | None = None
+    data_status: Literal["ok", "data_gap"]
+    criteria: LimitUpCatcherCriteria = Field(default_factory=LimitUpCatcherCriteria)
+    items: list[LimitUpCatcherItem] = Field(default_factory=list)
+    total_scanned: int = 0
+    matched_count: int = 0
+    notes: list[str] = Field(default_factory=list)
+
+
 class LimitUpAtmosphereMetrics(BaseModel):
     limit_up_count: int = 0
     limit_down_count: int | None = None

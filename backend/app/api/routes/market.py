@@ -14,6 +14,8 @@ from app.schemas.trading import (
     SectorTemperatureOut,
     LimitUpAtmosphereOut,
     LimitUpAtmosphereMetrics,
+    LimitUpCatcherCriteria,
+    LimitUpCatcherOut,
     LimitUpLadderOut,
     ThemeRadarOut,
     MarketGradeOut,
@@ -209,6 +211,31 @@ def refresh_sector_detail(
         provider=provider,
         force_refresh=True,
     )
+
+
+@router.get("/market/limit-up-catcher", response_model=LimitUpCatcherOut)
+@limiter.limit("20/minute")
+def limit_up_catcher(request: Request) -> LimitUpCatcherOut:
+    """Read the last explicitly collected real full-market screen."""
+
+    cached = _get_response_cache("limit-up-catcher", allow_stale=True)
+    return cached or LimitUpCatcherOut(
+        source="cache-unavailable",
+        updated_at=shanghai_now_naive(),
+        data_status="data_gap",
+        criteria=LimitUpCatcherCriteria(),
+        items=[],
+        notes=[_cache_miss_note("抓涨停")],
+    )
+
+
+@router.post("/market/limit-up-catcher/refresh", response_model=LimitUpCatcherOut)
+@limiter.limit("4/minute")
+def refresh_limit_up_catcher(request: Request) -> LimitUpCatcherOut:
+    """Explicitly collect and screen real Eastmoney full-market quotes."""
+
+    return market_provider.limit_up_catcher(force_refresh=True)
+
 
 @router.get("/market/limit-up-ladder", response_model=LimitUpLadderOut)
 @limiter.limit("20/minute")

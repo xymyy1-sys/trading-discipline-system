@@ -19,6 +19,9 @@ from app.schemas.trading import (
     LimitUpGroupOut,
     LimitUpAtmosphereMetrics,
     LimitUpAtmosphereOut,
+    LimitUpCatcherCriteria,
+    LimitUpCatcherItem,
+    LimitUpCatcherOut,
     LimitUpIdentityRoleOut,
     LimitUpLadderOut,
     LimitUpStockOut,
@@ -35,6 +38,11 @@ from app.schemas.trading import (
 import requests
 
 _DARK_TRADE_LAST_GOOD: dict[str, DarkTradeOut] = {}
+_EASTMONEY_HOSTS = (
+    "https://push2.eastmoney.com",
+    "https://push2ex.eastmoney.com",
+    "https://push2delay.eastmoney.com",
+)
 
 from app.services.cache import (
     _get_response_cache,
@@ -136,6 +144,42 @@ def _safe_int(value: Any, default: int = 0) -> int:
         return int(float(value))
     except (TypeError, ValueError):
         return default
+
+
+def _get_json_from_hosts(
+    path: str,
+    params: dict[str, Any],
+    timeout: int = 8,
+) -> tuple[dict[str, Any], str]:
+    """Read an Eastmoney JSON endpoint with its real host fallbacks.
+
+    The helper deliberately rejects responses without a ``data`` payload so a
+    provider outage cannot be mistaken for a valid empty market snapshot.
+    """
+
+    last_error: Exception | None = None
+    headers = {
+        "User-Agent": "Mozilla/5.0",
+        "Referer": "https://quote.eastmoney.com/",
+        "Accept": "application/json,text/plain,*/*",
+    }
+    for host in _EASTMONEY_HOSTS:
+        try:
+            response = requests.get(
+                f"{host}{path}",
+                params=params,
+                headers=headers,
+                timeout=timeout,
+            )
+            response.raise_for_status()
+            payload = response.json()
+            if payload.get("data") is not None:
+                return payload, host
+        except Exception as exc:
+            last_error = exc
+    if last_error is not None:
+        raise last_error
+    raise ValueError("empty Eastmoney response")
 
 def _money_yuan_to_yi(value: Any) -> float:
     return round(_safe_float(value) / 1e8, 2)
@@ -1375,6 +1419,186 @@ class MarketDataProvider:
         )
         _set_response_cache(cache_key, result)
         return result
+
+    def limit_up_catcher(self, force_refresh: bool = False) -> LimitUpCatcherOut:
+        """Screen the full real A-share quote universe for early momentum.
+
+        The intraday average is the cumulative amount-weighted average price
+        derived from Eastmoney's real cumulative amount and volume fields.  A
+        provider failure or materially incomplete pagination is returned as an
+        explicit data gap and is never cached as a legitimate empty result.
+        """
+
+        cache_key = "limit-up-catcher"
+        if not force_refresh:
+            cached = _get_response_cache(cache_key)
+            if cached is not None:
+                return cached
+
+        criteria = LimitUpCatcherCriteria()
+        captured_at = _shanghai_now_naive()
+        try:
+            rows, source, provider_updated_at, total_scanned = self._fetch_limit_up_catcher_rows()
+        except Exception as exc:
+            return LimitUpCatcherOut(
+                source="eastmoney-unavailable",
+                updated_at=captured_at,
+                data_status="data_gap",
+                criteria=criteria,
+                items=[],
+                total_scanned=0,
+                matched_count=0,
+                notes=[
+                    f"东方财富全A实时行情采集失败：{exc.__class__.__name__}。",
+                    "未生成模拟股票；请稍后点击刷新，已有最后成功快照不被本次失败覆盖。",
+                ],
+            )
+
+        items: list[LimitUpCatcherItem] = []
+        for row in rows:
+            price = _safe_float(row.get("f2"))
+            change_pct = _safe_float(row.get("f3"))
+            volume_lots = _safe_float(row.get("f5"))
+            amount_yuan = _safe_float(row.get("f6"))
+            turnover_rate = _safe_float(row.get("f8"))
+            volume_ratio = _safe_float(row.get("f10"))
+            if price <= 0 or volume_lots <= 0 or amount_yuan <= 0:
+                continue
+            intraday_average = amount_yuan / (volume_lots * 100)
+            if intraday_average <= 0:
+                continue
+            if not (
+                volume_ratio > criteria.volume_ratio_min
+                and criteria.change_pct_min < change_pct <= criteria.change_pct_max
+                and criteria.turnover_rate_min <= turnover_rate <= criteria.turnover_rate_max
+                and price > intraday_average
+            ):
+                continue
+
+            timestamp = _safe_int(row.get("f124"))
+            item_updated_at = provider_updated_at
+            if timestamp > 0:
+                try:
+                    item_updated_at = datetime.fromtimestamp(
+                        timestamp,
+                        ZoneInfo("Asia/Shanghai"),
+                    ).replace(tzinfo=None)
+                except (OverflowError, OSError, ValueError):
+                    pass
+            items.append(
+                LimitUpCatcherItem(
+                    code=str(row.get("f12") or "").zfill(6),
+                    name=str(row.get("f14") or "").strip(),
+                    volume_ratio=round(volume_ratio, 2),
+                    change_pct=round(change_pct, 2),
+                    turnover_rate=round(turnover_rate, 2),
+                    price=round(price, 3),
+                    intraday_average=round(intraday_average, 3),
+                    average_deviation_pct=round((price / intraday_average - 1) * 100, 2),
+                    source=source,
+                    updated_at=item_updated_at,
+                )
+            )
+
+        items.sort(
+            key=lambda item: (item.volume_ratio, item.average_deviation_pct, item.turnover_rate),
+            reverse=True,
+        )
+        result = LimitUpCatcherOut(
+            source=source,
+            updated_at=provider_updated_at,
+            trade_date=provider_updated_at.date().isoformat(),
+            data_status="ok",
+            criteria=criteria,
+            items=items,
+            total_scanned=total_scanned,
+            matched_count=len(items),
+            notes=[
+                "筛选口径：量比>3、0<涨幅<=5%、3%<=换手率<=8%、现价高于真实累计成交均价。",
+                "分时均价按东方财富累计成交额/(累计成交量×100股)计算，不使用模拟分时数据。",
+            ] + (["当前真实全A行情中没有同时满足全部条件的股票。"] if not items else []),
+        )
+        _set_response_cache(cache_key, result)
+        return result
+
+    def _fetch_limit_up_catcher_rows(
+        self,
+    ) -> tuple[list[dict[str, Any]], str, datetime, int]:
+        params: dict[str, Any] = {
+            "pn": "1",
+            "pz": "100",
+            "po": "1",
+            "np": "1",
+            "ut": "8dec03ba335b81bf4ebdf7b29ec27d15",
+            "fltt": "2",
+            "invt": "2",
+            "fid": "f10",
+            "fs": "m:0+t:6,m:0+t:80,m:1+t:2,m:1+t:23,m:0+t:81+s:2048",
+            "fields": "f12,f13,f14,f2,f3,f5,f6,f8,f10,f124",
+        }
+        payload, host = _get_json_from_hosts("/api/qt/clist/get", params, timeout=10)
+        data = payload.get("data") or {}
+        first_page = list(data.get("diff") or [])
+        if not first_page:
+            raise ValueError("empty full-market quote page")
+        raw_total = data.get("total")
+        if raw_total in (None, "", "-", "--"):
+            raise ValueError("full-market quote total is missing")
+        total = _safe_int(raw_total)
+        if total < 4_000:
+            raise ValueError(f"implausible full-market quote total: {total}")
+        page_size = len(first_page)
+        rows = list(first_page)
+        page_count = (total + page_size - 1) // page_size if page_size else 1
+
+        def fetch_page(page: int) -> tuple[int, list[dict[str, Any]]]:
+            page_payload, _ = _get_json_from_hosts(
+                "/api/qt/clist/get",
+                {**params, "pn": str(page), "pz": str(page_size)},
+                timeout=10,
+            )
+            return page, list(((page_payload.get("data") or {}).get("diff") or []))
+
+        if page_count > 1:
+            page_rows: dict[int, list[dict[str, Any]]] = {}
+            with ThreadPoolExecutor(max_workers=8) as executor:
+                futures = [executor.submit(fetch_page, page) for page in range(2, page_count + 1)]
+                for future in as_completed(futures):
+                    page, values = future.result()
+                    page_rows[page] = values
+            for page in range(2, page_count + 1):
+                rows.extend(page_rows.get(page, []))
+
+        deduplicated: dict[tuple[str, str], dict[str, Any]] = {}
+        for row in rows:
+            code = str(row.get("f12") or "").strip()
+            market = str(row.get("f13") or "").strip()
+            name = str(row.get("f14") or "").strip()
+            if code and name:
+                deduplicated[(market, code)] = row
+
+        expected = max(total, len(first_page))
+        coverage = len(deduplicated) / expected if expected else 0
+        missing_count = max(0, expected - len(deduplicated))
+        if coverage < 0.995 or missing_count > 20:
+            raise ValueError(
+                "incomplete full-market pagination: "
+                f"{len(deduplicated)}/{expected}, missing={missing_count}"
+            )
+
+        timestamps = [_safe_int(row.get("f124")) for row in deduplicated.values()]
+        latest_timestamp = max((value for value in timestamps if value > 0), default=0)
+        updated_at = _shanghai_now_naive()
+        if latest_timestamp:
+            try:
+                updated_at = datetime.fromtimestamp(
+                    latest_timestamp,
+                    ZoneInfo("Asia/Shanghai"),
+                ).replace(tzinfo=None)
+            except (OverflowError, OSError, ValueError):
+                pass
+        source = f"eastmoney-all-a@{host.split('//')[-1]}"
+        return list(deduplicated.values()), source, updated_at, len(deduplicated)
 
     def limit_up_ladder(self, trade_date: str | None = None, force_refresh: bool = False) -> LimitUpLadderOut:
         """Return a dated real limit-up pool.

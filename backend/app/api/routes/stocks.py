@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session
 
 from app.api.helpers.execution import build_position_execution_state
 from app.api.helpers.holdings_calc import _find_holding_by_code
+from app.api.helpers.quotes import _normalize_code
 from app.api.helpers.decision import (
     _event_in_trade_session,
     _expectation_out,
@@ -873,14 +874,27 @@ def list_candidates(db: Session = Depends(get_db)) -> list[CandidateOut]:
     targets: dict[str, str] = {}
     for row in db.query(NextDayPlan).order_by(NextDayPlan.updated_at.desc()).limit(300).all():
         targets.setdefault(row.code, row.name)
-    for row in db.query(Holding).all():
+    current_holdings = db.query(Holding).all()
+    current_holding_by_code = {
+        _normalize_code(row.code): row
+        for row in current_holdings
+    }
+    for row in current_holdings:
         targets.setdefault(row.code, row.name)
 
     outputs: list[CandidateOut] = []
     for code, name in targets.items():
         expectation = db.query(ExpectationSnapshot).filter(ExpectationSnapshot.code == code).order_by(ExpectationSnapshot.created_at.desc()).first()
         volume = db.query(VolumePriceSnapshot).filter(VolumePriceSnapshot.code == code).order_by(VolumePriceSnapshot.captured_at.desc()).first()
-        execution = db.query(PositionExecutionState).filter(PositionExecutionState.code == code).order_by(PositionExecutionState.updated_at.desc()).first()
+        current_holding = current_holding_by_code.get(_normalize_code(code))
+        execution = (
+            db.query(PositionExecutionState)
+            .filter(PositionExecutionState.holding_id == int(current_holding.id))
+            .order_by(PositionExecutionState.updated_at.desc(), PositionExecutionState.id.desc())
+            .first()
+            if current_holding is not None and current_holding.id is not None
+            else None
+        )
         score = 50
         reasons: list[str] = []
         exclusions: list[str] = []
@@ -1166,11 +1180,21 @@ def get_stock_timeline(code: str, db: Session = Depends(get_db)) -> list[Intrada
 @router.get("/stocks/{code}/intraday-review", response_model=IntradayReviewOut)
 def get_stock_intraday_review(code: str, db: Session = Depends(get_db)) -> IntradayReviewOut:
     holding = _find_holding_by_code(db, code)
+    state_query = db.query(PositionExecutionState)
+    if holding is not None and holding.id is not None:
+        # A re-added stock starts a new holding lifecycle.  Historical states
+        # for the same code remain auditable, but must never become the new
+        # position's current intraday review merely because their timestamp is
+        # newer than the first snapshot of the fresh holding.
+        state_query = state_query.filter(PositionExecutionState.holding_id == int(holding.id))
+    else:
+        state_query = state_query.filter(
+            PositionExecutionState.code.in_([code, code.lstrip("0")])
+        )
     latest_state = (
-            db.query(PositionExecutionState)
-            .filter(PositionExecutionState.code.in_([code, code.lstrip("0")]))
-            .order_by(PositionExecutionState.updated_at.desc(), PositionExecutionState.id.desc())
-            .first()
+        state_query
+        .order_by(PositionExecutionState.updated_at.desc(), PositionExecutionState.id.desc())
+        .first()
     )
     capture = (
         db.query(DataCaptureSnapshot)

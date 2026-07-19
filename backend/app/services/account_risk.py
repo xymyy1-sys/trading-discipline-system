@@ -1,7 +1,7 @@
 from sqlalchemy.orm import Session
 
 from app.core.trading_clock import shanghai_day_bounds_utc_naive, shanghai_today
-from app.models.trading import AccountDailyRisk, AccountState, PositionExecutionState, TradeLog
+from app.models.trading import AccountDailyRisk, AccountState, Holding, PositionExecutionState, TradeLog
 from app.schemas.trading import AccountRiskIn, AccountRiskOut
 
 RISK_STATES = {"REDUCE_REQUIRED", "EXIT_REQUIRED", "STOP_LOSS_WARNING", "EXPECTATION_INVALIDATED"}
@@ -41,11 +41,21 @@ def account_risk(db: Session, payload: AccountRiskIn | None = None) -> AccountRi
         current_asset = float(row.current_asset or 0)
         updated_at = row.updated_at
 
-    states = db.query(PositionExecutionState).filter(PositionExecutionState.trade_date == trade_date).all()
-    latest_by_code = {}
+    current_holding_ids = [int(row[0]) for row in db.query(Holding.id).all()]
+    states = (
+        db.query(PositionExecutionState)
+        .filter(
+            PositionExecutionState.trade_date == trade_date,
+            PositionExecutionState.holding_id.in_(current_holding_ids),
+        )
+        .all()
+        if current_holding_ids
+        else []
+    )
+    latest_by_holding = {}
     for state in sorted(states, key=lambda item: (item.updated_at, item.id), reverse=True):
-        latest_by_code.setdefault(state.code, state)
-    degraded = sum(item.state in RISK_STATES for item in latest_by_code.values())
+        latest_by_holding.setdefault(int(state.holding_id), state)
+    degraded = sum(item.state in RISK_STATES for item in latest_by_holding.values())
     day_start, day_end = shanghai_day_bounds_utc_naive()
     trades = db.query(TradeLog).filter(
         TradeLog.traded_at >= day_start,

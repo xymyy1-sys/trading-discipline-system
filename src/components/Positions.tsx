@@ -220,6 +220,12 @@ export default function Positions({ mode = 'overview' }: { mode?: 'overview' | '
     setShowForm(false)
   }
 
+  const startCreate = () => {
+    // Opening "add" must never reuse an edit draft from a deleted holding.
+    resetForm()
+    setShowForm(true)
+  }
+
   const saveAccountAsset = () => {
     setAssetSaving(true)
     setAssetMessage('')
@@ -279,7 +285,11 @@ export default function Positions({ mode = 'overview' }: { mode?: 'overview' | '
   const deleteHolding = (h: Holding) => {
     if (!window.confirm(`确认删除持仓 ${h.name}？`)) return
     fetch(`${API_BASE}/api/holdings/${h.id}`, { method: 'DELETE' })
-      .then(() => fetchHoldings())
+      .then(response => {
+        if (!response.ok) throw new Error('删除持仓失败')
+        if (editingId === h.id) resetForm()
+        return fetchHoldings()
+      })
       .catch(() => {})
   }
 
@@ -481,7 +491,7 @@ export default function Positions({ mode = 'overview' }: { mode?: 'overview' | '
             <RefreshCcw size={16} />
             {syncing ? '同步中' : '同步交易记录'}
           </button>
-          <button className="grade-btn" onClick={() => showForm ? resetForm() : setShowForm(true)}>
+          <button className="grade-btn" onClick={() => showForm ? resetForm() : startCreate()}>
             {showForm ? <X size={16} /> : <Plus size={16} />}
             {showForm ? '取消' : '添加持仓'}
           </button>
