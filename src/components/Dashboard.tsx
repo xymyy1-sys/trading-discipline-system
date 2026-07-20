@@ -88,6 +88,7 @@ export default function Dashboard() {
       : '同步中'
 
   const topThemes = radar?.themes.slice(0, 12) ?? []
+  const strongestBoardCount = radar?.strongest_theme?.related_boards?.length ?? 0
 
   return (
     <div className="theme-radar trading-desk-page">
@@ -115,17 +116,22 @@ export default function Dashboard() {
       </section>
 
       <section className="radar-pulse-strip">
-        <Signal label="市场温度" value={radar?.market_temperature ?? '--'} icon={<Flame size={16} />} />
-        <Signal label="最强题材分" value={radar?.strongest_theme ? `${radar.strongest_theme.score}` : '--'} icon={<Activity size={16} />} />
-        <Signal label="题材订单流净额" value={radar?.strongest_theme ? `${fmtSigned(radar.strongest_theme.net_inflow)}亿` : '--'} icon={<TrendingUp size={16} />} tone="up" />
-        <Signal label="共振数量" value={`${radar?.resonance.length ?? 0}`} icon={<Layers3 size={16} />} />
+        <Signal label="主线题材温度" value={radar?.market_temperature ?? '--'} icon={<Flame size={16} />} />
+        <Signal label="规则聚合分" value={radar?.strongest_theme ? `${radar.strongest_theme.score}` : '--'} icon={<Activity size={16} />} />
+        <Signal
+          label="聚合订单流净额"
+          value={radar?.strongest_theme ? `${fmtSigned(radar.strongest_theme.net_inflow)}亿` : '--'}
+          icon={<TrendingUp size={16} />}
+          tone={radar?.strongest_theme ? (radar.strongest_theme.net_inflow >= 0 ? 'up' : 'down') : undefined}
+        />
+        <Signal label="关联板块数" value={radar?.strongest_theme ? `${strongestBoardCount}` : '--'} icon={<Layers3 size={16} />} />
         <Signal label="阶段" value={radar?.strongest_theme?.stage ?? '--'} icon={<RadioTower size={16} />} />
       </section>
 
       <section className="radar-workbench">
         <article className="panel theme-ranking-panel">
           <div className="panel-title-line">
-            <h3><BarChart3 size={16} /> 主线强度排行</h3>
+            <h3><BarChart3 size={16} /> 主线规则聚合排行</h3>
             <span>{topThemes.length ? `前 ${topThemes.length} 名` : '等待数据'}</span>
           </div>
           <div className="theme-rank-list">
@@ -139,10 +145,10 @@ export default function Dashboard() {
                 <span className="theme-rank-num">{String(item.rank).padStart(2, '0')}</span>
                 <span className="theme-rank-main">
                   <strong>{item.name}</strong>
-                  <small>{item.theme_type} / {item.stage} / {(item.related_boards ?? []).slice(0, 2).join('、') || '无关联板块'}</small>
+                  <small>{themeTypeLabel(item)} / {item.stage} / {themeScopeLabel(item)}</small>
                 </span>
-                <span className="theme-score">{item.score}</span>
-                <span className="theme-rank-bar"><i style={{ width: `${Math.max(5, item.score)}%` }} /></span>
+                <span className="theme-score" title="规则聚合强度分，不是上涨概率或历史胜率">{item.score}</span>
+                <span className="theme-rank-bar" title="规则聚合强度分，不是上涨概率或历史胜率"><i style={{ width: `${Math.min(100, Math.max(5, item.score))}%` }} /></span>
               </button>
             ))}
             {!loading && !topThemes.length && <p className="empty-msg">暂无题材数据。</p>}
@@ -151,7 +157,7 @@ export default function Dashboard() {
 
         <article className="panel selected-theme-panel">
           <div className="panel-title-line">
-            <h3><Target size={16} /> 选中题材证据</h3>
+            <h3><Target size={16} /> 选中主线归类证据</h3>
             <span>{selected?.stage ?? '--'}</span>
           </div>
           {selected ? (
@@ -160,17 +166,30 @@ export default function Dashboard() {
                 <div>
                   <strong>{selected.name}</strong>
                   <span>{selected.resonance_tags.join(' / ') || '等待共振标签'}</span>
-                  {!!selected.related_boards?.length && <em>{selected.related_boards.slice(0, 6).join(' · ')}</em>}
+                  {!!selected.related_boards?.length && <em>规则归类板块：{selected.related_boards.slice(0, 6).join(' · ')}</em>}
                 </div>
-                <b>{selected.theme_type}</b>
+                <b>{themeTypeLabel(selected)}</b>
               </div>
+              <p className="theme-data-disclaimer">
+                当前名称和分数来自行业、概念板块的规则聚合；已汇总 {selected.stock_count ?? '--'} 只去重成分股，展示 {selected.core_stocks.length} 只代表股。
+                分数仅用于横向排序，不代表上涨概率或历史胜率。
+              </p>
               <div className="theme-stat-grid">
                 <MiniStat label="涨幅" value={`${fmtSigned(selected.change_pct)}%`} tone={selected.change_pct >= 0 ? 'up' : 'down'} />
                 <MiniStat label="订单流方向净额" value={`${fmtSigned(selected.net_inflow)}亿`} tone={selected.net_inflow >= 0 ? 'up' : 'down'} />
                 <MiniStat label="大单方向估算" value={`${fmtSigned(selected.main_inflow)}亿`} tone={selected.main_inflow >= 0 ? 'up' : 'down'} />
-                <MiniStat label="涨停扩散" value={`${selected.limit_up_count || '--'}只`} />
+                <MiniStat label="涨停扩散" value={`${selected.limit_up_count ?? '--'}只`} />
+                <MiniStat label="订单流/成交额" value={formatOptionalPercent(selected.flow_ratio)} tone={percentTone(selected.flow_ratio)} />
+                <MiniStat label="上涨家数占比" value={formatRatio(selected.breadth_ratio)} tone={ratioTone(selected.breadth_ratio)} />
+                <MiniStat label="成分证据覆盖" value={formatRatio(selected.constituent_coverage)} />
               </div>
-              <div className="stock-role-list">
+              {!!selected.score_basis?.length && (
+                <details className="theme-score-basis">
+                  <summary>查看规则聚合分依据</summary>
+                  <ul>{selected.score_basis.map(item => <li key={item}>{item}</li>)}</ul>
+                </details>
+              )}
+              <div className="stock-role-list" aria-label="代表股线索">
                 {selected.core_stocks.length ? selected.core_stocks.map(stock => (
                   <div className="stock-role-row" key={`${stock.role}-${stock.code}-${stock.name}`}>
                     <span className="role-badge">{stock.role}</span>
@@ -178,7 +197,7 @@ export default function Dashboard() {
                     <span className={stock.change_pct >= 0 ? 'num-up' : 'num-down'}>{fmtSigned(stock.change_pct)}%</span>
                     <small>{stock.amount ? `${stock.amount.toFixed(2)}亿 · ` : ''}{stock.reason}</small>
                   </div>
-                )) : <p className="plain-text">暂无核心股证据，降低题材确认等级。</p>}
+                )) : <p className="plain-text">暂无可核验的代表股证据，不能据此确认主线。</p>}
               </div>
             </>
           ) : (
@@ -191,6 +210,7 @@ export default function Dashboard() {
             <h3><TrendingUp size={16} /> 订单流方向曲线</h3>
             <span>{chartThemes.length} 条曲线</span>
           </div>
+          {selected?.timeline_scope && <p className="theme-timeline-scope">{selected.timeline_scope}</p>}
           <ThemeFlowChart items={chartThemes} selectedName={selected?.name ?? null} />
         </article>
       </section>
@@ -334,7 +354,7 @@ function ThemeFlowChart({ items, selectedName }: { items: ThemeRadarItem[]; sele
   return <div className="theme-flow-chart" ref={ref} aria-label="板块订单流方向曲线" />
 }
 
-function Signal({ label, value, icon, tone }: { label: string; value: string; icon: ReactNode; tone?: 'up' }) {
+function Signal({ label, value, icon, tone }: { label: string; value: string; icon: ReactNode; tone?: 'up' | 'down' }) {
   return (
     <div className={`signal ${tone ?? ''}`}>
       {icon}
@@ -355,4 +375,41 @@ function MiniStat({ label, value, tone }: { label: string; value: string; tone?:
 
 function fmtSigned(value: number) {
   return `${value >= 0 ? '+' : ''}${value.toFixed(2)}`
+}
+
+function formatOptionalPercent(value?: number | null) {
+  return value == null ? '--' : `${fmtSigned(value)}%`
+}
+
+function formatRatio(value?: number | null) {
+  return value == null ? '--' : `${(value * 100).toFixed(1)}%`
+}
+
+function percentTone(value?: number | null): 'up' | 'down' | undefined {
+  if (value == null || value === 0) return undefined
+  return value > 0 ? 'up' : 'down'
+}
+
+function ratioTone(value?: number | null): 'up' | 'down' | undefined {
+  if (value == null) return undefined
+  if (value >= 0.6) return 'up'
+  if (value < 0.4) return 'down'
+  return undefined
+}
+
+type ThemeLabelInput = {
+  theme_type?: string | null
+  related_boards?: string[] | null
+}
+
+export function themeTypeLabel(item: ThemeLabelInput) {
+  if (item.theme_type === '主线题材' || (item.related_boards?.length ?? 0) > 1) return '规则聚合'
+  return item.theme_type || '板块'
+}
+
+export function themeScopeLabel(item: ThemeLabelInput) {
+  const boards = (item.related_boards ?? []).filter(Boolean)
+  if (!boards.length) return '未提供关联板块'
+  if (boards.length === 1) return boards[0]
+  return `${boards.slice(0, 2).join('、')}等${boards.length}个板块`
 }

@@ -30,11 +30,16 @@ export interface ThemeRadarItem {
   change_pct: number;
   net_inflow: number;
   main_inflow: number;
+  flow_ratio?: number | null;
+  breadth_ratio?: number | null;
+  constituent_coverage?: number | null;
+  score_basis?: string[];
   limit_up_count: number;
   stock_count: number;
   leader_names: string[];
   core_stocks: ThemeStockRole[];
   timeline: FlowPoint[];
+  timeline_scope?: string;
   resonance_tags: string[];
   action: string;
   risk: string;

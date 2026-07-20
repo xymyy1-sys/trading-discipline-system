@@ -3,43 +3,51 @@ from typing import Any
 _MAINLINE_DEFS: list[dict[str, Any]] = [
     {
         "name": "机器人 / 物理AI",
-        "keywords": ("机器人", "减速器", "工业母机", "机器视觉", "伺服", "传感器", "机械", "自动化", "人形机器人", "智能机器"),
+        # These are provider board aliases, not free-text keywords.  Theme
+        # classification must never be driven by the name of a temporary
+        # leading stock (for example a stock containing “机械” must not turn an
+        # unrelated concept board into the robot mainline).
+        "keywords": ("机器人", "机器人概念", "虚拟机器人", "人形机器人", "智能机器人", "智能机器", "减速器", "减速器概念", "机器人执行器", "机器视觉", "伺服系统", "工业母机"),
     },
     {
         "name": "PCB / 玻璃基板",
-        "keywords": ("PCB", "印制电路", "覆铜板", "玻璃基板", "电子元件", "电子化学品", "封装基板"),
+        "keywords": ("PCB", "PCB概念", "印制电路板", "覆铜板", "玻璃基板", "封装基板"),
     },
     {
         "name": "CPO / 光模块",
-        "keywords": ("CPO", "光模块", "光通信", "通信设备", "光器件", "高速铜缆", "液冷服务器"),
+        "keywords": ("CPO", "CPO概念", "光模块", "光通信模块", "光器件"),
     },
     {
         "name": "创新药",
-        "keywords": ("创新药", "化学制药", "生物制品", "生物制药", "医药", "CRO", "CXO", "医疗服务", "合成生物"),
+        "keywords": ("创新药", "创新药概念", "CRO", "CRO概念", "CXO", "CXO概念"),
     },
     {
         "name": "电网设备 / 电力",
-        "keywords": ("电网", "智能电网", "电力", "电力设备", "发电设备", "电器行业", "风电", "光伏", "特高压", "虚拟电厂", "储能", "绿色电力"),
+        "keywords": ("电力", "绿色电力", "智能电网", "电网设备", "特高压", "虚拟电厂", "超超临界发电"),
     },
     {
         "name": "MLCC / 被动元件",
-        "keywords": ("MLCC", "被动元件", "电容", "电感", "陶瓷电容", "电子器件"),
+        "keywords": ("MLCC", "被动元件", "被动元件概念", "陶瓷电容"),
     },
     {
         "name": "存储芯片",
-        "keywords": ("存储芯片", "存储器", "DRAM", "HBM", "半导体", "芯片", "集成电路"),
+        "keywords": ("存储芯片", "存储器", "DRAM", "NAND", "HBM"),
+    },
+    {
+        "name": "半导体 / 芯片",
+        "keywords": ("半导体", "半导体概念", "国产芯片", "芯片概念", "集成电路", "第三代半导体", "第四代半导体", "汽车芯片", "AI芯片"),
     },
     {
         "name": "玻璃玻纤",
-        "keywords": ("玻璃玻纤", "玻纤", "玻璃纤维", "建筑材料", "玻璃"),
+        "keywords": ("玻璃玻纤", "玻纤", "玻璃纤维"),
     },
     {
         "name": "商业航天",
-        "keywords": ("商业航天", "卫星", "航天", "军工电子", "国防军工", "军民融合", "航空装备", "飞机制造", "低空经济", "无人机"),
+        "keywords": ("商业航天", "商业航天概念", "卫星互联网", "卫星导航"),
     },
     {
         "name": "能源金属 / 小金属",
-        "keywords": ("能源金属", "小金属", "锂", "钴", "镍", "钨", "钼", "稀土", "有色金属", "金属新材料"),
+        "keywords": ("能源金属", "小金属", "小金属概念", "锂矿", "锂矿概念", "稀土永磁"),
     },
     {
         "name": "贵金属 / 黄金",
@@ -47,24 +55,28 @@ _MAINLINE_DEFS: list[dict[str, Any]] = [
     },
     {
         "name": "汽车链 / 智能驾驶",
-        "keywords": ("汽车", "汽车零部件", "汽车整车", "智能驾驶", "无人驾驶", "汽车电子", "特斯拉"),
+        "keywords": ("智能驾驶", "无人驾驶", "汽车电子", "汽车整车", "汽车零部件"),
     },
     {
         "name": "AI应用 / 算力",
-        "keywords": ("人工智能", "AI", "算力", "软件开发", "数据中心", "传媒", "游戏", "数据要素"),
+        "keywords": ("人工智能", "人工智能概念", "AI应用", "AI语料", "算力", "算力概念", "数据中心", "数据要素"),
     },
 ]
 _KNOWN_MAINLINE_NAMES = {str(item["name"]) for item in _MAINLINE_DEFS}
 
 _BROAD_STYLE_LABELS = (
-    "专精特新", "融资融券", "预盈预增", "机构重仓", "国企改革", "央企改革",
+    "融资融券", "预盈预增", "机构重仓",
     "深股通", "沪股通", "MSCI", "富时罗素", "标准普尔", "创业板综",
     "中证", "上证", "证金持股", "社保重仓", "QFII", "转债标的",
-    "业绩预升", "本月解禁", "券商重仓", "重组概念", "昨日涨停",
-    "华为概念", "苹果概念", "小米概念", "恒大概念", "黄河三角",
-    "超大盘", "资产注入", "基金重仓", "参股金融",
-    "分拆上市", "高校背景", "含H股", "含B股", "业绩预降", "业绩预亏",
+    "业绩预升", "本月解禁", "券商重仓", "昨日涨停",
+    "超大盘", "基金重仓", "高校背景", "含H股", "含B股", "业绩预降", "业绩预亏",
     "保险重仓", "金融参股",
+    "权重股", "茅指数", "大盘价值", "上证50", "沪深300", "中证500",
+    "昨日首板", "昨日连板", "昨日涨停表现", "近期新高", "百日新高", "GDR",
+    # Pure index/high-history/passive-holding baskets are not investable
+    # narratives. Do not permanently filter policy, restructuring or major
+    # supply-chain concepts: when their real flow, breadth and limit-up
+    # evidence is strong they may legitimately be a market mainline.
 )
 
 _SECTOR_TAXONOMY: list[dict[str, Any]] = [

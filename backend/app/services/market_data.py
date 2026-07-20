@@ -54,7 +54,6 @@ from app.services.cache import (
 )
 from app.services.mainline_classifier import (
     _MAINLINE_DEFS,
-    _KNOWN_MAINLINE_NAMES,
     _BROAD_STYLE_LABELS,
     _SECTOR_TAXONOMY,
     _classify_sector_taxonomy,
@@ -171,6 +170,29 @@ def _limit_up_catcher_expected_trade_date(now: datetime) -> str:
     return previous_a_share_trading_day(current_date).isoformat()
 
 
+def _get_current_theme_radar_cache(
+    *,
+    allow_stale: bool = False,
+) -> ThemeRadarOut | None:
+    """Return theme evidence only when it belongs to the active trade date.
+
+    Response-cache expiry controls request frequency, not market validity.  A
+    same-day stale value is useful when the provider is temporarily down, but
+    a previous-session theme ranking must never leak into today's plans or
+    reviews.
+    """
+
+    cached = _get_response_cache("theme-radar", allow_stale=allow_stale)
+    if not isinstance(cached, ThemeRadarOut):
+        return None
+    observed_at = cached.updated_at
+    if observed_at.tzinfo is None:
+        observed_at = observed_at.replace(tzinfo=ZoneInfo("Asia/Shanghai"))
+    observed_date = observed_at.astimezone(ZoneInfo("Asia/Shanghai")).date().isoformat()
+    expected_date = _limit_up_catcher_expected_trade_date(_shanghai_now_naive())
+    return cached if observed_date == expected_date else None
+
+
 def _limit_up_catcher_provider_time(value: Any) -> datetime | None:
     timestamp = _safe_int(value)
     if timestamp <= 0:
@@ -257,14 +279,14 @@ class MarketDataProvider:
     ) -> ThemeRadarOut:
         cache_key = "theme-radar"
         if not force_refresh:
-            cached = _get_response_cache(cache_key, allow_stale=True) if cache_only else _get_response_cache(cache_key)
+            cached = _get_current_theme_radar_cache(allow_stale=cache_only)
             if cached is not None:
                 return cached
 
         if cache_only:
             return ThemeRadarOut(
                 source="cache-unavailable",
-                updated_at=datetime.utcnow(),
+                updated_at=datetime.now(timezone.utc),
                 market_temperature="待采集",
                 strongest_theme=None,
                 resonance=[],
@@ -272,7 +294,9 @@ class MarketDataProvider:
                 notes=["尚无主线题材缓存，请点击刷新或等待后台采集。"],
             )
 
-        now = datetime.utcnow()
+        # Keep the API timestamp timezone-aware.  A naive UTC value is parsed
+        # by browsers as local time and made this panel appear eight hours old.
+        now = datetime.now(timezone.utc)
         notes: list[str] = []
         raw_items: list[dict[str, Any]] = []
         source_parts: list[str] = []
@@ -280,6 +304,7 @@ class MarketDataProvider:
         for flow_type, theme_type in [("概念资金流", "概念"), ("行业资金流", "行业")]:
             try:
                 rows = self._fetch_direct_eastmoney_sector_flow_raw(flow_type=flow_type, period="今日")
+                rows = self._validate_theme_provider_rows(rows)
                 for row in rows:
                     row["theme_type"] = theme_type
                 raw_items.extend(rows)
@@ -289,24 +314,40 @@ class MarketDataProvider:
                     _record_snapshot(flow_type, rows)
             except Exception as exc:
                 notes.append(f"{theme_type}订单流算法暂不可用: {exc.__class__.__name__}")
+                # The Sina endpoint does not expose a trustworthy market
+                # observation timestamp and its large-order value is only a
+                # heuristic.  It may remain available in the generic sector
+                # panel, but cannot confirm a mainline or participate in this
+                # ranking. Prefer a verified same-session Eastmoney snapshot;
+                # otherwise surface an explicit evidence gap.
+                cached = _get_cached_flow(f"{flow_type}|今日")
+                if not cached:
+                    notes.append(
+                        f"{theme_type}无同交易日可核验快照；未采用无法核验时效的备用源参与评分。"
+                    )
+                    continue
+                cached_rows, cached_source, cached_date = cached
+                expected_date = _limit_up_catcher_expected_trade_date(
+                    _shanghai_now_naive()
+                )
+                if cached_source != "eastmoney" or cached_date != expected_date:
+                    notes.append(
+                        f"{theme_type}最后成功快照来源/日期不合格"
+                        f"（{cached_source or '未知'}，{cached_date or '未知'}），"
+                        f"有效交易日为{expected_date}，已拒绝参与主线判断。"
+                    )
+                    continue
                 try:
-                    rows = self._fetch_sina_sector_flow_raw(flow_type=flow_type, period="今日")
-                    for row in rows:
-                        row["theme_type"] = theme_type
-                    raw_items.extend(rows)
-                    source_parts.append(f"sina-{theme_type}")
-                    _cache_good_flow(f"{flow_type}|今日", rows, "sina")
-                    if _is_trading_time():
-                        _record_snapshot(flow_type, rows)
-                except Exception as sina_exc:
-                    notes.append(f"{theme_type}新浪备用订单流算法暂不可用: {sina_exc.__class__.__name__}")
-                    cached = _get_cached_flow(f"{flow_type}|今日")
-                    if cached:
-                        cached_rows, cached_source, _ = cached
-                        for row in cached_rows:
-                            row["theme_type"] = theme_type
-                        raw_items.extend(cached_rows)
-                        source_parts.append(f"{cached_source}-cached-{theme_type}")
+                    cached_rows = self._validate_theme_provider_rows(cached_rows)
+                except ValueError as cache_exc:
+                    notes.append(
+                        f"{theme_type}最后成功快照时间证据不合格：{cache_exc}"
+                    )
+                    continue
+                for row in cached_rows:
+                    row["theme_type"] = theme_type
+                raw_items.extend(cached_rows)
+                source_parts.append(f"eastmoney-cached-{theme_type}")
 
         if not raw_items:
             notes.append("外部板块数据不可用；不生成模拟题材、模拟核心股或模拟资金")
@@ -317,36 +358,164 @@ class MarketDataProvider:
             if not name:
                 continue
             row["mainline"] = self._classify_mainline(row)
-            old = deduped.get(name)
+            # Industry and concept boards can legitimately share a display
+            # name.  A provider board code is the membership identity; using
+            # the name alone silently attached one board's constituents to the
+            # other board's flow evidence.
+            identity = str(row.get("board_code") or "").strip()
+            key = f"{row.get('provider')}|{identity or row.get('theme_type')}|{name}"
+            old = deduped.get(key)
             if old is None or self._raw_theme_score(row, []) > self._raw_theme_score(old, []):
-                deduped[name] = row
+                deduped[key] = row
 
+        board_candidates = [
+            row for row in deduped.values()
+            if not self._is_broad_style_label(str(row.get("name") or ""))
+        ]
+        self._annotate_theme_market_ranks(board_candidates, group_by_type=True)
         board_candidates = sorted(
-            deduped.values(),
+            board_candidates,
             key=lambda row: self._raw_theme_score(row, []),
             reverse=True,
         )
-        candidates = self._aggregate_theme_mainlines(board_candidates)[:40]
+        candidates = self._aggregate_theme_mainlines(board_candidates)[:32]
 
-        themes: list[ThemeRadarItem] = []
-        for idx, raw in enumerate(candidates, start=1):
-            constituents: list[dict[str, Any]] = []
-            seed = raw.get("seed_board") if isinstance(raw.get("seed_board"), dict) else raw
-            board_code = str(seed.get("board_code") or raw.get("board_code") or "").strip() or None
-            if board_code:
+        # A percentage threshold is only an approximation of a real涨停 (ST,
+        # 20%/30% boards, tick rounding and price-limit changes all differ).
+        # Use the dated provider pool as the sole membership evidence.  If it
+        # is unavailable, the score simply loses this confirmation; no
+        # approximate or simulated limit-up count is generated.
+        limit_up_codes: set[str] | None = None
+        try:
+            limit_up_codes, limit_up_trade_date = self._theme_limit_up_security_codes()
+            notes.append(f"涨停扩散采用东方财富{limit_up_trade_date}真实涨停池交集。")
+        except Exception as exc:
+            notes.append(
+                f"真实涨停池暂不可用（{exc.__class__.__name__}），"
+                "题材得分未使用估算涨停数量。"
+            )
+
+        # Fetch every real provider board that contributes to a displayed
+        # theme, then de-duplicate the stocks by security code.  The former
+        # implementation fetched only the highest-ranked seed board.  That is
+        # why, for example, a misclassified 化债 board made unrelated software
+        # stocks appear under 贵金属/黄金.
+        constituent_by_board: dict[str, list[dict[str, Any]]] = {}
+        fetch_specs: dict[str, tuple[str, str]] = {}
+        for raw in candidates:
+            components = raw.get("component_boards")
+            if not isinstance(components, list) or not components:
+                components = [raw.get("seed_board") or raw]
+            for component in components:
+                if not isinstance(component, dict):
+                    continue
+                code = str(component.get("board_code") or "").strip()
+                provider = str(component.get("provider") or "eastmoney")
+                if code:
+                    fetch_specs.setdefault(f"{provider}|{code}", (provider, code))
+
+        def fetch_constituents(provider: str, code: str) -> list[dict[str, Any]]:
+            if provider == "sina":
+                return self._fetch_sina_sector_constituents_raw(code)
+            return self._fetch_sector_constituents_raw(code)
+
+        fetch_errors: dict[str, str] = {}
+        with ThreadPoolExecutor(max_workers=min(8, max(1, len(fetch_specs)))) as executor:
+            futures = {
+                executor.submit(fetch_constituents, provider, code): key
+                for key, (provider, code) in fetch_specs.items()
+            }
+            for future in as_completed(futures):
+                key = futures[future]
                 try:
-                    if seed.get("provider") == "sina":
-                        constituents = self._fetch_sina_sector_constituents_raw(board_code)
+                    rows = future.result()
+                    if rows:
+                        constituent_by_board[key] = rows
                     else:
-                        constituents = self._fetch_sector_constituents_raw(board_code)
+                        fetch_errors[key] = "empty"
                 except Exception as exc:
-                    if idx <= 5:
-                        notes.append(f"{raw.get('name')}成分股暂不可用: {exc.__class__.__name__}")
-            themes.append(self._build_theme_item(raw, constituents, idx, include_timeline=idx <= 8))
+                    fetch_errors[key] = exc.__class__.__name__
+
+        prepared: list[tuple[dict[str, Any], list[dict[str, Any]]]] = []
+        for idx, raw in enumerate(candidates, start=1):
+            components = raw.get("component_boards")
+            if not isinstance(components, list) or not components:
+                components = [raw.get("seed_board") or raw]
+            merged: dict[str, dict[str, Any]] = {}
+            expected_boards = 0
+            loaded_boards = 0
+            for component in components:
+                if not isinstance(component, dict):
+                    continue
+                code = str(component.get("board_code") or "").strip()
+                provider = str(component.get("provider") or "eastmoney")
+                if not code:
+                    continue
+                expected_boards += 1
+                rows = constituent_by_board.get(f"{provider}|{code}")
+                if not rows:
+                    continue
+                loaded_boards += 1
+                for stock in rows:
+                    stock_code = str(stock.get("code") or "").strip()
+                    stock_name = str(stock.get("name") or "").strip()
+                    stock_key = stock_code or stock_name
+                    if not stock_key:
+                        continue
+                    old = merged.get(stock_key)
+                    stock_is_eligible = stock.get("theme_quote_eligible") is not False
+                    old_is_eligible = old is not None and old.get("theme_quote_eligible") is not False
+                    if (
+                        old is None
+                        or (stock_is_eligible and not old_is_eligible)
+                        or (
+                            stock_is_eligible == old_is_eligible
+                            and float(stock.get("amount") or 0) > float(old.get("amount") or 0)
+                        )
+                    ):
+                        merged[stock_key] = stock
+            constituents = list(merged.values())
+            enriched = self._apply_theme_constituent_evidence(
+                raw,
+                constituents,
+                expected_boards=expected_boards,
+                loaded_boards=loaded_boards,
+                limit_up_codes=limit_up_codes,
+            )
+            if idx <= 8 and expected_boards and loaded_boards < expected_boards:
+                notes.append(
+                    f"{raw.get('name')}成分股只完成{loaded_boards}/{expected_boards}个真实板块，"
+                    "评分已按数据覆盖率降级。"
+                )
+            evidence_constituents = [
+                stock for stock in constituents
+                if stock.get("theme_quote_eligible") is not False
+            ]
+            prepared.append((enriched, evidence_constituents))
+
+        # Re-rank after final constituent de-duplication.  Otherwise the UI
+        # would show a de-duplicated flow/change value while the score still
+        # reflected a different seed board's percentile.
+        self._annotate_theme_market_ranks(
+            [raw for raw, _ in prepared],
+            # All cards enter one final ranking.  Aggregated type labels such
+            # as “概念聚合” are not independent statistical populations; a
+            # singleton group would otherwise receive an arbitrary 50th
+            # percentile and make cross-card scores incomparable.
+            group_by_type=False,
+        )
+        for raw, _ in prepared:
+            # Constituents are intentionally fetched only for the strongest
+            # provider-derived candidate set. Be explicit about that scoring
+            # universe instead of calling this an all-market percentile.
+            raw["score_universe_size"] = len(prepared)
+        themes: list[ThemeRadarItem] = [
+            self._build_theme_item(raw, constituents, idx, include_timeline=idx <= 8)
+            for idx, (raw, constituents) in enumerate(prepared, start=1)
+        ]
 
         themes.sort(
             key=lambda item: (
-                1 if item.name in _KNOWN_MAINLINE_NAMES else 0,
                 item.score,
                 item.net_inflow,
                 len(item.related_boards),
@@ -360,11 +529,33 @@ class MarketDataProvider:
 
         resonance = [
             item for item in ranked
-            if len(item.resonance_tags) >= 3 and item.stage not in {"退潮"}
+            if (
+                len(item.resonance_tags) >= 3
+                and item.stage not in {"退潮"}
+                and item.score >= 60
+                and item.change_pct > 0
+                and item.net_inflow > 0
+                and item.core_stocks
+            )
         ][:6]
-        strongest = ranked[0] if ranked else None
+        # A ranking always has a first row, but a first row is not necessarily
+        # a confirmed mainline.  During a broad retreat the UI must say that no
+        # mainline is confirmed rather than promoting the least-weak negative
+        # board as “strongest”.
+        strongest = next((
+            item for item in ranked
+            if (
+                item.score >= 60
+                and item.change_pct > 0
+                and item.net_inflow > 0
+                and item.core_stocks
+                and item.stage != "退潮"
+            )
+        ), None)
         avg_score = sum(item.score for item in ranked[:8]) / max(1, len(ranked[:8]))
-        if avg_score >= 78:
+        if strongest is None:
+            temperature = "低迷"
+        elif avg_score >= 78:
             temperature = "强进攻"
         elif avg_score >= 66:
             temperature = "偏强"
@@ -373,37 +564,189 @@ class MarketDataProvider:
         else:
             temperature = "低迷"
 
+        notes.extend([
+            "题材只按东方财富板块名称的明确别名归类，领涨股名称不参与分类；"
+            "成分股按板块代码实时取得并去重。",
+            "强度分由同一时点的板块涨幅排名、订单流排名、上涨家数占比、"
+            "涨停扩散和成分覆盖率共同计算，不按题材名称加分。",
+        ])
+        provider_times = [
+            value
+            for row in raw_items
+            if (value := _limit_up_catcher_provider_time(
+                row.get("provider_timestamp")
+            )) is not None
+        ]
+        observed_at = (
+            max(provider_times)
+            .replace(tzinfo=ZoneInfo("Asia/Shanghai"))
+            .astimezone(timezone.utc)
+            if provider_times else now
+        )
         result = ThemeRadarOut(
             source="+".join(dict.fromkeys(source_parts)) or "unknown",
-            updated_at=now,
+            # This is the provider observation clock, not merely the HTTP
+            # response generation time shown next to the browser cache clock.
+            updated_at=observed_at,
             market_temperature=temperature,
             strongest_theme=strongest,
             resonance=resonance,
             themes=ranked[:28],
-            notes=notes or ["板块订单流供应商算法已按交易主线聚合，原始板块保留为证据链；结果不代表账户真实流水"],
+            notes=list(dict.fromkeys(notes)),
         )
         _set_response_cache(cache_key, result)
         return result
 
-    def _classify_mainline(self, raw: dict[str, Any]) -> str:
-        text_parts = [
-            str(raw.get("name") or ""),
-            str(raw.get("theme_type") or ""),
-            " ".join(str(x) for x in raw.get("leaders", []) if str(x).strip()),
+    @staticmethod
+    def _validate_theme_provider_rows(
+        rows: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """Reject stale or mixed-date Eastmoney board snapshots.
+
+        A complete-looking prior-session ranking is more dangerous than an
+        explicit data gap. Require a provider timestamp quorum and keep only
+        rows from the one eligible A-share session. During continuous trading
+        the timestamp quorum must also be recent.
+        """
+
+        if not rows:
+            raise ValueError("东方财富题材榜为空")
+        now = _shanghai_now_naive()
+        expected_date = _limit_up_catcher_expected_trade_date(now)
+        timestamped: list[tuple[dict[str, Any], datetime]] = []
+        for row in rows:
+            observed_at = _limit_up_catcher_provider_time(
+                row.get("provider_timestamp")
+            )
+            if observed_at is not None:
+                timestamped.append((row, observed_at))
+        coverage = len(timestamped) / len(rows)
+        if coverage < 0.95:
+            raise ValueError(
+                "东方财富题材榜时间戳覆盖不足："
+                f"{len(timestamped)}/{len(rows)}"
+            )
+        dated = [
+            (row, observed_at)
+            for row, observed_at in timestamped
+            if observed_at.date().isoformat() == expected_date
         ]
-        text = " ".join(text_parts).lower()
-        best_name = str(raw.get("name") or "其他题材")
-        best_score = 0
+        date_coverage = len(dated) / len(rows)
+        if date_coverage < 0.95:
+            provider_dates = sorted({
+                observed_at.date().isoformat()
+                for _, observed_at in timestamped
+            })
+            raise ValueError(
+                "东方财富题材榜交易日不一致："
+                f"有效{len(dated)}/{len(rows)}，"
+                f"预期{expected_date}，供应商={','.join(provider_dates)}"
+            )
+        if _is_trading_time():
+            recent = [
+                row for row, observed_at in dated
+                if timedelta(0) <= now - observed_at <= timedelta(minutes=20)
+            ]
+            if len(recent) / len(rows) < 0.90:
+                latest = max(observed_at for _, observed_at in dated)
+                raise ValueError(
+                    "东方财富题材榜盘中时间戳过旧："
+                    f"最新{latest.strftime('%H:%M:%S')}"
+                )
+        return [row for row, _ in dated]
+
+    def _theme_limit_up_security_codes(self) -> tuple[set[str], str]:
+        trade_date = _limit_up_catcher_expected_trade_date(
+            _shanghai_now_naive()
+        )
+        rows = self._fetch_limit_up_pool_raw(trade_date)
+        codes = {
+            str(row.get("代码") or row.get("code") or "").strip()
+            for row in rows
+            if str(row.get("代码") or row.get("code") or "").strip()
+        }
+        if not codes:
+            raise ValueError("真实涨停池没有有效证券代码")
+        return codes, trade_date
+
+    def _classify_mainline(self, raw: dict[str, Any]) -> str:
+        raw_name = str(raw.get("name") or "其他题材").strip() or "其他题材"
+        normalized = self._normalize_theme_board_name(raw_name)
         for line in _MAINLINE_DEFS:
-            score = 0
-            for kw in line["keywords"]:
-                kw_text = str(kw).lower()
-                if kw_text and kw_text in text:
-                    score += 3 if kw_text in str(raw.get("name") or "").lower() else 1
-            if score > best_score:
-                best_score = score
-                best_name = str(line["name"])
-        return best_name
+            aliases = {
+                self._normalize_theme_board_name(str(alias))
+                for alias in line["keywords"]
+                if str(alias).strip()
+            }
+            if normalized in aliases:
+                return str(line["name"])
+        return raw_name
+
+    @staticmethod
+    def _normalize_theme_board_name(value: str) -> str:
+        text = re.sub(r"\s+", "", str(value or "")).upper()
+        text = re.sub(r"[（(](?:概念|申万|中信|同花顺)[^）)]*[）)]$", "", text)
+        text = re.sub(r"(?:概念|板块)$", "", text)
+        text = re.sub(r"[ⅠⅡⅢⅣⅤ]+$", "", text)
+        return text.strip("_-—/")
+
+    @staticmethod
+    def _annotate_theme_market_ranks(
+        rows: list[dict[str, Any]],
+        *,
+        group_by_type: bool = False,
+    ) -> None:
+        """Attach same-snapshot relative ranks used by the theme score.
+
+        Absolute billions cannot be compared fairly between a 5-stock board
+        and a 200-stock board, and the old linear formula frequently collapsed
+        every negative-flow board to 0 or inflated a modest positive board to
+        100.  Percentile ranks preserve the real cross-sectional ordering.
+        """
+
+        def assign(group: list[dict[str, Any]], field: str, target: str) -> None:
+            ordered = sorted(
+                group,
+                key=lambda row: float(row.get(field) or 0),
+                reverse=True,
+            )
+            if len(ordered) == 1:
+                ordered[0][target] = 0.5
+                return
+            denominator = len(ordered) - 1
+            index = 0
+            while index < len(ordered):
+                value = float(ordered[index].get(field) or 0)
+                end = index + 1
+                while (
+                    end < len(ordered)
+                    and float(ordered[end].get(field) or 0) == value
+                ):
+                    end += 1
+                # Equal provider values carry one mid-rank. Previously equal
+                # zeros received different evidence scores just because of
+                # response order, explaining much of the arbitrary 0/100
+                # distribution visible in the old UI.
+                average_index = (index + end - 1) / 2
+                percentile = round(1.0 - average_index / denominator, 6)
+                for tied in ordered[index:end]:
+                    tied[target] = percentile
+                index = end
+
+        if not rows:
+            return
+        groups: list[list[dict[str, Any]]]
+        if group_by_type:
+            by_type: dict[str, list[dict[str, Any]]] = defaultdict(list)
+            for row in rows:
+                by_type[str(row.get("theme_type") or "板块")].append(row)
+            groups = list(by_type.values())
+        else:
+            groups = [rows]
+        for group in groups:
+            assign(group, "change_pct", "change_percentile")
+            flow_field = "flow_ratio" if any(row.get("flow_ratio") is not None for row in group) else "net_inflow"
+            assign(group, flow_field, "flow_percentile")
 
     def _is_broad_style_label(self, name: str) -> bool:
         upper_name = name.upper()
@@ -423,36 +766,59 @@ class MarketDataProvider:
             ordered = sorted(items, key=lambda row: self._raw_theme_score(row, []), reverse=True)
             positive = [row for row in ordered if float(row.get("net_inflow") or 0) > 0]
             seed = ordered[0]
-            net = sum(float(row.get("net_inflow") or 0) for row in items)
-            main = sum(float(row.get("main_inflow") or 0) for row in items)
-            weighted_base = sum(abs(float(row.get("net_inflow") or 0)) for row in items) or len(items)
-            change = sum(float(row.get("change_pct") or 0) * (abs(float(row.get("net_inflow") or 0)) or 1) for row in items) / weighted_base
+            # Industry and concept boards overlap heavily.  Summing their
+            # board-level flows double-counts the same stocks, so preliminary
+            # ranking uses the best real representative board.  Once the
+            # constituent union is loaded, `_apply_theme_constituent_evidence`
+            # replaces these values with a code-deduplicated stock sum.
+            net = float(seed.get("net_inflow") or 0)
+            main = float(seed.get("main_inflow") or 0)
+            change = float(seed.get("change_pct") or 0)
             related = [str(row.get("name") or "") for row in ordered if str(row.get("name") or "").strip()]
             leaders: list[str] = []
             for row in ordered:
                 leaders.extend(str(x) for x in row.get("leaders", []) if str(x).strip())
+            theme_types = {
+                str(row.get("theme_type") or "板块")
+                for row in items
+            }
+            if len(items) == 1:
+                aggregate_type = str(seed.get("theme_type") or "板块")
+            elif len(theme_types) == 1:
+                aggregate_type = f"{next(iter(theme_types))}聚合"
+            else:
+                aggregate_type = "行业/概念聚合"
+            ranked_items = ordered[:3]
             aggregates.append({
                 "name": line_name,
                 "board_code": str(seed.get("board_code") or ""),
                 "provider": seed.get("provider"),
-                "theme_type": "主线题材",
+                "theme_type": aggregate_type,
                 "related_boards": list(dict.fromkeys(related))[:8],
-                "component_boards": ordered[:6],
+                # Keep the complete provider-board set for membership and
+                # scoring. The UI may display only the first eight names, but
+                # silently dropping the ninth alias made broad lines such as
+                # 半导体 lose real constituents.
+                "component_boards": ordered,
                 "seed_board": seed,
                 "change_pct": round(change, 2),
                 "net_inflow": round(net, 2),
                 "main_inflow": round(main, 2),
-                "strength": max(0, min(100, int(50 + change * 7 + net * 0.9 + len(positive) * 2))),
+                "change_percentile": sum(float(row.get("change_percentile") or 0.5) for row in ranked_items) / len(ranked_items),
+                "flow_percentile": sum(float(row.get("flow_percentile") or 0.5) for row in ranked_items) / len(ranked_items),
+                "up_count": sum(int(row.get("up_count") or 0) for row in items),
+                "down_count": sum(int(row.get("down_count") or 0) for row in items),
+                "flat_count": sum(int(row.get("flat_count") or 0) for row in items),
                 "leaders": list(dict.fromkeys(leaders))[:6] or ["待识别"],
-                "limit_up_count": sum(int(row.get("limit_up_count") or 0) for row in items),
-                "stock_count": sum(int(row.get("stock_count") or 0) for row in items),
+                "limit_up_count": 0,
+                "stock_count": int(seed.get("stock_count") or 0),
                 "avg_change": round(change, 2),
                 "component_count": len(items),
+                "positive_component_count": len(positive),
             })
         return sorted(
             aggregates,
             key=lambda row: (
-                1 if str(row.get("name") or "") in _KNOWN_MAINLINE_NAMES else 0,
                 self._raw_theme_score(row, []),
                 float(row.get("net_inflow") or 0),
                 int(row.get("component_count") or 1),
@@ -462,15 +828,168 @@ class MarketDataProvider:
         )
 
     def _raw_theme_score(self, raw: dict[str, Any], constituents: list[dict[str, Any]]) -> int:
+        score, _ = self._theme_score_breakdown(raw, constituents)
+        return score
+
+    def _theme_score_breakdown(
+        self,
+        raw: dict[str, Any],
+        constituents: list[dict[str, Any]],
+    ) -> tuple[int, list[str]]:
         change = float(raw.get("change_pct") or 0)
         net = float(raw.get("net_inflow") or 0)
         main = float(raw.get("main_inflow") or 0)
         limit_count = int(raw.get("limit_up_count") or 0)
-        component_count = int(raw.get("component_count") or 1)
-        positive_core = len([it for it in constituents[:12] if float(it.get("change_pct") or 0) >= 5])
-        score = 45 + change * 5.2 + net * 1.45 + main * 0.95 + limit_count * 3 + positive_core * 2
-        score += min(10, max(0, component_count - 1) * 2.5)
-        return max(0, min(100, int(score)))
+        change_percentile = float(raw.get("change_percentile") if raw.get("change_percentile") is not None else max(0, min(1, 0.5 + change / 10)))
+        flow_percentile = float(raw.get("flow_percentile") if raw.get("flow_percentile") is not None else max(0, min(1, 0.5 + net / 40)))
+
+        up_count = int(raw.get("up_count") or 0)
+        down_count = int(raw.get("down_count") or 0)
+        flat_count = int(raw.get("flat_count") or 0)
+        breadth_total = up_count + down_count + flat_count
+        if constituents:
+            up_count = len([it for it in constituents if float(it.get("change_pct") or 0) > 0])
+            down_count = len([it for it in constituents if float(it.get("change_pct") or 0) < 0])
+            breadth_total = len(constituents)
+        breadth = up_count / breadth_total if breadth_total else 0.5
+        hot_count = len([it for it in constituents if float(it.get("change_pct") or 0) >= 5])
+        hot_ratio = hot_count / len(constituents) if constituents else 0
+
+        base = 8.0
+        change_points = change_percentile * 28
+        flow_points = flow_percentile * 26
+        breadth_points = breadth * 22
+        limit_points = min(10.0, limit_count * 2.5)
+        hot_points = min(6.0, hot_ratio * 30)
+        negative_points = 0.0
+        if change < 0:
+            negative_points += min(8.0, abs(change) * 1.5)
+        if net < 0:
+            negative_points += 8.0
+        if main < 0:
+            negative_points += 4.0
+
+        subtotal = (
+            base
+            + change_points
+            + flow_points
+            + breadth_points
+            + limit_points
+            + hot_points
+            - negative_points
+        )
+
+        expected_boards = int(raw.get("expected_constituent_boards") or 0)
+        loaded_boards = int(raw.get("loaded_constituent_boards") or 0)
+        eligible_ratio = float(raw.get("eligible_constituent_ratio") or 0)
+        coverage_multiplier = 1.0
+        if expected_boards:
+            board_coverage = loaded_boards / expected_boards
+            quote_coverage = eligible_ratio if raw.get("eligible_constituent_ratio") is not None else 1.0
+            coverage = board_coverage * quote_coverage
+            coverage_multiplier = 0.55 + 0.45 * coverage
+        elif not constituents:
+            negative_points += 8.0
+            subtotal -= 8.0
+        final_score = max(0, min(100, round(subtotal * coverage_multiplier)))
+        basis = [
+            f"基础分：+{base:.1f}",
+            f"去重成分股等权涨幅在候选池{int(raw.get('score_universe_size') or 0)}项的百分位"
+            f"{change_percentile:.0%}：+{change_points:.1f}/28",
+            f"订单流/成交额在候选池{int(raw.get('score_universe_size') or 0)}项的百分位"
+            f"{flow_percentile:.0%}：+{flow_points:.1f}/26",
+            f"上涨家数占比{breadth:.0%}：+{breadth_points:.1f}/22",
+            f"真实涨停池交集{limit_count}只：+{limit_points:.1f}/10",
+            f"涨幅不低于5%的成分占比{hot_ratio:.0%}：+{hot_points:.1f}/6",
+        ]
+        if negative_points:
+            basis.append(f"负涨幅/负订单流/数据缺口扣分：-{negative_points:.1f}")
+        if expected_boards:
+            basis.append(
+                f"成分板块覆盖{loaded_boards}/{expected_boards}，"
+                f"有效成分行情{int(raw.get('eligible_constituent_count') or 0)}/"
+                f"{int(raw.get('total_constituent_count') or 0)}："
+                f"总分×{coverage_multiplier:.3f}"
+            )
+        else:
+            basis.append("成分板块覆盖：未提供")
+        basis.append(f"最终规则聚合分：{final_score}/100")
+        return final_score, basis
+
+    def _apply_theme_constituent_evidence(
+        self,
+        raw: dict[str, Any],
+        constituents: list[dict[str, Any]],
+        *,
+        expected_boards: int,
+        loaded_boards: int,
+        limit_up_codes: set[str] | None = None,
+    ) -> dict[str, Any]:
+        enriched = dict(raw)
+        enriched["expected_constituent_boards"] = expected_boards
+        enriched["loaded_constituent_boards"] = loaded_boards
+        if not constituents:
+            return enriched
+
+        evidence_constituents = [
+            stock for stock in constituents
+            if stock.get("theme_quote_eligible") is not False
+        ]
+        enriched["total_constituent_count"] = len(constituents)
+        enriched["eligible_constituent_count"] = len(evidence_constituents)
+        enriched["eligible_constituent_ratio"] = (
+            len(evidence_constituents) / len(constituents)
+        )
+        if not evidence_constituents:
+            enriched["stock_count"] = len(constituents)
+            return enriched
+
+        enriched["net_inflow"] = round(
+            sum(float(stock.get("main_inflow") or 0) for stock in evidence_constituents),
+            2,
+        )
+        enriched["main_inflow"] = round(
+            sum(float(stock.get("large_inflow") or 0) for stock in evidence_constituents),
+            2,
+        )
+        total_amount = sum(float(stock.get("amount") or 0) for stock in evidence_constituents)
+        enriched["flow_ratio"] = (
+            round(float(enriched["net_inflow"]) / total_amount * 100, 4)
+            if total_amount > 0 else None
+        )
+        enriched["stock_count"] = len(constituents)
+        enriched["up_count"] = len([
+            stock for stock in evidence_constituents
+            if float(stock.get("change_pct") or 0) > 0
+        ])
+        enriched["down_count"] = len([
+            stock for stock in evidence_constituents
+            if float(stock.get("change_pct") or 0) < 0
+        ])
+        enriched["flat_count"] = len(evidence_constituents) - enriched["up_count"] - enriched["down_count"]
+        for stock in constituents:
+            stock["is_limit_up"] = (
+                str(stock.get("code") or "").strip() in limit_up_codes
+                if limit_up_codes is not None else None
+            )
+        enriched["limit_up_count"] = (
+            len([
+                stock for stock in constituents
+                if stock.get("theme_quote_eligible") is not False
+                and str(stock.get("code") or "").strip() in limit_up_codes
+            ])
+            if limit_up_codes is not None else 0
+        )
+        # A common price scale is mandatory for a cross-theme ranking. Both
+        # single-board and aggregated themes use the equal-weighted change of
+        # their de-duplicated, timestamp-eligible stocks; never mix a provider
+        # board-index return with stock-average returns.
+        enriched["change_pct"] = round(
+            sum(float(stock.get("change_pct") or 0) for stock in evidence_constituents)
+            / len(evidence_constituents),
+            2,
+        )
+        return enriched
 
     def _build_theme_item(
         self,
@@ -479,11 +998,14 @@ class MarketDataProvider:
         rank: int,
         include_timeline: bool = True,
     ) -> ThemeRadarItem:
-        score = self._raw_theme_score(raw, constituents)
+        score, score_basis = self._theme_score_breakdown(raw, constituents)
         roles = self._classify_theme_stocks(raw, constituents)
         stage, stage_reason = self._judge_theme_stage(raw, constituents, score)
         tags = self._theme_resonance_tags(raw, constituents, score)
-        leader_names = [role.name for role in roles if role.role in {"情绪龙头", "连板标的"}][:3]
+        leader_names = [
+            role.name for role in roles
+            if role.role in {"涨停前排", "涨幅前排", "容量中军"}
+        ][:3]
         for leader in raw.get("leaders", []):
             leader = str(leader).strip()
             if leader and leader != "待识别" and leader not in leader_names:
@@ -506,6 +1028,25 @@ class MarketDataProvider:
         elif stage == "高潮":
             risk = "一致性过强，次日容易高开低走或强分歧"
 
+        up_count = int(raw.get("up_count") or 0)
+        down_count = int(raw.get("down_count") or 0)
+        flat_count = int(raw.get("flat_count") or 0)
+        breadth_total = up_count + down_count + flat_count
+        breadth_ratio = (
+            round(up_count / breadth_total, 4)
+            if breadth_total else None
+        )
+        expected_boards = int(raw.get("expected_constituent_boards") or 0)
+        loaded_boards = int(raw.get("loaded_constituent_boards") or 0)
+        if expected_boards:
+            board_coverage = loaded_boards / expected_boards
+            quote_coverage = float(
+                raw.get("eligible_constituent_ratio")
+                if raw.get("eligible_constituent_ratio") is not None else 1.0
+            )
+            coverage = round(board_coverage * quote_coverage, 4)
+        else:
+            coverage = None
         return ThemeRadarItem(
             name=str(raw.get("name") or "未知题材"),
             board_code=str(raw.get("board_code") or "") or None,
@@ -518,15 +1059,41 @@ class MarketDataProvider:
             change_pct=round(float(raw.get("change_pct") or 0), 2),
             net_inflow=round(float(raw.get("net_inflow") or 0), 2),
             main_inflow=round(float(raw.get("main_inflow") or 0), 2),
+            flow_ratio=(
+                round(float(raw.get("flow_ratio")), 4)
+                if raw.get("flow_ratio") is not None else None
+            ),
+            breadth_ratio=breadth_ratio,
+            constituent_coverage=coverage,
+            score_basis=score_basis,
             limit_up_count=int(raw.get("limit_up_count") or 0),
             stock_count=int(raw.get("stock_count") or len(constituents) or 0),
             leader_names=leader_names[:4] or ["待识别"],
             core_stocks=roles[:8],
             timeline=self._theme_timeline(raw) if include_timeline else _snapshot_only_timeline(float(raw.get("net_inflow") or 0)),
+            timeline_scope=self._theme_timeline_scope(raw, include_timeline=include_timeline),
             resonance_tags=tags,
             action=action,
             risk=risk,
         )
+
+    @staticmethod
+    def _theme_timeline_scope(
+        raw: dict[str, Any],
+        *,
+        include_timeline: bool,
+    ) -> str:
+        if not include_timeline:
+            return "当前聚合净额快照，不代表盘中连续曲线"
+        seed = raw.get("seed_board")
+        seed_name = str(seed.get("name") or "").strip() if isinstance(seed, dict) else ""
+        seed_name = seed_name or str(raw.get("name") or "板块")
+        if int(raw.get("component_count") or 1) > 1:
+            return (
+                f"曲线取代表板块“{seed_name}”；卡片净额为全部关联板块"
+                "去重成分股的当前快照，两者口径不同"
+            )
+        return f"曲线取东方财富板块“{seed_name}”的订单流方向历史"
 
     def _classify_theme_stocks(
         self,
@@ -557,14 +1124,18 @@ class MarketDataProvider:
             key=lambda item: (float(item.get("change_pct") or 0), float(item.get("amount") or 0)),
             reverse=True,
         )
-        limit_like = [it for it in ordered if float(it.get("change_pct") or 0) >= 9.5]
-        if limit_like:
-            add(limit_like[0], "情绪龙头", "板块内涨幅最强，接近或达到涨停")
+        limit_members = [it for it in ordered if it.get("is_limit_up") is True]
+        if limit_members:
+            add(
+                limit_members[0],
+                "涨停前排",
+                "属于当日真实涨停池，且在本题材涨停成员中处于前排",
+            )
         elif ordered:
-            add(ordered[0], "情绪龙头", "板块内涨幅居前")
+            add(ordered[0], "涨幅前排", "板块内涨幅居前，但不是已核验的涨停股")
 
-        for stock in limit_like[1:4]:
-            add(stock, "连板标的", "涨停队列成员，需要结合连板高度确认")
+        for stock in limit_members[1:4]:
+            add(stock, "涨停扩散", "属于当日真实涨停池；未取得连板天数，不标记为连板股")
 
         liquid = sorted(
             [it for it in constituents if float(it.get("change_pct") or 0) > 0],
@@ -576,7 +1147,8 @@ class MarketDataProvider:
 
         trend = [
             it for it in liquid
-            if 2.0 <= float(it.get("change_pct") or 0) < 9.5
+            if 2.0 <= float(it.get("change_pct") or 0)
+            and it.get("is_limit_up") is not True
         ]
         if trend:
             add(trend[0], "趋势核心", "非涨停但量价强，适合观察趋势延续")
@@ -587,7 +1159,7 @@ class MarketDataProvider:
             add(stock, "前排强势", "板块涨幅前排")
 
         if not roles:
-            fallback_roles = ["情绪龙头", "容量中军", "前排强势", "趋势核心"]
+            fallback_roles = ["领涨线索", "容量中军", "前排强势", "趋势核心"]
             for i, leader in enumerate(raw.get("leaders", [])):
                 name = str(leader).strip()
                 if name and name != "待识别":
@@ -634,12 +1206,12 @@ class MarketDataProvider:
             tags.append("板块涨幅共振")
         if int(raw.get("limit_up_count") or 0) >= 3:
             tags.append("涨停扩散")
-        if any(float(it.get("change_pct") or 0) >= 9.5 for it in constituents):
+        if any(it.get("is_limit_up") is True for it in constituents):
             tags.append("核心股涨停")
         if any(float(it.get("amount") or 0) >= 8 for it in constituents):
             tags.append("容量承接")
-        if int(raw.get("component_count") or 0) >= 2:
-            tags.append("多板块共振")
+        if int(raw.get("positive_component_count") or 0) >= 2:
+            tags.append("多板块同向")
         if score >= 75:
             tags.append("主线候选")
         return tags or ["待资金确认"]
@@ -647,30 +1219,65 @@ class MarketDataProvider:
     def _fetch_sector_constituents_raw(self, board_code: str) -> list[dict[str, Any]]:
         params = {
             "pn": "1",
-            "pz": "80",
+            "pz": "100",
             "po": "1",
             "np": "1",
             "ut": "bd1d9ddb04089700cf9c27f6f7426281",
             "fltt": "2",
             "invt": "2",
-            "fid": "f3",
+            # Security code is stable while prices and flows are changing.
+            # Sorting by涨幅 during pagination can duplicate/omit stocks.
+            "fid": "f12",
             "fs": f"b:{board_code}",
-            "fields": "f12,f14,f2,f3,f5,f6,f8,f20,f21,f62",
+            "fields": "f12,f14,f2,f3,f5,f6,f8,f20,f21,f62,f66,f72,f124",
         }
         headers = {
             "User-Agent": "Mozilla/5.0",
             "Referer": "https://quote.eastmoney.com/center/boardlist.html",
             "Accept": "application/json,text/plain,*/*",
         }
-        rows = []
+        rows: list[dict[str, Any]] = []
         last_exc: Exception | None = None
-        for host in ("https://push2delay.eastmoney.com", "https://push2.eastmoney.com"):
+        # The constituent snapshot becomes the final score, breadth and core
+        # stock evidence.  Prefer the live host; a delayed/previous-session
+        # constituent list must never overwrite a fresh board ranking.
+        for host in ("https://push2.eastmoney.com", "https://push2delay.eastmoney.com"):
             try:
-                resp = requests.get(f"{host}/api/qt/clist/get", params=params, headers=headers, timeout=8)
-                resp.raise_for_status()
-                rows = (resp.json().get("data") or {}).get("diff") or []
-                if rows:
-                    break
+                fetched: list[dict[str, Any]] = []
+                total = 0
+                for page in range(1, 11):
+                    resp = requests.get(
+                        f"{host}/api/qt/clist/get",
+                        params={**params, "pn": str(page)},
+                        headers=headers,
+                        timeout=8,
+                    )
+                    resp.raise_for_status()
+                    data = resp.json().get("data") or {}
+                    page_rows = data.get("diff") or []
+                    if not page_rows:
+                        break
+                    fetched.extend(page_rows)
+                    total = _safe_int(data.get("total"), len(fetched))
+                    if total and len(fetched) >= total:
+                        break
+                if not total:
+                    raise ValueError("missing sector constituent total")
+                by_code: dict[str, dict[str, Any]] = {}
+                for row in fetched:
+                    code = str(row.get("f12") or "").strip()
+                    name = str(row.get("f14") or "").strip()
+                    if code and name:
+                        by_code[code] = row
+                if len(by_code) != total:
+                    raise ValueError(
+                        "incomplete sector constituent pagination: "
+                        f"unique={len(by_code)}, total={total}"
+                    )
+                candidate_rows = list(by_code.values())
+                self._validate_theme_constituent_rows(candidate_rows)
+                rows = candidate_rows
+                break
             except Exception as exc:
                 last_exc = exc
         if not rows and last_exc:
@@ -686,10 +1293,71 @@ class MarketDataProvider:
                 "amount": round(_safe_float(row.get("f6")) / 1e8, 2),
                 "float_cap": round(_safe_float(row.get("f21")) / 1e8, 2),
                 "main_inflow": round(_safe_float(row.get("f62")) / 1e8, 2),
+                "super_large_inflow": round(_safe_float(row.get("f66")) / 1e8, 2),
+                "large_inflow": round(_safe_float(row.get("f72")) / 1e8, 2),
                 "turnover": round(_safe_float(row.get("f8")), 2),
+                "provider_timestamp": _safe_int(row.get("f124")) or None,
+                "theme_quote_eligible": row.get("_theme_quote_eligible") is True,
             }
             for row in rows
         ]
+
+    @staticmethod
+    def _validate_theme_constituent_rows(rows: list[dict[str, Any]]) -> None:
+        """Validate the quote clock used by final constituent-derived scores.
+
+        A small minority of suspended securities may retain an older quote
+        time, so constituent validation uses a quorum rather than requiring
+        every member to tick.  A fully delayed or prior-session page still
+        fails and the caller tries the next provider host.
+        """
+
+        if not rows:
+            raise ValueError("东方财富板块成分为空")
+        now = _shanghai_now_naive()
+        expected_date = _limit_up_catcher_expected_trade_date(now)
+        observed = [
+            value
+            for row in rows
+            if (value := _limit_up_catcher_provider_time(row.get("f124"))) is not None
+        ]
+        if len(observed) / len(rows) < 0.90:
+            raise ValueError(
+                "东方财富成分股时间戳覆盖不足："
+                f"{len(observed)}/{len(rows)}"
+            )
+        current_session = [
+            value for value in observed
+            if value.date().isoformat() == expected_date
+        ]
+        if len(current_session) / len(rows) < 0.85:
+            raise ValueError(
+                "东方财富成分股交易日不一致："
+                f"有效{len(current_session)}/{len(rows)}，预期{expected_date}"
+            )
+        trading_now = _is_trading_time()
+        if trading_now:
+            recent = [
+                value for value in current_session
+                if timedelta(0) <= now - value <= timedelta(minutes=10)
+            ]
+            if len(recent) / len(rows) < 0.70:
+                latest = max(current_session)
+                raise ValueError(
+                    "东方财富成分股盘中快照过旧："
+                    f"最新{latest.strftime('%H:%M:%S')}"
+                )
+        for row in rows:
+            value = _limit_up_catcher_provider_time(row.get("f124"))
+            eligible = (
+                value is not None
+                and value.date().isoformat() == expected_date
+            )
+            if eligible and trading_now:
+                eligible = timedelta(0) <= now - value <= timedelta(minutes=10)
+            # Keep the security as a board member, but exclude a stale quote
+            # from today's flow/breadth/core-stock calculations.
+            row["_theme_quote_eligible"] = eligible
 
     def _theme_timeline(self, raw: dict[str, Any]) -> list[SectorFlowPoint]:
         component_boards = raw.get("component_boards")
@@ -713,6 +1381,17 @@ class MarketDataProvider:
                     SectorFlowPoint(time=key, value=round(points_by_time[key], 2))
                     for key in sorted(points_by_time)
                 ]
+
+        # For an Eastmoney aggregate use the declared seed board's real curve
+        # as a representative timeline.  Summing overlapping industry and
+        # concept curves would double-count the same securities.
+        seed = raw.get("seed_board") if isinstance(raw.get("seed_board"), dict) else raw
+        seed_code = str(seed.get("board_code") or "").strip()
+        if seed.get("provider") == "eastmoney" and seed_code:
+            try:
+                return self._fetch_eastmoney_board_intraday_flow(seed_code)
+            except Exception:
+                pass
 
         flow_type = "概念资金流" if str(raw.get("theme_type")) == "概念" else "行业资金流"
         board_code = str(raw.get("board_code") or "").strip()
@@ -822,7 +1501,7 @@ class MarketDataProvider:
     def _fetch_sina_sector_constituents_raw(self, board_code: str) -> list[dict[str, Any]]:
         resp = requests.get(
             "https://money.finance.sina.com.cn/quotes_service/api/json_v2.php/MoneyFlow.ssl_bkzj_ssggzj",
-            params={"bankuai": board_code, "page": "1", "num": "80", "sort": "netamount", "asc": "0"},
+            params={"bankuai": board_code, "page": "1", "num": "500", "sort": "netamount", "asc": "0"},
             headers={
                 "User-Agent": "Mozilla/5.0",
                 "Referer": "https://vip.stock.finance.sina.com.cn/moneyflow/",
@@ -841,7 +1520,8 @@ class MarketDataProvider:
                 "price": float(row.get("trade") or 0),
                 "change_pct": round(float(row.get("changeratio") or 0) * 100, 2),
                 "amount": round(float(row.get("amount") or 0) / 1e8, 2),
-                "main_inflow": round(float(row.get("r0_net") or row.get("netamount") or 0) / 1e8, 2),
+                "main_inflow": round(float(row.get("netamount") or 0) / 1e8, 2),
+                "large_inflow": round(float(row.get("r0_net") or 0) / 1e8, 2),
                 "net_inflow": round(float(row.get("netamount") or 0) / 1e8, 2),
                 "turnover": round(float(row.get("turnover") or 0), 2),
             }
@@ -2358,19 +3038,23 @@ class MarketDataProvider:
     ) -> list[dict[str, Any]]:
         sector_type_map = {"行业资金流": "m:90 s:4", "概念资金流": "m:90 t:3", "地域资金流": "m:90 t:1"}
         indicator_map = {
-            "今日": ("f62", "1", "f62", "f62", "f204", "f3",
-                     "f12,f14,f2,f3,f15,f17,f18,f62,f184,f66,f69,f72,f75,f78,f81,f84,f87,f100,f102,f104,f204,f205,f124,f1,f13"),
-            "5日": ("f164", "5", "f164", "f164", "f257", "f109",
-                     "f12,f14,f2,f100,f102,f104,f109,f164,f165,f166,f167,f168,f169,f170,f171,f172,f173,f257,f258,f124,f1,f13"),
-            "10日": ("f174", "10", "f174", "f174", "f260", "f160",
-                     "f12,f14,f2,f100,f102,f104,f160,f174,f175,f176,f177,f178,f179,f180,f181,f182,f183,f260,f261,f124,f1,f13"),
+            # `net_key` is Eastmoney's main-order net amount; `main_key` is
+            # the large-order sub-bucket.  They used to both read f62/f164/
+            # f174, which rendered two UI evidence columns from one value and
+            # double-weighted the same signal in the score.
+            "今日": ("f62", "1", "f62", "f72", "f184", "f128", "f3",
+                     "f12,f14,f2,f3,f15,f17,f18,f62,f184,f66,f69,f72,f75,f78,f81,f84,f87,f104,f105,f106,f128,f136,f140,f141,f204,f205,f206,f124,f1,f13"),
+            "5日": ("f164", "5", "f164", "f168", "f165", "f257", "f109",
+                     "f12,f14,f2,f109,f164,f165,f166,f167,f168,f169,f170,f171,f172,f173,f104,f105,f106,f257,f258,f124,f1,f13"),
+            "10日": ("f174", "10", "f174", "f178", "f175", "f260", "f160",
+                     "f12,f14,f2,f160,f174,f175,f176,f177,f178,f179,f180,f181,f182,f183,f104,f105,f106,f260,f261,f124,f1,f13"),
         }
         breakdown_key_map = {
             "今日": (("f66", "f69"), ("f72", "f75"), ("f78", "f81"), ("f84", "f87")),
             "5日": (("f166", "f167"), ("f168", "f169"), ("f170", "f171"), ("f172", "f173")),
             "10日": (("f176", "f177"), ("f178", "f179"), ("f180", "f181"), ("f182", "f183")),
         }
-        fid, stat, net_key, main_key, leader_key, change_key, fields = indicator_map.get(
+        _ranking_fid, stat, net_key, main_key, flow_ratio_key, leader_key, change_key, fields = indicator_map.get(
             period, indicator_map["今日"]
         )
         breakdown_keys = breakdown_key_map.get(period, breakdown_key_map["今日"])
@@ -2382,7 +3066,10 @@ class MarketDataProvider:
             "ut": "8dec03ba335b81bf4ebdf7b29ec27d15",
             "fltt": "2",
             "invt": "2",
-            "fid": fid,
+            # Use a stable identity sort for pagination.  f62 changes on every
+            # tick and previously caused page drift, duplicated boards and a
+            # corrupt percentile population.
+            "fid": "f12",
             "fs": sector_type_map.get(flow_type, "m:90 s:4"),
             "stat": stat,
             "fields": fields,
@@ -2415,8 +3102,21 @@ class MarketDataProvider:
                     total = _safe_int(data.get("total"), len(fetched))
                     if total and len(fetched) >= total:
                         break
-                if fetched:
-                    rows = fetched[:total] if total else fetched
+                if not total:
+                    raise ValueError("missing eastmoney sector total")
+                by_code: dict[str, dict[str, Any]] = {}
+                for row in fetched:
+                    code = str(row.get("f12") or "").strip()
+                    name = str(row.get("f14") or "").strip()
+                    if code and name:
+                        by_code[code] = row
+                if len(by_code) != total:
+                    raise ValueError(
+                        "incomplete eastmoney sector pagination: "
+                        f"unique={len(by_code)}, total={total}"
+                    )
+                if by_code:
+                    rows = list(by_code.values())
                     break
             except Exception as exc:
                 last_exc = exc
@@ -2457,6 +3157,7 @@ class MarketDataProvider:
                 "change_pct": _safe_float(row.get(change_key)),
                 "net_inflow": round(_safe_float(row.get(net_key)) / 1e8, 2),
                 "main_inflow": round(_safe_float(row.get(main_key)) / 1e8, 2),
+                "flow_ratio": round(_safe_float(row.get(flow_ratio_key)), 4),
                 "flow_breakdown": [
                     {
                         "name": name,
@@ -2472,9 +3173,19 @@ class MarketDataProvider:
                     50 + _safe_float(row.get(change_key)) * 8 + _safe_float(row.get(net_key)) / 2e7
                 ))),
                 "leaders": [str(row.get(leader_key) or "待识别")],
-                "limit_up_count": _safe_int(row.get("f100")),
-                "stock_count": _safe_int(row.get("f104")),
-                "avg_change": _safe_float(row.get("f102")),
+                # f104/f105/f106 are上涨/下跌/平盘家数 for board rows;
+                # f100 is not a limit-up count.  Exact near-limit counts are
+                # derived from the fetched constituents later.
+                "limit_up_count": 0,
+                "up_count": _safe_int(row.get("f104")),
+                "down_count": _safe_int(row.get("f105")),
+                "flat_count": _safe_int(row.get("f106")),
+                "stock_count": (
+                    _safe_int(row.get("f104"))
+                    + _safe_int(row.get("f105"))
+                    + _safe_int(row.get("f106"))
+                ),
+                "avg_change": _safe_float(row.get(change_key)),
             })
         return result
 

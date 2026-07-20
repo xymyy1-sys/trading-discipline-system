@@ -30,7 +30,8 @@ from app.schemas.trading import (
     TradeLogOut,
     TradeReviewOut,
 )
-from app.services.market_data import _get_response_cache, _last_trading_day
+from app.services.market_data import _get_current_theme_radar_cache, _last_trading_day
+from app.services.cache import _get_response_cache
 from app.api.helpers.quotes import (
     _latest_a_share_quotes,
     _quote_lookup_code,
@@ -709,7 +710,7 @@ def _trade_market_context(trade: TradeLog) -> tuple[str, str, str]:
     market_context = "行情数据暂不可用，先按交易理由和纪律规则复盘。"
     sector_context = "未在订单流方向估算/题材雷达/涨停天梯中找到明确支持。"
     stock_context = f"{trade.name} {trade.code}：价格{trade.price:.2f}，金额{trade.amount:.2f}，仓位{trade.position_ratio * 100:.1f}%。"
-    radar = _get_response_cache("theme-radar")
+    radar = _get_current_theme_radar_cache()
     if radar is not None:
         strongest = radar.strongest_theme.name if radar.strongest_theme else "暂无"
         market_context = f"市场温度：{radar.market_temperature}；最强题材：{strongest}。"

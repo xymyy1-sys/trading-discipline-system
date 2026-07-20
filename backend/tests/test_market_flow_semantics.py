@@ -1,5 +1,7 @@
 from datetime import datetime
 
+import pytest
+
 from app.services.market_data import MarketDataProvider, SectorFlowPoint, _sanitize_flow_timeline
 
 
@@ -192,6 +194,7 @@ def test_eastmoney_sector_flow_fetches_all_pages(monkeypatch):
             return self.payload
 
     def fake_get(_url, params=None, **_kwargs):
+        assert (params or {}).get("fid") == "f12"
         page = int((params or {}).get("pn") or 1)
         if page == 1:
             rows = [
@@ -231,6 +234,34 @@ def test_eastmoney_sector_flow_fetches_all_pages(monkeypatch):
     assert len(rows) == 101
     assert rows[-1]["name"] == "半导体"
     assert rows[-1]["net_inflow"] == -248.78
+
+
+def test_eastmoney_sector_flow_rejects_duplicate_page_drift(monkeypatch):
+    provider = MarketDataProvider()
+
+    class FakeResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            rows = [
+                {
+                    "f12": f"BK{i:04d}",
+                    "f14": f"板块{i}",
+                    "f3": 1,
+                    "f62": 1_000_000_000,
+                    "f72": 400_000_000,
+                }
+                for i in range(100)
+            ]
+            return {"data": {"total": 101, "diff": rows}}
+
+    monkeypatch.setattr(
+        "app.services.market_data.requests.get",
+        lambda *args, **kwargs: FakeResponse(),
+    )
+    with pytest.raises(ValueError, match="pagination"):
+        provider._fetch_direct_eastmoney_sector_flow_raw("行业资金流", "今日")
 
 
 def test_eastmoney_sector_flow_uses_period_specific_change_field(monkeypatch):
@@ -278,12 +309,14 @@ def test_eastmoney_sector_flow_uses_period_specific_change_field(monkeypatch):
 
     assert five_day["change_pct"] == -6.25
     assert five_day["net_inflow"] == -123.0
-    assert five_day["main_inflow"] == -123.0
+    # The second evidence column is the large-order sub-bucket (f168),
+    # rather than a duplicate of the main-order total (f164).
+    assert five_day["main_inflow"] == -43.0
     assert five_day["flow_breakdown"][0] == {"name": "超大单", "net": -80.0, "ratio": -4.5}
     assert five_day["high_price"] is None
     assert ten_day["change_pct"] == 11.8
     assert ten_day["net_inflow"] == 220.0
-    assert ten_day["main_inflow"] == 220.0
+    assert ten_day["main_inflow"] == 70.0
     assert ten_day["flow_breakdown"][0] == {"name": "超大单", "net": 150.0, "ratio": 7.5}
     assert ten_day["prev_close"] is None
 

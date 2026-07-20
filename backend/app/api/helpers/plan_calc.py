@@ -4,7 +4,8 @@ from typing import Any
 from sqlalchemy.orm import Session
 from app.models.trading import Holding, NextDayPlan
 from app.schemas.trading import ClassificationBasis, NextDayPlanOut, NextDayPlanCreate, LimitUpPlanCreate, AuctionPlan
-from app.services.market_data import _get_response_cache, _last_trading_day
+from app.services.market_data import _get_current_theme_radar_cache, _last_trading_day
+from app.services.cache import _get_response_cache
 from app.api.helpers.quotes import (
     _safe_float,
     _safe_turnover,
@@ -525,7 +526,7 @@ def _limit_up_auction_evidence(payload: LimitUpPlanCreate, concepts: list[str]) 
     evidence_position_cap = 0.0
     theme_evidence: list[str] = []
 
-    radar = _get_response_cache("theme-radar")
+    radar = _get_current_theme_radar_cache()
     if radar is not None:
         for idx, theme in enumerate(radar.themes[:20], start=1):
             theme_mainline = str(getattr(theme, "mainline", "") or getattr(theme, "theme_type", "") or "")
@@ -826,7 +827,7 @@ def _holding_market_evidence(holding: Holding, quote: dict[str, Any] | None = No
             or theme_flow["pullback_pct"] >= 20
             or theme_flow["current"] < 0
         )
-    radar = _get_response_cache("theme-radar")
+    radar = _get_current_theme_radar_cache()
     if radar is not None:
         for theme in radar.themes[:20]:
             stock_names = [role.name for role in theme.core_stocks]
@@ -1084,7 +1085,7 @@ def _dynamic_operation_advice(label: str, category: str, holding: Holding, curre
 def _leader_support_for_holding(holding: Holding, evidence: dict[str, Any]) -> list[str]:
     sector = str(evidence.get("sector") or "")
     supports: list[str] = []
-    radar = _get_response_cache("theme-radar")
+    radar = _get_current_theme_radar_cache()
     if radar is not None:
         for theme in radar.themes[:20]:
             if sector and sector in theme.name:

@@ -2040,11 +2040,16 @@ class ThemeRadarItem(BaseModel):
     change_pct: float
     net_inflow: float
     main_inflow: float
+    flow_ratio: float | None = None
+    breadth_ratio: float | None = None
+    constituent_coverage: float | None = None
+    score_basis: list[str] = Field(default_factory=list)
     limit_up_count: int
     stock_count: int
     leader_names: list[str]
     core_stocks: list[ThemeStockRole]
     timeline: list[SectorFlowPoint] = Field(default_factory=list)
+    timeline_scope: str = ""
     resonance_tags: list[str]
     action: str
     risk: str
