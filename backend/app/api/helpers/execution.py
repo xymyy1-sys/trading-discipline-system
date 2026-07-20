@@ -49,6 +49,7 @@ from app.schemas.trading import (
 )
 from app.services.flow_kinetics import FlowKinetics, classify_price_volume_flow_alerts
 from app.services.global_market import global_market_service
+from app.services.cache import _get_response_cache
 
 WEAK_EXPECTATION_RESULTS = {"WEAKER", "INVALID", "SLIGHTLY_WEAKER"}
 STRONG_EXPECTATION_RESULTS = {"STRONGER", "SLIGHTLY_STRONGER"}
@@ -132,6 +133,60 @@ def _json_list(raw: str | None) -> list[str]:
     except Exception:
         return []
     return [str(item) for item in value] if isinstance(value, list) else []
+
+
+def _sector_name_key(value: Any) -> str:
+    return re.sub(r"[\s·・/\\（）()]+", "", str(value or "").strip()).lower()
+
+
+def _cached_sector_distribution_context(seesaw: Any | None) -> dict[str, Any]:
+    """Match a holding's sector to the latest persisted-in-cache risk snapshot.
+
+    This helper is intentionally read-only.  A holding calculation must never
+    trigger an external board-flow or margin request merely because a page was
+    opened.
+    """
+
+    if seesaw is None:
+        return {}
+    candidates = [
+        getattr(seesaw, "primary_industry_sector", ""),
+        getattr(seesaw, "matched_flow_sector", ""),
+        getattr(seesaw, "holding_theme", ""),
+        getattr(seesaw, "sector", ""),
+        *list(getattr(seesaw, "concept_flow_sectors", []) or []),
+    ]
+    candidate_keys = {_sector_name_key(item) for item in candidates if _sector_name_key(item)}
+    if not candidate_keys:
+        return {}
+    matches: list[dict[str, Any]] = []
+    for board_type in ("行业", "概念"):
+        cached = _get_response_cache(f"sector-temperature|{board_type}", allow_stale=True)
+        items = cached.get("items") if isinstance(cached, dict) else getattr(cached, "items", None)
+        for item in items or []:
+            data = item.model_dump() if hasattr(item, "model_dump") else item
+            if not isinstance(data, dict):
+                continue
+            item_key = _sector_name_key(data.get("name"))
+            if not item_key:
+                continue
+            exact = item_key in candidate_keys
+            related = any(
+                len(key) >= 2 and (key in item_key or item_key in key)
+                for key in candidate_keys
+            )
+            if exact or related:
+                matches.append({**data, "board_type": board_type, "_match_exact": exact})
+    if not matches:
+        return {}
+    return max(
+        matches,
+        key=lambda item: (
+            bool(item.get("_match_exact")),
+            int(item.get("distribution_risk_score") or 0),
+            int(item.get("heat_score") or 0),
+        ),
+    )
 
 
 def _shanghai_now_naive() -> datetime:
@@ -1537,6 +1592,7 @@ def _confirmation_policy(event_type: str) -> tuple[int, int]:
         "TIME_STOP_TRIGGERED": (3, 1),
         "SECTOR_MIGRATION_CONFIRMED": (10, 2),
         "SECTOR_FLOW_PEAK_REVERSAL": (10, 2),
+        "SECTOR_DISTRIBUTION_RISK": (10, 2),
         "RISK_RECOVERY_CONFIRMED": (5, 1),
         "PROFIT_DRAWDOWN_WARNING": (15, 2),
         "HIGH_SELL_WINDOW": (5, 2),
@@ -1755,6 +1811,49 @@ def build_position_execution_state(
             market_expansion_frozen = True
             invalid_conditions.append("外围主要指数出现新鲜且一致的显著弱势时，暂停加仓、抄底和做T买回。")
             recovery_conditions.append("外围冻结解除后，仍需A股市场、所属板块与个股量价共同确认，才恢复扩仓评估。")
+    sector_distribution = _cached_sector_distribution_context(seesaw)
+    distribution_state = str(sector_distribution.get("distribution_state") or "")
+    distribution_level = str(
+        sector_distribution.get("distribution_risk_level") or "UNKNOWN"
+    ).upper()
+    distribution_confirmations = int(
+        sector_distribution.get("distribution_confirmation_count") or 0
+    )
+    distribution_high = bool(
+        distribution_state == "高位派发风险"
+        and distribution_level in {"HIGH", "CRITICAL"}
+        and distribution_confirmations >= 3
+        and sector_distribution.get("order_flow_exhausted") is True
+        and sector_distribution.get("price_response_weak") is True
+    )
+    distribution_watch = bool(
+        not distribution_high
+        and distribution_state in {"资金承载衰减", "杠杆追涨观察", "去杠杆踩踏"}
+    )
+    if distribution_high:
+        market_expansion_frozen = True
+        sector_name = str(sector_distribution.get("name") or "所属板块")
+        leverage_note = (
+            "，并得到T+1两融拥挤确认"
+            if sector_distribution.get("leverage_crowding") is True
+            else "；两融未拥挤或数据缺口，不把两融当作必要条件"
+        )
+        evidence.append(
+            f"板块派发联合证据：{sector_name}同时出现资金承载衰减与价格负反馈（{distribution_confirmations}项确认）{leverage_note}；禁止追涨、加仓和做T买回，但不据此单独机械卖出。"
+        )
+        evidence.extend(
+            [f"板块证据：{item}" for item in list(sector_distribution.get("distribution_evidence") or [])[:3]]
+        )
+        invalid_conditions.append("板块派发联合证据未解除前，禁止新增风险；已有持仓须再叠加个股预期证伪、量价破位或固定止损，才升级减仓。")
+        recovery_conditions.append("板块订单流重新转强、价格恢复正反馈且杠杆拥挤不再恶化后，再由个股站回VWAP确认是否解除派发观察。")
+    elif distribution_watch:
+        evidence.append(
+            f"板块观察信号：{sector_distribution.get('name') or '所属板块'}处于{distribution_state}；证据尚未闭环，暂停追高并等待资金和价格响应复核。"
+        )
+    elif distribution_state in {"健康", "资金承载健康"}:
+        counter_evidence.append(
+            f"板块反证：{sector_distribution.get('name') or '所属板块'}资金与价格响应仍属健康，尚未形成派发联合证据。"
+        )
     risk_family_scores: dict[str, int] = {}
     positive_family_scores: dict[str, int] = {}
 
@@ -1765,6 +1864,11 @@ def build_position_execution_state(
 
     def add_positive(family: str, score: int = 1) -> None:
         positive_family_scores[family] = max(positive_family_scores.get(family, 0), max(0, int(score)))
+
+    if distribution_high:
+        # One corroborating family: enough to freeze expansion, never enough
+        # by itself to produce a sell action (score 1 => WATCH only).
+        add_risk("sector_distribution", 1)
 
     negative_score = 0
     hard_exit = False
@@ -1882,6 +1986,8 @@ def build_position_execution_state(
     else:
         sector_state = "订单流跷跷板数据缺口"
         counter_evidence.append("未取得板块跷跷板数据，本次建议主要依据个股价格和利润保护。")
+    if distribution_state:
+        sector_state = f"{sector_state} · {distribution_state}"
 
     raw_negative_score = sum(risk_family_scores.values())
     protected_risk = risk_family_scores.get("hard_stop", 0) + risk_family_scores.get("structure", 0)
@@ -2095,6 +2201,24 @@ def build_position_execution_state(
         volume_price=volume_price,
         high_drawdown_pct=high_drawdown_pct,
     )
+    if distribution_high:
+        events.append({
+            "captured_at": now,
+            "scope": "stock",
+            "target_code": holding.code,
+            "target_name": holding.name,
+            "event_type": "SECTOR_DISTRIBUTION_RISK",
+            "severity": "critical",
+            "value": float(sector_distribution.get("distribution_risk_score") or 0),
+            "previous_value": float(sector_distribution.get("heat_score") or 0),
+            "priority": 86,
+            "group_key": "stock:sector-distribution-risk",
+            "evidence": [
+                f"{sector_distribution.get('name') or '所属板块'}：{distribution_state}",
+                *list(sector_distribution.get("distribution_evidence") or [])[:3],
+                "只冻结追涨、加仓和做T买回；必须叠加个股预期/量价/止损证据才执行卖出。",
+            ],
+        })
     if high_sell_signal.status == "ACTIVE":
         events.append({
             "captured_at": now,

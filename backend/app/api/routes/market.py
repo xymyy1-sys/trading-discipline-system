@@ -1,4 +1,5 @@
 from concurrent.futures import ThreadPoolExecutor
+import json
 
 from fastapi import APIRouter, Depends, Request
 from sqlalchemy.orm import Session
@@ -34,6 +35,11 @@ from app.services.market_data import (
 )
 from app.services.sector_margin import fetch_sector_margin
 from app.services.sector_temperature import build_sector_temperature
+from app.services.sector_evidence_history import (
+    load_sector_history,
+    persist_global_evidence_snapshot,
+    persist_sector_temperature_snapshot,
+)
 from app.services.cache import _get_cached_flow, _get_response_cache, _set_response_cache
 from app.services.market_regime import get_market_regime, read_market_regime
 from app.api.helpers.reflexivity import build_market_reflexivity
@@ -258,12 +264,18 @@ def refresh_limit_up_ladder(
 def _sector_temperature_snapshot(
     board_type: str = "行业",
     force_refresh: bool = False,
+    db: Session | None = None,
 ) -> SectorTemperatureOut:
     normalized = "概念" if board_type == "概念" else "行业"
     response_cache_key = f"sector-temperature|{normalized}"
     if not force_refresh:
         cached = _get_response_cache(response_cache_key)
         if cached is not None:
+            if db is not None and hasattr(db, "query"):
+                try:
+                    persist_sector_temperature_snapshot(db, cached)
+                except Exception:
+                    db.rollback()
             return cached
 
     with ThreadPoolExecutor(max_workers=5) as executor:
@@ -387,6 +399,12 @@ def _sector_temperature_snapshot(
     )
     validated = SectorTemperatureOut.model_validate(result)
     _set_response_cache(response_cache_key, validated)
+    if db is not None and hasattr(db, "query"):
+        try:
+            persist_sector_temperature_snapshot(db, validated)
+        except Exception:
+            db.rollback()
+            validated.notes.append("板块历史快照暂未写入，当前实时结果仍可查看；待数据库迁移或存储恢复后重试。")
     return validated
 
 
@@ -413,10 +431,72 @@ def sector_temperature(
 def refresh_sector_temperature(
     request: Request,
     board_type: str = "行业",
+    db: Session = Depends(get_db),
 ) -> SectorTemperatureOut:
     """Explicitly collect multi-window flows and T+1 crowding evidence."""
 
-    return _sector_temperature_snapshot(board_type=board_type, force_refresh=True)
+    return _sector_temperature_snapshot(board_type=board_type, force_refresh=True, db=db)
+
+
+@router.get("/market/sector-temperature/history")
+@limiter.limit("20/minute")
+def sector_temperature_history(
+    request: Request,
+    board_type: str | None = None,
+    board_code: str | None = None,
+    board_name: str | None = None,
+    start_date: str | None = None,
+    end_date: str | None = None,
+    limit: int = 60,
+    db: Session = Depends(get_db),
+) -> list[dict[str, object]]:
+    """Return auditable daily board evidence without recalculating history."""
+
+    rows = load_sector_history(
+        db,
+        board_type=board_type,
+        board_code=board_code,
+        board_name=board_name,
+        start_date=start_date,
+        end_date=end_date,
+        limit=limit,
+        ascending=True,
+    )
+    def array(raw: str) -> list[object]:
+        try:
+            value = json.loads(raw or "[]")
+        except (TypeError, ValueError):
+            value = []
+        return value if isinstance(value, list) else []
+
+    output: list[dict[str, object]] = []
+    for row in rows:
+        output.append({
+            "trade_date": row.trade_date,
+            "board_type": row.board_type,
+            "board_code": row.board_code,
+            "name": row.board_name,
+            "captured_at": row.captured_at,
+            "source": row.source,
+            "data_quality": row.data_quality,
+            "change_pct": row.change_pct,
+            "change_pct_5d": row.change_pct_5d,
+            "change_pct_10d": row.change_pct_10d,
+            "net_inflow": row.net_inflow,
+            "net_inflow_5d": row.net_inflow_5d,
+            "net_inflow_10d": row.net_inflow_10d,
+            "financing_balance": row.financing_balance,
+            "financing_net_buy": row.financing_net_buy,
+            "margin_as_of": row.margin_as_of,
+            "distribution_state": row.distribution_state,
+            "distribution_risk_level": row.distribution_risk_level,
+            "distribution_risk_score": row.distribution_risk_score,
+            "distribution_confirmation_count": row.distribution_confirmation_count,
+            "distribution_evidence": array(row.distribution_evidence_json),
+            "distribution_counter_evidence": array(row.distribution_counter_evidence_json),
+            "distribution_actions": array(row.distribution_actions_json),
+        })
+    return output
 
 
 @router.get("/market/limit-up-atmosphere", response_model=LimitUpAtmosphereOut)
@@ -514,10 +594,23 @@ def global_market_cues(
 
 @router.post("/market/global-cues/refresh", response_model=GlobalMarketOut)
 @limiter.limit("4/minute")
-def refresh_global_market_cues(request: Request) -> GlobalMarketOut:
-    return GlobalMarketOut.model_validate(
+def refresh_global_market_cues(
+    request: Request,
+    db: Session = Depends(get_db),
+) -> GlobalMarketOut:
+    refreshed = GlobalMarketOut.model_validate(
         global_market_service.snapshot(force_refresh=True)
     )
+    try:
+        persist_global_evidence_snapshot(db, refreshed)
+    except Exception as exc:
+        db.rollback()
+        # The provider refresh succeeded, so preserve that useful result while
+        # exposing the persistence fault instead of silently discarding it.
+        refreshed.notes.append(
+            f"外围证据已刷新，但历史快照持久化失败：{exc.__class__.__name__}；当前结果仍可查看。"
+        )
+    return refreshed
 
 @router.get("/market/grade", response_model=MarketGradeOut)
 def market_grade(

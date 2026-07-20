@@ -29,6 +29,7 @@ from app.models.trading import (
     WatchlistEntry,
 )
 from app.schemas.trading import MarketRegimeOut
+from app.services.global_market import global_market_service
 from app.services.intraday_evidence_engine import collect_holding_evidence, collect_tracked_stock_evidence
 from app.services.market_data import MarketDataProvider
 from app.services.market_regime import get_market_regime
@@ -40,6 +41,7 @@ from app.services.recommendation_outcomes import (
 from app.services.sector_expansion import SectorExpansionRadarService
 from app.services.simulation import process_open_orders
 from app.services.simulation_shadow import mark_shadow_equity_after_close, run_shadow_experiments
+from app.services.sector_evidence_history import persist_global_evidence_snapshot
 from app.services.trading_calendar import (
     is_a_share_trading_day,
     trading_calendar_diagnostic,
@@ -49,6 +51,9 @@ from app.services.unified_market_events import persist_unified_market_events
 COLLECTOR_INTERVAL_SECONDS = 60
 MARKET_REGIME_INTERVAL_SECONDS = 300
 MARKET_REGIME_MIN_PERSIST_SECONDS = 240
+GLOBAL_CUES_REFRESH_INTERVAL_SECONDS = 600
+SECTOR_TEMPERATURE_REFRESH_INTERVAL_SECONDS = 900
+THEME_RADAR_REFRESH_INTERVAL_SECONDS = 1800
 OPPORTUNITY_MARKET_SNAPSHOT_MAX_AGE = timedelta(minutes=15)
 COLLECTOR_ENABLED = True
 _collector_task: asyncio.Task | None = None
@@ -62,6 +67,9 @@ _market_regime_guard = threading.Lock()
 _opportunity_radar_guard = threading.Lock()
 _market_regime_last_success_at: datetime | None = None
 _market_regime_last_error = ""
+_market_auxiliary_last_attempt_at: dict[str, float] = {}
+_market_auxiliary_last_success_at: dict[str, datetime] = {}
+_market_auxiliary_errors: dict[str, str] = {}
 _opportunity_radar_running = False
 _opportunity_radar_last_success_at: datetime | None = None
 _opportunity_radar_last_error = ""
@@ -204,7 +212,10 @@ def _is_market_regime_watch_time(now: datetime | None = None) -> bool:
     """Collect from the end of auction through a final post-close snapshot."""
     now = shanghai_now_naive(now) if now is not None else _shanghai_now_naive()
     current = now.time()
-    return is_a_share_trading_day(now.date()) and time(9, 25) <= current <= time(15, 5)
+    return is_a_share_trading_day(now.date()) and (
+        time(9, 25) <= current < time(11, 31)
+        or time(13, 0) <= current < time(15, 6)
+    )
 
 
 def _is_simulation_match_time(now: datetime | None = None) -> bool:
@@ -398,6 +409,118 @@ def _recent_market_regime_exists(db, now: datetime) -> bool:
     return -60 <= age_seconds < MARKET_REGIME_MIN_PERSIST_SECONDS
 
 
+_MARKET_AUXILIARY_INTERVALS = {
+    "global_cues": GLOBAL_CUES_REFRESH_INTERVAL_SECONDS,
+    "sector_temperature": SECTOR_TEMPERATURE_REFRESH_INTERVAL_SECONDS,
+    "theme_radar": THEME_RADAR_REFRESH_INTERVAL_SECONDS,
+}
+_MARKET_AUXILIARY_LABELS = {
+    "global_cues": "外围市场",
+    "sector_temperature": "行业/概念温度",
+    "theme_radar": "题材雷达",
+}
+
+
+def _market_auxiliary_due(key: str, *, force: bool, now_clock: float | None = None) -> bool:
+    if force:
+        return True
+    current = clock.time() if now_clock is None else now_clock
+    previous = _market_auxiliary_last_attempt_at.get(key)
+    return previous is None or current - previous >= _MARKET_AUXILIARY_INTERVALS[key]
+
+
+def _market_auxiliary_failure(key: str, exc: Exception, db) -> None:
+    try:
+        db.rollback()
+    except Exception:
+        pass
+    message = str(exc).strip()
+    detail = f"{exc.__class__.__name__}: {message}" if message else exc.__class__.__name__
+    _market_auxiliary_errors[key] = detail[:240]
+
+
+def _market_auxiliary_success(key: str) -> None:
+    _market_auxiliary_last_success_at[key] = _shanghai_now_naive()
+    _market_auxiliary_errors.pop(key, None)
+
+
+def _market_auxiliary_error_summary() -> str:
+    if not _market_auxiliary_errors:
+        return ""
+    details = [
+        f"{_MARKET_AUXILIARY_LABELS.get(key, key)}={error}"
+        for key, error in sorted(_market_auxiliary_errors.items())
+    ]
+    return "辅助采集降级：" + "；".join(details)
+
+
+def _run_market_auxiliary_collections(db, *, force: bool = False) -> str:
+    """Refresh independent slow evidence without coupling it to every 5-minute tick.
+
+    Attempts, not only successes, are throttled.  A persistently failing provider
+    therefore cannot be hammered every five minutes.  ``force=True`` remains an
+    explicit operator override and bypasses every auxiliary interval.
+    """
+
+    now_clock = clock.time()
+    if _market_auxiliary_due("global_cues", force=force, now_clock=now_clock):
+        _market_auxiliary_last_attempt_at["global_cues"] = now_clock
+        try:
+            global_snapshot = global_market_service.snapshot(force_refresh=force)
+            persist_global_evidence_snapshot(db, global_snapshot)
+        except Exception as exc:
+            _market_auxiliary_failure("global_cues", exc, db)
+        else:
+            _market_auxiliary_success("global_cues")
+
+    if _market_auxiliary_due("sector_temperature", force=force, now_clock=now_clock):
+        _market_auxiliary_last_attempt_at["sector_temperature"] = now_clock
+        sector_errors: list[str] = []
+        try:
+            # Kept local to avoid changing the existing service/API boundary in
+            # this hardening pass.  The callable is invoked only when its own
+            # fifteen-minute throttle is due.
+            from app.api.routes.market import _sector_temperature_snapshot
+
+            for board_type in ("行业", "概念"):
+                try:
+                    _sector_temperature_snapshot(
+                        board_type=board_type,
+                        force_refresh=force,
+                        db=db,
+                    )
+                except Exception as exc:
+                    try:
+                        db.rollback()
+                    except Exception:
+                        pass
+                    message = str(exc).strip()
+                    detail = (
+                        f"{exc.__class__.__name__}: {message}"
+                        if message
+                        else exc.__class__.__name__
+                    )
+                    sector_errors.append(f"{board_type}={detail[:160]}")
+        except Exception as exc:
+            _market_auxiliary_failure("sector_temperature", exc, db)
+        else:
+            if sector_errors:
+                _market_auxiliary_errors["sector_temperature"] = "；".join(sector_errors)
+            else:
+                _market_auxiliary_success("sector_temperature")
+
+    if _market_auxiliary_due("theme_radar", force=force, now_clock=now_clock):
+        _market_auxiliary_last_attempt_at["theme_radar"] = now_clock
+        try:
+            opportunity_market_provider.theme_radar(force_refresh=force)
+        except Exception as exc:
+            _market_auxiliary_failure("theme_radar", exc, db)
+        else:
+            _market_auxiliary_success("theme_radar")
+
+    return _market_auxiliary_error_summary()
+
+
 def run_market_regime_collection_once(
     trigger: str = "scheduler",
     *,
@@ -425,25 +548,25 @@ def run_market_regime_collection_once(
         db = SessionLocal()
         if _circuit_until.get(key, 0) > clock.time():
             return None
-        if not force and _recent_market_regime_exists(db, collected_at):
+        recent_main_snapshot = not force and _recent_market_regime_exists(db, collected_at)
+        if recent_main_snapshot:
+            # A different worker or a just-restarted process may already have a
+            # fresh domestic snapshot while its process-local auxiliary caches
+            # are still empty.  Skip only the domestic rebuild; independently
+            # maintain each throttled auxiliary cache.
+            _market_regime_last_error = _run_market_auxiliary_collections(
+                db,
+                force=False,
+            )
             return None
-        result = get_market_regime(db, force_refresh=force)
-        # Warm the read-only page caches in the same low-frequency background
-        # loop.  Failures are isolated: overseas or theme data must never make
-        # the domestic market-regime snapshot fail.
-        try:
-            from app.services.global_market import global_market_service
 
-            global_market_service.snapshot(force_refresh=force)
-        except Exception:
-            pass
-        try:
-            opportunity_market_provider.theme_radar(force_refresh=force)
-        except Exception:
-            pass
+        result = get_market_regime(db, force_refresh=force)
+        # Auxiliary failures are isolated from the domestic snapshot, but their
+        # exception classes remain visible in collector diagnostics.
+        auxiliary_error = _run_market_auxiliary_collections(db, force=force)
         _failure_counts.pop(key, None)
         _circuit_until.pop(key, None)
-        _market_regime_last_error = ""
+        _market_regime_last_error = auxiliary_error
         _market_regime_last_success_at = _shanghai_now_naive()
         return result
     except Exception as exc:
@@ -767,6 +890,29 @@ def _run_intraday_collection_once_locked(trigger: str = "manual") -> IntradayCol
             tracked = {}
         elif not holdings:
             notes.append("暂无持仓，后台采集跳过。")
+        global_cues = None
+        if holdings:
+            try:
+                # Read the already-collected snapshot exactly once per round.
+                # Explicit refresh and the low-frequency collector own all
+                # external provider I/O; holding fan-out only reuses this cache.
+                global_cues = global_market_service.read_cached_snapshot()
+                quality = str(
+                    global_cues.get("data_quality")
+                    or global_cues.get("quality")
+                    or "missing"
+                )
+                notes.append(
+                    f"外围市场缓存已读取一次（质量：{quality}），本轮全部持仓复用同一份快照。"
+                )
+                if quality == "missing":
+                    notes.append("外围市场缓存暂无有效行情，本轮不启用外围方向门控。")
+            except Exception as global_exc:
+                global_cues = None
+                notes.append(
+                    "外围市场缓存读取失败："
+                    f"{global_exc.__class__.__name__}；持仓采集继续，本轮不启用外围方向门控。"
+                )
         seesaw_by_code: dict[str, object] = {}
         if holdings:
             monitor = _run_with_resilience(
@@ -789,6 +935,7 @@ def _run_intraday_collection_once_locked(trigger: str = "manual") -> IntradayCol
                     stage=stage,
                     now=started,
                     seesaw=seesaw_by_code.get(_normalize_code(holding.code)),
+                    global_cues=global_cues,
                 ),
                 notes,
                 on_error=db.rollback,
@@ -1010,6 +1157,9 @@ def collector_status() -> dict[str, object]:
         "market_regime_interval_seconds": MARKET_REGIME_INTERVAL_SECONDS,
         "market_regime_last_success_at": _market_regime_last_success_at,
         "market_regime_last_error": _market_regime_last_error,
+        "market_auxiliary_intervals_seconds": dict(_MARKET_AUXILIARY_INTERVALS),
+        "market_auxiliary_last_success_at": dict(_market_auxiliary_last_success_at),
+        "market_auxiliary_errors": dict(_market_auxiliary_errors),
         "opportunity_radar_running": _opportunity_radar_running,
         "opportunity_radar_last_success_at": _opportunity_radar_last_success_at,
         "opportunity_radar_last_error": _opportunity_radar_last_error,

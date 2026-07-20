@@ -8,6 +8,7 @@ export type IntradayEventSemantics = {
 
 const CRITICAL_RISK_EVENTS = new Set([
   'VOLUME_DOWN_FLOW_ACCELERATION',
+  'SECTOR_DISTRIBUTION_RISK',
 ])
 
 const RISK_EVENTS = new Set([
@@ -60,6 +61,7 @@ const GUIDANCE: Record<string, string> = {
   SHRINKING_DECLINE_WEAKNESS: '缩量不等于见底；订单流方向估算仍弱时禁止接飞刀。',
   VOLUME_DOWN_FLOW_ACCELERATION: '放量下跌且订单流方向负值加速，禁止逆势补仓。',
   FLOW_TURN_OUT_DISTRIBUTION_WARNING: '上涨中订单流方向估算转负，提高利润保护；跌破分时均价后按兑现窗口处理。',
+  SECTOR_DISTRIBUTION_RISK: '板块资金承载与价格响应已形成派发联合证据；停止追涨、加仓和做T买回，已有仓位仍须叠加个股预期、量价或固定止损才执行卖出。',
   SECTOR_FLOW_TURN_IN: '板块订单流方向估算开始转正，先观察持续性，不能仅凭拐点追涨。',
   SECTOR_FLOW_RECOVERY: '板块订单流方向估算边际修复，等待价格和分时均价同步确认。',
   VOLUME_FLOW_STRENGTH_CONFIRMED: '放量上涨且订单流方向估算改善；回踩分时均价不破后再确认延续。',

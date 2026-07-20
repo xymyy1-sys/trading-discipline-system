@@ -15,6 +15,7 @@ describe('盘中资金与量价事件语义', () => {
       'VOLUME_REBOUND_CONFIRMED',
       'VOLUME_DOWN_FLOW_ACCELERATION',
       'FLOW_TURN_OUT_DISTRIBUTION_WARNING',
+      'SECTOR_DISTRIBUTION_RISK',
     ]
     events.forEach(event => expect(chineseLabel(event)).not.toBe(event))
   })
@@ -24,6 +25,13 @@ describe('盘中资金与量价事件语义', () => {
     expect(semantics.kind).toBe('risk')
     expect(semantics.toneClass).toBe('risk-high')
     expect(semantics.guidance).toContain('禁止逆势补仓')
+  })
+
+  test('板块派发联合证据标红但不越权生成机械卖出', () => {
+    const semantics = intradayEventSemantics('SECTOR_DISTRIBUTION_RISK', 'critical')
+    expect(semantics.kind).toBe('risk')
+    expect(semantics.toneClass).toBe('risk-high')
+    expect(semantics.guidance).toContain('仍须叠加个股预期')
   })
 
   test('反弹确认与缩量回踩观察不被误标为风险', () => {

@@ -248,6 +248,317 @@ def _margin_fields(margin: Any) -> dict[str, Any]:
     }
 
 
+def _distribution_assessment(
+    *,
+    change: float | None,
+    change_5d: float | None,
+    change_10d: float | None,
+    current_net: float | None,
+    net_5d: float | None,
+    net_10d: float | None,
+    speed: float | None,
+    acceleration: float | None,
+    turning: str,
+    margin_fields: Mapping[str, Any],
+    data_quality: str,
+) -> dict[str, Any]:
+    """Assess cash-flow carrying capacity versus the T+1 leverage slow variable.
+
+    The confirmation count deliberately counts *independent evidence families*.
+    The overlapping financing windows are one leverage family, so public T+1
+    margin data can never, by itself, produce a high-risk state or a trade
+    instruction.
+    """
+
+    price_window_count = sum(value is not None for value in (change, change_5d, change_10d))
+    flow_window_count = sum(value is not None for value in (current_net, net_5d, net_10d))
+    evidence: list[str] = []
+    counter_evidence: list[str] = []
+
+    if price_window_count < 2 or flow_window_count < 2 or data_quality in {"missing", "limited", "stale"}:
+        if price_window_count < 2:
+            counter_evidence.append("价格窗口少于2个，无法确认价格所处位置与响应强弱。")
+        if flow_window_count < 2:
+            counter_evidence.append("订单流方向窗口少于2个，无法确认资金承载是否衰减。")
+        if data_quality == "stale":
+            counter_evidence.append("当日板块快照已过期，不生成当前派发或踩踏结论。")
+        return {
+            "distribution_state": "数据不足",
+            "distribution_risk_level": "UNKNOWN",
+            "distribution_risk_score": 0,
+            "order_flow_exhausted": False,
+            "leverage_crowding": False,
+            "price_response_weak": False,
+            "distribution_confirmation_count": 0,
+            "distribution_evidence": evidence,
+            "distribution_counter_evidence": counter_evidence,
+            "distribution_actions": ["补齐至少2个价格与订单流方向窗口后再判断，不据此交易。"],
+        }
+
+    # "High" means consistent short-window extension, not merely one rebound
+    # window.  A 5-day rebound from a deeply oversold 10-day base must not be
+    # called high-position distribution.
+    high_price_location = bool(
+        (
+            change_5d is not None
+            and change_5d >= 8.0
+            and (change_10d is None or change_10d >= 8.0)
+        )
+        or (
+            change_10d is not None
+            and change_10d >= 15.0
+            and (change_5d is None or change_5d >= 3.0)
+        )
+    )
+
+    # Board flows are expressed in 亿元, but board size varies materially.  A
+    # one-size absolute threshold would suppress smaller boards while a sign-
+    # only rule turns rounding dust into a signal.  Use a 1亿元/day absolute
+    # floor, plus a relative branch that still requires at least 0.25亿元/day
+    # and 35% of the board's recent daily-equivalent flow.
+    daily_5 = abs(net_5d) / 5.0 if net_5d is not None else None
+    daily_10 = abs(net_10d) / 10.0 if net_10d is not None else None
+    reference_daily_flow = max(
+        (value for value in (daily_5, daily_10) if value is not None),
+        default=0.0,
+    )
+
+    def material_flow(value: float | None, window_days: int) -> bool:
+        if value is None:
+            return False
+        daily_equivalent = abs(value) / max(1, window_days)
+        return bool(
+            daily_equivalent >= 1.0
+            or (
+                reference_daily_flow >= 1.0
+                and daily_equivalent >= 0.25
+                and daily_equivalent >= reference_daily_flow * 0.35
+            )
+        )
+
+    current_flow_material = material_flow(current_net, 1)
+    net_5d_material = material_flow(net_5d, 5)
+    net_10d_material = material_flow(net_10d, 10)
+    recent_flow_positive = bool(
+        (net_5d is not None and net_5d > 0 and net_5d_material)
+        or (net_10d is not None and net_10d > 0 and net_10d_material)
+    )
+    turning_down = turning == "down"
+    velocity_down = bool(
+        speed is not None
+        and speed <= -0.05
+        and (acceleration is None or acceleration <= 0)
+        and (current_flow_material or recent_flow_positive)
+    )
+    flow_drop_from_baseline = bool(
+        recent_flow_positive
+        and current_net is not None
+        and reference_daily_flow - current_net
+        >= max(1.0, reference_daily_flow * 0.35)
+    )
+    flow_rollover = bool(
+        flow_drop_from_baseline
+        and current_net is not None
+        and current_net <= 0
+    )
+    flow_fading = bool(flow_drop_from_baseline and (turning_down or velocity_down))
+    material_current_outflow = bool(
+        current_net is not None
+        and current_net < 0
+        and current_flow_material
+        and (turning_down or velocity_down)
+    )
+    order_flow_exhausted = bool(flow_rollover or flow_fading or material_current_outflow)
+
+    weak_response_signals = [
+        current_net is not None
+        and current_net > 0
+        and current_flow_material
+        and change is not None
+        and change <= 0.3,
+        net_5d is not None
+        and net_5d > 0
+        and net_5d_material
+        and change_5d is not None
+        and change_5d <= 1.0,
+        net_10d is not None
+        and net_10d > 0
+        and net_10d_material
+        and change_10d is not None
+        and change_10d <= 2.0,
+        flow_rollover and change is not None and change <= -0.8,
+    ]
+    weak_response_count = sum(bool(value) for value in weak_response_signals)
+    price_response_weak = weak_response_count > 0
+
+    financing_values = [
+        _optional_float(margin_fields.get("financing_net_buy")),
+        _optional_float(margin_fields.get("financing_net_buy_5d")),
+        _optional_float(margin_fields.get("financing_net_buy_10d")),
+        _optional_float(margin_fields.get("financing_net_buy_20d")),
+    ]
+    financing_present = [value for value in financing_values if value is not None]
+    positive_financing_count = sum(value > 0 for value in financing_present)
+    negative_financing_count = sum(value < 0 for value in financing_present)
+    financing_ratio = _optional_float(margin_fields.get("financing_balance_ratio"))
+    leverage_data_count = len(financing_present) + int(financing_ratio is not None)
+    leverage_crowding = bool(
+        leverage_data_count >= 2
+        and (
+            (financing_ratio is not None and financing_ratio >= 8.0)
+            or positive_financing_count >= 3
+        )
+    )
+    deleveraging = bool(
+        len(financing_present) >= 2
+        and negative_financing_count >= 2
+        and financing_values[0] is not None
+        and financing_values[0] < 0
+    )
+    negative_price = bool(
+        (change is not None and change <= -1.0)
+        or (change_5d is not None and change_5d <= -3.0)
+        or (change_10d is not None and change_10d <= -5.0)
+    )
+    negative_order_flow = bool(
+        current_net is not None
+        and current_net < 0
+        and (
+            turning_down
+            or (speed is not None and speed < 0)
+            or (net_5d is not None and net_5d < 0)
+            or (net_10d is not None and net_10d < 0)
+        )
+    )
+
+    if high_price_location:
+        location_parts = []
+        if change_5d is not None:
+            location_parts.append(f"近5日{change_5d:+.2f}%")
+        if change_10d is not None:
+            location_parts.append(f"近10日{change_10d:+.2f}%")
+        evidence.append(f"价格处于阶段高位（{'、'.join(location_parts)}）。")
+    if order_flow_exhausted:
+        reasons = []
+        if turning_down:
+            reasons.append("方向向下拐头")
+        if velocity_down:
+            reasons.append("流速与加速度走弱")
+        if flow_rollover:
+            reasons.append("历史净流入后当日转为非流入")
+        evidence.append(f"订单流方向出现衰竭迹象（{'、'.join(reasons)}）。")
+    if price_response_weak:
+        evidence.append(f"价格对正向订单流的响应偏弱（命中{weak_response_count}个跨窗口条件）。")
+    if leverage_crowding:
+        as_of = str(margin_fields.get("margin_as_of") or "最近披露日")
+        evidence.append(
+            f"融资拥挤慢变量升高（正向窗口{positive_financing_count}个，"
+            f"余额占比{financing_ratio:.2f}%）截至{as_of}。"
+            if financing_ratio is not None
+            else f"融资拥挤慢变量升高（正向窗口{positive_financing_count}个）截至{as_of}。"
+        )
+    if deleveraging:
+        as_of = str(margin_fields.get("margin_as_of") or "最近披露日")
+        evidence.append(f"融资净买入有{negative_financing_count}个窗口为负（截至{as_of}，T+1慢变量）。")
+    if leverage_data_count == 0:
+        counter_evidence.append("T+1融资数据缺失，不判断杠杆拥挤或去杠杆。")
+    elif leverage_data_count < 3:
+        counter_evidence.append("T+1融资窗口不足3个，杠杆结论已降级。")
+    counter_evidence.append("融资为T+1慢变量，只能作为一个确认维度，不能单独触发高危或交易动作。")
+
+    high_distribution = high_price_location and order_flow_exhausted and price_response_weak
+    deleveraging_stampede = deleveraging and negative_price and negative_order_flow
+    high_risk_data = data_quality in {"high", "good"}
+    if data_quality == "partial":
+        counter_evidence.append("当前数据质量为partial，只允许观察级结论，不升级为HIGH。")
+
+    if high_distribution and high_risk_data:
+        state = "高位派发风险"
+        level = "HIGH"
+        confirmations = sum((high_price_location, order_flow_exhausted, price_response_weak, leverage_crowding))
+        actions = [
+            "禁止追高；等待订单流方向止跌且价格重新响应后再评估。",
+            "已有仓位只按预设结构止损或利润保护计划分批降风险，不因融资慢变量机械处理。",
+        ]
+    elif high_distribution:
+        state = "资金承载衰减"
+        level = "MEDIUM"
+        confirmations = sum((high_price_location, order_flow_exhausted, price_response_weak, leverage_crowding))
+        actions = [
+            "快照质量不足以确认高位派发；暂停追涨，等待新鲜订单流与价格响应复核。",
+        ]
+    elif deleveraging_stampede and high_risk_data:
+        state = "去杠杆踩踏"
+        level = "HIGH"
+        confirmations = sum((deleveraging, negative_price, negative_order_flow))
+        actions = [
+            "禁止接飞刀；等待价格止跌、订单流方向拐头与承接恢复共同确认。",
+            "仅在价格、现金订单流与T+1融资三类证据共振时按原风控计划降风险。",
+        ]
+    elif deleveraging_stampede:
+        state = "去杠杆踩踏"
+        level = "MEDIUM"
+        confirmations = sum((deleveraging, negative_price, negative_order_flow))
+        actions = [
+            "快照质量不足以确认踩踏；禁止接飞刀并等待新鲜价格与订单流复核。",
+        ]
+    elif price_response_weak:
+        state = "资金承载衰减"
+        level = "MEDIUM"
+        confirmations = sum((price_response_weak, order_flow_exhausted, high_price_location))
+        actions = [
+            "暂停追涨或加仓；观察后续放量能否带来有效价格推进。",
+            "若订单流方向重新拐头且价格收复关键位置，再按原计划恢复评估。",
+        ]
+    elif leverage_crowding:
+        state = "杠杆追涨观察"
+        level = "MEDIUM"
+        confirmations = 1
+        actions = [
+            "降低追涨冲动并等待价格与现金订单流确认；两融单项不构成交易指令。",
+        ]
+    else:
+        state = "健康"
+        level = "LOW"
+        confirmations = 0
+        actions = ["未发现资金承载与杠杆的联合背离，继续按既定计划等待触发条件。"]
+
+    score = (
+        15 * int(high_price_location)
+        + 25 * int(order_flow_exhausted)
+        + 25 * int(price_response_weak)
+        + 15 * int(leverage_crowding)
+        + 20 * int(deleveraging)
+        + 10 * int(negative_price and negative_order_flow)
+    )
+    if state == "高位派发风险" and level == "HIGH":
+        score = max(score, 80)
+    elif state == "去杠杆踩踏" and level == "HIGH":
+        score = max(score, 80)
+    elif state == "去杠杆踩踏":
+        score = max(55, min(score, 74))
+    elif state == "资金承载衰减":
+        score = max(45, min(score, 74))
+    elif state == "杠杆追涨观察":
+        # The leverage family alone is explicitly capped below high risk.
+        score = min(max(score, 30), 45)
+    else:
+        score = min(score, 24)
+
+    return {
+        "distribution_state": state,
+        "distribution_risk_level": level,
+        "distribution_risk_score": int(_clamp(float(score))),
+        "order_flow_exhausted": order_flow_exhausted,
+        "leverage_crowding": leverage_crowding,
+        "price_response_weak": price_response_weak,
+        "distribution_confirmation_count": int(confirmations),
+        "distribution_evidence": evidence,
+        "distribution_counter_evidence": counter_evidence,
+        "distribution_actions": actions,
+    }
+
+
 def _status_and_risk(
     *,
     heat: float,
@@ -518,6 +829,20 @@ def _build_item(
             data_quality = "partial"
         suffix = f"，缓存日期 {cache_date}" if cache_date else ""
         counter_evidence.append(f"当日板块快照来自 {cache_source} 缓存{suffix}，不标记为高质量实时数据。")
+    distribution = _distribution_assessment(
+        change=change,
+        change_5d=change_5d,
+        change_10d=change_10d,
+        current_net=current_net,
+        net_5d=net_5d,
+        net_10d=net_10d,
+        speed=speed,
+        acceleration=acceleration,
+        turning=turning,
+        margin_fields=margin_fields,
+        data_quality=data_quality,
+    )
+    counter_evidence.extend(distribution["distribution_counter_evidence"])
     item = {
         "name": name,
         "board_code": str(_value(current or five_day or ten_day, "board_code", default="") or "") or None,
@@ -543,9 +868,10 @@ def _build_item(
         "provider_updated_at": provider_updated_at or None,
         "limit_up_count": limit_up_count,
         **{key: value for key, value in margin_fields.items() if key != "margin_score"},
+        **distribution,
         "evidence": evidence,
         "counter_evidence": counter_evidence,
-        "actions": _actions_for(status),
+        "actions": [*_actions_for(status), *distribution["distribution_actions"]],
         "data_quality": data_quality,
     }
     return item

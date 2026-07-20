@@ -44,6 +44,7 @@ const LABELS: Record<string, string> = {
   SLIGHTLY_STRONGER: '略强于预期',
   SECTOR_MIGRATION_CONFIRMED: '跨板块订单流迁移候选',
   SECTOR_FLOW_PEAK_REVERSAL: '板块订单流方向估算高位回落', HIGH_DRAWDOWN: '高点明显回撤',
+  SECTOR_DISTRIBUTION_RISK: '板块高位派发风险',
   SECTOR_FLOW_TURN_OUT: '板块订单流方向估算由正转负',
   SECTOR_FLOW_TURN_IN: '板块订单流方向估算由负转正',
   SECTOR_FLOW_WEAKENING: '板块订单流方向估算边际转弱',

@@ -75,7 +75,7 @@ describe('抓涨停', () => {
 
     render(<LimitUpCatcher />)
 
-    expect(await screen.findByText('真实行情暂未取到')).toBeInTheDocument()
+    expect(await screen.findByText('行情供应商采集失败（不是0匹配）')).toBeInTheDocument()
     expect(screen.queryByRole('table')).not.toBeInTheDocument()
     expect(fetchMock).toHaveBeenCalledTimes(1)
     expect(String(fetchMock.mock.calls[0][0])).toMatch(/\/api\/market\/limit-up-catcher$/)
@@ -98,14 +98,14 @@ describe('抓涨停', () => {
     expect(screen.getByText('测试乙')).toBeInTheDocument()
 
     fireEvent.click(screen.getByRole('button', { name: '刷新真实行情' }))
-    expect(await screen.findByText('刷新未取得新行情，继续显示上次成功快照')).toBeInTheDocument()
+    expect(await screen.findByText('刷新未完成全A扫描，继续显示上次成功快照')).toBeInTheDocument()
     expect(screen.getByText(/更新时间为/)).toBeInTheDocument()
     expect(screen.getByText('测试乙')).toBeInTheDocument()
     expect(fetchMock.mock.calls[3][1]).toMatchObject({ method: 'POST' })
 
     fireEvent.click(screen.getByRole('button', { name: '刷新真实行情' }))
     expect(await screen.findByText('真实行情已扫描，当前无同时达标标的')).toBeInTheDocument()
-    expect(screen.queryByText('刷新未取得新行情，继续显示上次成功快照')).not.toBeInTheDocument()
+    expect(screen.queryByText('刷新未完成全A扫描，继续显示上次成功快照')).not.toBeInTheDocument()
     await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(5))
     expect(fetchMock.mock.calls[1][1]).toMatchObject({ method: 'POST' })
     expect(fetchMock.mock.calls[4][1]).toMatchObject({ method: 'POST' })

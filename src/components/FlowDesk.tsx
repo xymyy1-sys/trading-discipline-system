@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import type { ReactNode } from 'react'
-import { Flame, Gauge, MoonStar, RefreshCcw, Search, TrendingUp } from 'lucide-react'
+import { AlertTriangle, Flame, Gauge, MoonStar, RefreshCcw, Search, TrendingUp } from 'lucide-react'
 import { API_BASE } from '../api'
 import { cachedJson } from '../apiCache'
 import type {
@@ -149,6 +149,9 @@ export default function FlowDesk() {
   const darkTop = darkTrade?.items[0]
   const temperatureTop = sectorTemperature?.items[0]
   const overheatedTop = sectorTemperature?.overheated[0]
+  const distributionTop = sectorTemperature
+    ? distributionCandidates(sectorTemperature.items)[0]
+    : undefined
 
   return (
     <>
@@ -307,6 +310,20 @@ export default function FlowDesk() {
               <KV label="状态" value={overheatedTop.status} tone="down" />
             </>
           )}
+          {tab === 'temperature' && distributionTop && (
+            <>
+              <KV
+                label="资金承载与杠杆背离"
+                value={distributionTop.name}
+                tone={distributionTop.distribution_risk_level === 'HIGH' ? 'down' : undefined}
+              />
+              <KV
+                label="联合确认"
+                value={`${distributionTop.distribution_state || '待验证'} · ${distributionTop.distribution_confirmation_count ?? 0}项证据`}
+                tone={distributionTop.distribution_risk_level === 'HIGH' ? 'down' : undefined}
+              />
+            </>
+          )}
           <p className="plain-text">订单流证据只描述供应商算法估算的成交方向偏向及其强弱变化，不代表账户真实流水；买卖动作仍要叠加持仓计划、个股强弱和利润保护触发器。</p>
         </Panel>
         <Panel title="口径说明">
@@ -335,8 +352,10 @@ export default function FlowDesk() {
 function SectorTemperaturePanel({ data, loading }: { data: SectorTemperatureOut | null; loading: boolean }) {
   if (loading && !data) return <EmptyState title="板块冷热计算中" body="正在合并当日/5日/10日趋势、订单流方向拐点与5/10/20日T+1融资拥挤证据。" />
   if (!data?.items.length) return <EmptyState title="板块冷热证据不足" body="不会用缺失数据生成虚假的过热或超跌结论。" />
+  const distributionItems = distributionCandidates(data.items)
   return (
     <div className="flow-data-panel sector-temperature-board">
+      <DistributionDivergencePanel items={distributionItems} updatedAt={data.updated_at} />
       <div className="temperature-summary-grid">
         <TemperatureGroup title="过热/兑现风险" items={data.overheated} empty="当前没有联合证据确认的过热拐头" />
         <TemperatureGroup title="企稳/修复观察" items={data.stabilizing} empty="当前没有同时通过止跌与订单流方向改善确认的板块" />
@@ -346,6 +365,95 @@ function SectorTemperaturePanel({ data, loading }: { data: SectorTemperatureOut 
         {data.items.slice(0, 18).map(item => <TemperatureCard item={item} key={`${item.board_type}-${item.board_code || item.name}`} />)}
       </div>
       <p className="flow-note-line">{data.notes.join('；')}</p>
+    </div>
+  )
+}
+
+function DistributionDivergencePanel({ items, updatedAt }: { items: SectorTemperatureItem[]; updatedAt: string }) {
+  const highCount = items.filter(item => item.distribution_risk_level === 'HIGH').length
+  return (
+    <section className="distribution-divergence-panel" aria-label="资金承载与杠杆背离">
+      <header>
+        <div>
+          <h3><AlertTriangle size={18} />资金承载与杠杆背离</h3>
+          <p>联合检查订单流是否衰竭、融资杠杆是否拥挤，以及新增资金进入后价格是否不再响应。</p>
+        </div>
+        <span className={highCount ? 'distribution-count high' : 'distribution-count'}>
+          {highCount ? `高风险 ${highCount} 个` : `联合信号 ${items.length} 个`}
+        </span>
+      </header>
+      <p className="distribution-boundary">
+        这是阶段顶部与追涨赔率下降的风险证据，只用于限制追高、扩仓和杠杆，不等于顶部确认，更不是机械卖出指令。
+      </p>
+      {items.length ? (
+        <div className="distribution-divergence-grid">
+          {items.slice(0, 8).map(item => (
+            <DistributionDivergenceCard item={item} key={`${item.board_type}-${item.board_code || item.name}`} />
+          ))}
+        </div>
+      ) : (
+        <div className="distribution-empty">
+          暂无板块同时形成资金承载转弱与杠杆拥挤的联合证据；单独融资上升或单日流出不会被解释成阶段顶部。
+        </div>
+      )}
+      <small className="distribution-updated-at">模型更新时间：{formatEvidenceTime(updatedAt)}；两融为日终披露的T+1慢变量。</small>
+    </section>
+  )
+}
+
+function DistributionDivergenceCard({ item }: { item: SectorTemperatureItem }) {
+  const riskLevel = item.distribution_risk_level || 'UNKNOWN'
+  const evidence = item.distribution_evidence?.length ? item.distribution_evidence : item.evidence ?? []
+  const counterEvidence = item.distribution_counter_evidence?.length
+    ? item.distribution_counter_evidence
+    : item.counter_evidence ?? []
+  const actions = item.distribution_actions?.length ? item.distribution_actions : item.actions ?? []
+  const score = Number.isFinite(item.distribution_risk_score) ? item.distribution_risk_score : null
+  return (
+    <article className={`distribution-divergence-card ${distributionRiskTone(riskLevel)}`}>
+      <header>
+        <div><strong>{item.name}</strong><span>{item.distribution_state || '数据不足'}</span></div>
+        <div className="distribution-score">
+          <b>{score === null ? '--' : score}</b>
+          <small>{distributionRiskLabel(riskLevel)}</small>
+        </div>
+      </header>
+      <div className="distribution-confirmation">
+        <span>联合确认</span>
+        <strong>{item.distribution_confirmation_count ?? 0}项证据</strong>
+      </div>
+      <div className="distribution-factor-grid">
+        <DistributionFlag label="订单流衰竭" value={item.order_flow_exhausted} />
+        <DistributionFlag label="杠杆拥挤" value={item.leverage_crowding} />
+        <DistributionFlag label="价格响应转弱" value={item.price_response_weak} />
+      </div>
+      <div className="distribution-time-row">
+        <small>行情：{item.provider_trade_date || '日期缺失'} · {formatEvidenceTime(item.provider_updated_at)}</small>
+        <small>两融：{item.margin_as_of || '日期缺失'} · T+1慢变量</small>
+      </div>
+      <p className="distribution-primary-action">{actions[0] || '等待订单流、杠杆和价格响应形成可验证的联合证据。'}</p>
+      <details>
+        <summary>查看依据、反证与纪律动作</summary>
+        <EvidenceList title="支持依据" items={evidence} empty="暂无足够支持依据。" />
+        <EvidenceList title="反向证据" items={counterEvidence} empty="暂无已记录的反向证据。" />
+        <EvidenceList title="纪律动作" items={actions} empty="数据不足，不生成动作。" />
+        <p className="distribution-detail-boundary">纪律动作是权限与仓位约束；实际减仓仍须个股预期证伪、结构失效或量价转弱共同确认。</p>
+      </details>
+    </article>
+  )
+}
+
+function DistributionFlag({ label, value }: { label: string; value: boolean | undefined }) {
+  const state = value === true ? 'confirmed' : value === false ? 'not-confirmed' : 'missing'
+  const suffix = value === true ? '已确认' : value === false ? '未确认' : '缺失'
+  return <span className={`distribution-flag ${state}`}><b>{label}</b><small>{suffix}</small></span>
+}
+
+function EvidenceList({ title, items, empty }: { title: string; items: string[]; empty: string }) {
+  return (
+    <div className="distribution-evidence-list">
+      <h4>{title}</h4>
+      {items.length ? items.slice(0, 6).map(value => <p key={`${title}-${value}`}>· {value}</p>) : <p>{empty}</p>}
     </div>
   )
 }
@@ -363,6 +471,7 @@ function TemperatureGroup({ title, items, empty }: { title: string; items: Secto
 function TemperatureCard({ item }: { item: SectorTemperatureItem }) {
   const tone = item.risk_level === 'HIGH' ? 'risk' : item.status.includes('企稳') || item.status.includes('修复') ? 'repair' : item.status.includes('过冷') ? 'cold' : 'normal'
   const maybe = (value: number | null, suffix = '') => value === null ? '--' : `${value >= 0 ? '+' : ''}${value.toFixed(2)}${suffix}`
+  const showDistribution = hasDistributionSignal(item)
   return (
     <article className={`temperature-card ${tone}`}>
       <header><div><strong>{item.name}</strong><span>{item.status}</span></div><b>{item.heat_score}</b></header>
@@ -377,10 +486,58 @@ function TemperatureCard({ item }: { item: SectorTemperatureItem }) {
       <p>融资余额 {maybe(item.financing_balance, '亿')} · 当日/5日/10日/20日净买入 {maybe(item.financing_net_buy, '亿')} / {maybe(item.financing_net_buy_5d, '亿')} / {maybe(item.financing_net_buy_10d, '亿')} / {maybe(item.financing_net_buy_20d, '亿')}</p>
       <small>板块行情日期 {item.provider_trade_date || '未标注'} · 数据质量 {item.data_quality === 'stale' ? '非当日快照' : item.data_quality === 'high' ? '高' : item.data_quality === 'good' ? '良好' : item.data_quality === 'partial' ? '部分' : '不足'}</small>
       <small>两融日期 {item.margin_as_of || '缺失'} · {item.margin_realtime ? '实时' : 'T+1慢变量'}</small>
+      {showDistribution && (
+        <div className={`temperature-distribution-signal ${distributionRiskTone(item.distribution_risk_level)}`}>
+          <span>资金承载与杠杆背离</span>
+          <strong>{item.distribution_state || '待验证'} · {item.distribution_confirmation_count ?? 0}项证据</strong>
+        </div>
+      )}
       <ul>{item.evidence.slice(0, 3).map(value => <li key={value}>{value}</li>)}</ul>
       <b className="temperature-action">{item.actions[0] || '等待更多证据'}</b>
     </article>
   )
+}
+
+function hasDistributionSignal(item: SectorTemperatureItem) {
+  return (item.distribution_confirmation_count ?? 0) > 0
+    || item.order_flow_exhausted === true
+    || item.leverage_crowding === true
+    || item.price_response_weak === true
+    || item.distribution_risk_level === 'HIGH'
+    || item.distribution_risk_level === 'MEDIUM'
+}
+
+function distributionCandidates(items: SectorTemperatureItem[]) {
+  const riskWeight: Record<string, number> = { HIGH: 3, MEDIUM: 2, LOW: 1, UNKNOWN: 0 }
+  return items
+    .filter(hasDistributionSignal)
+    .slice()
+    .sort((left, right) => {
+      const levelGap = (riskWeight[right.distribution_risk_level] ?? 0) - (riskWeight[left.distribution_risk_level] ?? 0)
+      if (levelGap) return levelGap
+      return (right.distribution_risk_score ?? 0) - (left.distribution_risk_score ?? 0)
+    })
+}
+
+function distributionRiskTone(level: SectorTemperatureItem['distribution_risk_level'] | undefined) {
+  if (level === 'HIGH') return 'risk-high'
+  if (level === 'MEDIUM') return 'risk-medium'
+  return 'risk-neutral'
+}
+
+function distributionRiskLabel(level: SectorTemperatureItem['distribution_risk_level'] | undefined) {
+  if (level === 'HIGH') return '高风险'
+  if (level === 'MEDIUM') return '中风险'
+  if (level === 'LOW') return '低风险'
+  return '数据不足'
+}
+
+function formatEvidenceTime(value: string | null | undefined) {
+  if (!value) return '更新时间缺失'
+  const parsed = new Date(value)
+  return Number.isNaN(parsed.getTime())
+    ? value
+    : parsed.toLocaleString('zh-CN', { hour12: false })
 }
 
 function HotThemePanel({ data, loading }: { data: HotThemesOut | null; loading: boolean }) {

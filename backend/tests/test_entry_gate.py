@@ -351,3 +351,71 @@ def test_outside_session_and_unknown_plan_or_quote_fields_fail_closed():
     assert "PLAN_TRIGGER_NOT_MET" in result["reason_codes"]
     assert "RISK_REWARD_NOT_PASSED" in result["reason_codes"]
     assert "PLAN_POSITION_CAP_MISSING" in result["reason_codes"]
+
+
+def test_confirmed_sector_distribution_freezes_new_exposure_without_sell_semantics():
+    prices = [10.00, 10.05, 10.12, 10.24, 10.18, 10.12, 10.17, 10.23]
+    bars = _bars(prices)
+    bars[5]["low"] = 10.10
+    result = evaluate_entry_gate(
+        "600011",
+        {"minute_bars": bars, "price": prices[-1], "high": 10.30, "age_seconds": 0},
+        _neutral_expectation(),
+        _volume(vwap=10.15, high=10.30),
+        _low_consensus(),
+        {
+            "crowding_evaluated": True,
+            "distribution_state": "高位派发风险",
+            "distribution_risk_level": "HIGH",
+            "distribution_confirmation_count": 3,
+            "order_flow_exhausted": True,
+            "price_response_weak": True,
+            "leverage_crowding": False,
+        },
+        {"entry_gate": "OPEN"},
+        has_plan=True,
+        mode_match=True,
+        plan_triggered=True,
+        risk_reward_passed=True,
+        plan_position_cap_pct=5,
+        now=NOW,
+    )
+
+    assert result["decision"] == "BLOCK"
+    assert result["allowed_position_ratio"] == 0
+    assert "SECTOR_DISTRIBUTION_RISK" in result["reason_codes"]
+    assert any("不会单独要求已有持仓卖出" in item for item in result["evidence"])
+    assert not any("清仓" in item for item in result["evidence"])
+
+
+def test_margin_crowding_alone_is_watch_only_and_does_not_create_high_risk_gate():
+    prices = [10.00, 10.05, 10.12, 10.24, 10.18, 10.12, 10.17, 10.23]
+    bars = _bars(prices)
+    bars[5]["low"] = 10.10
+    result = evaluate_entry_gate(
+        "600012",
+        {"minute_bars": bars, "price": prices[-1], "high": 10.30, "age_seconds": 0},
+        _neutral_expectation(),
+        _volume(vwap=10.15, high=10.30),
+        _low_consensus(),
+        {
+            "crowding_evaluated": True,
+            "distribution_state": "杠杆追涨观察",
+            "distribution_risk_level": "MEDIUM",
+            "distribution_confirmation_count": 1,
+            "order_flow_exhausted": False,
+            "price_response_weak": False,
+            "leverage_crowding": True,
+        },
+        {"entry_gate": "OPEN"},
+        has_plan=True,
+        mode_match=True,
+        plan_triggered=True,
+        risk_reward_passed=True,
+        plan_position_cap_pct=5,
+        now=NOW,
+    )
+
+    assert result["hard_blocked"] is False
+    assert "SECTOR_DISTRIBUTION_RISK" not in result["reason_codes"]
+    assert "SECTOR_DISTRIBUTION_WATCH" in result["reason_codes"]

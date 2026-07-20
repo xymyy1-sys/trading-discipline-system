@@ -707,7 +707,7 @@ export function TodayDecisionSummary() {
           <div className={marketRiskActive ? 'market-state-danger' : ''}><span>赚钱 / 亏钱效应</span><strong>{earningEffect} / {marketRegime ? marketLossLabel(marketRegime.loss_score) : '--'}</strong><small>{marketRegime ? `机会 ${marketRegime.opportunity_score} · 亏钱 ${marketRegime.loss_score}` : '等待全A真实广度'}</small><button type="button" className="market-evidence-link" onClick={() => setShowMarketEvidence(value => !value)}>查看计算依据</button></div>
           <div><span>市场状态</span><strong>{marketCycle}</strong><small>{marketRegime ? `风险${marketRegime.risk_level} · 证据完整度 ${(marketRegime.confidence * 100).toFixed(0)}%` : '等待量能、广度和指数共振'}</small></div>
           <div><span>上涨 / 下跌家数</span><strong>{marketRegime?.up_count ?? '--'} / {marketRegime?.down_count ?? '--'}</strong><small>涨停 / 跌停 {marketRegime?.limit_up_count ?? '--'} / {marketRegime?.limit_down_count ?? '--'} · 中位涨幅 {formatSignedNumber(marketRegime?.median_change_pct, '%')}</small></div>
-          <div><span>成交额与量能</span><strong>{formatNumber(marketRegime?.turnover_yi, ' 亿')}</strong><small>较前日 {formatRatio(marketRegime?.volume_ratio_previous)} · 较5日均量 {formatRatio(marketRegime?.volume_ratio_5d)}</small></div>
+          <div><span>成交额与量能</span><strong>{marketRegime?.trade_date === shanghaiToday() ? formatNumber(marketRegime?.turnover_yi, ' 亿') : '--'}</strong><small>{marketRegime?.trade_date === shanghaiToday() && marketRegime.source?.includes('eastmoney-composite-5minute-amount') ? `同进度较前日 ${formatRatio(marketRegime.volume_ratio_previous)} · 较5日同进度 ${formatRatio(marketRegime.volume_ratio_5d)}` : '当日同期5分钟基准缺失，量能比例留空'}</small></div>
           <div><span>全市场订单流估算</span><strong className={(marketRegime?.market_main_net_inflow_yi ?? 0) < 0 ? 'num-down' : 'num-up'}>{formatSignedNumber(marketRegime?.market_main_net_inflow_yi, ' 亿')}</strong><small>供应商方向分类 · 指数合成涨跌 {formatSignedNumber(marketRegime?.index_composite_change_pct, '%')}</small></div>
           <div><span>行业扩散 / 集中</span><strong>{formatRatio(marketRegime?.positive_sector_ratio)} / {formatRatio(marketRegime?.top3_inflow_share)}</strong><small>正向行业占比 / 前三流入集中度</small></div>
           <div><span>主线方向</span><strong>{theme?.strongest_theme?.name || marketRegime?.strongest_sectors?.[0]?.name || '--'}</strong><small>{theme?.strongest_theme ? `题材强度 ${theme.strongest_theme.score}` : '按行业订单流方向与价格确认'}</small></div>
@@ -1388,6 +1388,17 @@ function isMarketSession(includeClosingGrace = false) {
   const minutes = Number(value.hour || 0) * 60 + Number(value.minute || 0)
   const closeMinute = 15 * 60 + (includeClosingGrace ? 5 : 0)
   return weekday && minutes >= 9 * 60 + 15 && minutes <= closeMinute
+}
+
+function shanghaiToday() {
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Asia/Shanghai',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).formatToParts(new Date())
+  const value = Object.fromEntries(parts.map(part => [part.type, part.value]))
+  return `${value.year}-${value.month}-${value.day}`
 }
 
 function inferEarningEffect(theme: ThemeRadar | null, seesaw: MarketSeesaw | null) {

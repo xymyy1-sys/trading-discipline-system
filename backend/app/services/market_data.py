@@ -146,6 +146,44 @@ def _safe_int(value: Any, default: int = 0) -> int:
         return default
 
 
+_LIMIT_UP_CATCHER_TIMESTAMP_MIN_COVERAGE = 0.95
+_LIMIT_UP_CATCHER_SESSION_START_MINUTE = 9 * 60 + 15
+
+
+def _limit_up_catcher_expected_trade_date(now: datetime) -> str:
+    """Resolve the only provider date that may represent the current screen.
+
+    A trading day becomes eligible once the opening auction starts.  Before
+    that point, and throughout weekends/exchange holidays, the latest completed
+    A-share trading day remains the valid quote date.  This prevents a provider
+    or local-clock fallback from labelling a holiday as a live market session,
+    while still allowing Friday's close to be read on the weekend and today's
+    completed snapshot to be read after the close.
+    """
+
+    current_date = now.date()
+    current_minute = now.hour * 60 + now.minute
+    if (
+        is_a_share_trading_day(current_date)
+        and current_minute >= _LIMIT_UP_CATCHER_SESSION_START_MINUTE
+    ):
+        return current_date.isoformat()
+    return previous_a_share_trading_day(current_date).isoformat()
+
+
+def _limit_up_catcher_provider_time(value: Any) -> datetime | None:
+    timestamp = _safe_int(value)
+    if timestamp <= 0:
+        return None
+    try:
+        return datetime.fromtimestamp(
+            timestamp,
+            ZoneInfo("Asia/Shanghai"),
+        ).replace(tzinfo=None)
+    except (OverflowError, OSError, ValueError):
+        return None
+
+
 def _get_json_from_hosts(
     path: str,
     params: dict[str, Any],
@@ -1439,7 +1477,18 @@ class MarketDataProvider:
         captured_at = _shanghai_now_naive()
         try:
             rows, source, provider_updated_at, total_scanned = self._fetch_limit_up_catcher_rows()
+            expected_trade_date = _limit_up_catcher_expected_trade_date(captured_at)
+            if provider_updated_at.date().isoformat() != expected_trade_date:
+                raise ValueError(
+                    "供应商行情日期不可信："
+                    f"返回{provider_updated_at.date().isoformat()}，"
+                    f"当前有效交易日应为{expected_trade_date}"
+                )
         except Exception as exc:
+            # Validation errors describe a provider-side coverage problem, not
+            # an empty screen.  Keep that reason visible instead of reducing it
+            # to the unhelpful class name ``ValueError`` in the UI.
+            reason = str(exc).strip() if isinstance(exc, ValueError) else exc.__class__.__name__
             return LimitUpCatcherOut(
                 source="eastmoney-unavailable",
                 updated_at=captured_at,
@@ -1449,7 +1498,7 @@ class MarketDataProvider:
                 total_scanned=0,
                 matched_count=0,
                 notes=[
-                    f"东方财富全A实时行情采集失败：{exc.__class__.__name__}。",
+                    f"东方财富全A实时行情采集失败：{reason or exc.__class__.__name__}。",
                     "未生成模拟股票；请稍后点击刷新，已有最后成功快照不被本次失败覆盖。",
                 ],
             )
@@ -1475,16 +1524,13 @@ class MarketDataProvider:
             ):
                 continue
 
-            timestamp = _safe_int(row.get("f124"))
-            item_updated_at = provider_updated_at
-            if timestamp > 0:
-                try:
-                    item_updated_at = datetime.fromtimestamp(
-                        timestamp,
-                        ZoneInfo("Asia/Shanghai"),
-                    ).replace(tzinfo=None)
-                except (OverflowError, OSError, ValueError):
-                    pass
+            item_updated_at = _limit_up_catcher_provider_time(row.get("f124"))
+            # `_fetch_limit_up_catcher_rows` returns only rows carrying a
+            # validated provider timestamp.  Keep this defensive guard so a
+            # future alternate loader can never silently substitute the batch
+            # timestamp (or local current time) for a missing item timestamp.
+            if item_updated_at is None:
+                continue
             items.append(
                 LimitUpCatcherItem(
                     code=str(row.get("f12") or "").zfill(6),
@@ -1532,7 +1578,12 @@ class MarketDataProvider:
             "ut": "8dec03ba335b81bf4ebdf7b29ec27d15",
             "fltt": "2",
             "invt": "2",
-            "fid": "f10",
+            # The screen is sorted locally after all quotes arrive.  Paginating
+            # by the real-time volume-ratio ranking (f10) makes page boundaries
+            # move while the roughly 60 pages are being downloaded, producing
+            # duplicates/missing codes and a false incomplete-pagination
+            # ValueError.  Security code (f12) is stable for the whole request.
+            "fid": "f12",
             "fs": "m:0+t:6,m:0+t:80,m:1+t:2,m:1+t:23,m:0+t:81+s:2048",
             "fields": "f12,f13,f14,f2,f3,f5,f6,f8,f10,f124",
         }
@@ -1540,14 +1591,17 @@ class MarketDataProvider:
         data = payload.get("data") or {}
         first_page = list(data.get("diff") or [])
         if not first_page:
-            raise ValueError("empty full-market quote page")
+            raise ValueError("供应商返回了空的全A行情首页")
         raw_total = data.get("total")
         if raw_total in (None, "", "-", "--"):
-            raise ValueError("full-market quote total is missing")
+            raise ValueError("供应商没有返回全A行情总数")
         total = _safe_int(raw_total)
         if total < 4_000:
-            raise ValueError(f"implausible full-market quote total: {total}")
-        page_size = len(first_page)
+            raise ValueError(f"供应商声明的全A覆盖仅{total}只，低于4000只安全下限")
+        # Eastmoney currently caps this endpoint at 100 rows even when a larger
+        # pz is requested.  Use the requested stable page width rather than a
+        # potentially truncated first response to calculate page boundaries.
+        page_size = int(params["pz"])
         rows = list(first_page)
         page_count = (total + page_size - 1) // page_size if page_size else 1
 
@@ -1582,23 +1636,50 @@ class MarketDataProvider:
         missing_count = max(0, expected - len(deduplicated))
         if coverage < 0.995 or missing_count > 20:
             raise ValueError(
-                "incomplete full-market pagination: "
-                f"{len(deduplicated)}/{expected}, missing={missing_count}"
+                "供应商全A分页覆盖不完整："
+                f"实取{len(deduplicated)}/{expected}只，缺失{missing_count}只"
             )
 
-        timestamps = [_safe_int(row.get("f124")) for row in deduplicated.values()]
-        latest_timestamp = max((value for value in timestamps if value > 0), default=0)
-        updated_at = _shanghai_now_naive()
-        if latest_timestamp:
-            try:
-                updated_at = datetime.fromtimestamp(
-                    latest_timestamp,
-                    ZoneInfo("Asia/Shanghai"),
-                ).replace(tzinfo=None)
-            except (OverflowError, OSError, ValueError):
-                pass
+        now = _shanghai_now_naive()
+        expected_trade_date = _limit_up_catcher_expected_trade_date(now)
+        timestamped_rows: list[tuple[dict[str, Any], datetime]] = []
+        for row in deduplicated.values():
+            provider_time = _limit_up_catcher_provider_time(row.get("f124"))
+            if provider_time is not None:
+                timestamped_rows.append((row, provider_time))
+
+        timestamp_coverage = len(timestamped_rows) / len(deduplicated)
+        if timestamp_coverage < _LIMIT_UP_CATCHER_TIMESTAMP_MIN_COVERAGE:
+            raise ValueError(
+                "供应商全A行情时间戳覆盖不足："
+                f"有效f124为{len(timestamped_rows)}/{len(deduplicated)}只，"
+                f"低于{_LIMIT_UP_CATCHER_TIMESTAMP_MIN_COVERAGE:.0%}安全下限"
+            )
+
+        dated_rows = [
+            (row, provider_time)
+            for row, provider_time in timestamped_rows
+            if provider_time.date().isoformat() == expected_trade_date
+        ]
+        date_coverage = len(dated_rows) / len(deduplicated)
+        if date_coverage < _LIMIT_UP_CATCHER_TIMESTAMP_MIN_COVERAGE:
+            provider_dates = sorted({
+                provider_time.date().isoformat()
+                for _, provider_time in timestamped_rows
+            })
+            raise ValueError(
+                "供应商全A行情日期覆盖不足："
+                f"有效交易日{expected_trade_date}为{len(dated_rows)}/{len(deduplicated)}只，"
+                f"供应商日期={','.join(provider_dates[-3:]) or '缺失'}"
+            )
+
+        # Return only rows whose own provider timestamp passed validation.  A
+        # small suspended/stale tail may remain outside the 95% quorum, but it
+        # must not enter the momentum screen with the batch timestamp attached.
+        valid_rows = [row for row, _ in dated_rows]
+        updated_at = max(provider_time for _, provider_time in dated_rows)
         source = f"eastmoney-all-a@{host.split('//')[-1]}"
-        return list(deduplicated.values()), source, updated_at, len(deduplicated)
+        return valid_rows, source, updated_at, len(deduplicated)
 
     def limit_up_ladder(self, trade_date: str | None = None, force_refresh: bool = False) -> LimitUpLadderOut:
         """Return a dated real limit-up pool.

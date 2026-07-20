@@ -3,7 +3,7 @@ import json
 from types import SimpleNamespace
 from zoneinfo import ZoneInfo
 
-from app.models.trading import DataCaptureSnapshot, MarketRegimeSnapshot
+from app.models.trading import DataCaptureSnapshot, GlobalEvidenceSnapshot, MarketRegimeSnapshot
 
 
 def test_sector_temperature_route_keeps_margin_as_t_plus_one(monkeypatch):
@@ -140,6 +140,82 @@ def test_global_cues_route_preserves_unavailable_quotes(client, monkeypatch):
     assert data["data_quality"] == "degraded"
     assert data["korea_equities"][0]["status"] == "unavailable"
     assert data["korea_equities"][0]["price"] is None
+
+
+def _global_refresh_payload() -> dict:
+    now = datetime(2026, 7, 20, 8, 15, tzinfo=ZoneInfo("Asia/Shanghai")).isoformat()
+    quote = {
+        "symbol": "SPX",
+        "name": "标普500",
+        "market": "美国",
+        "status": "ok",
+        "price": 6310.2,
+        "change_pct": 0.62,
+        "as_of": now,
+        "source": "eastmoney",
+    }
+    return {
+        "generated_at": now,
+        "as_of": now,
+        "quality": "ok",
+        "data_quality": "ok",
+        "sources": ["eastmoney"],
+        "source": ["eastmoney"],
+        "notes": [],
+        "kis": {"configured": False},
+        "korea_indices": [],
+        "korea_equities": [],
+        "us_indices": [quote],
+        "us_sector_rank": [],
+        "items": [{"group": "us_index", **quote}],
+    }
+
+
+def test_global_cues_manual_refresh_persists_current_snapshot(client, db_session, monkeypatch):
+    from app.api.routes import market
+
+    payload = _global_refresh_payload()
+    monkeypatch.setattr(
+        market.global_market_service,
+        "snapshot",
+        lambda **kwargs: payload if kwargs.get("force_refresh") is True else None,
+    )
+
+    response = client.post("/api/market/global-cues/refresh")
+
+    assert response.status_code == 200
+    rows = db_session.query(GlobalEvidenceSnapshot).all()
+    assert len(rows) == 1
+    assert rows[0].data_quality == "ok"
+    persisted = json.loads(rows[0].payload_json)
+    assert persisted["us_indices"][0]["symbol"] == "SPX"
+    assert persisted["us_indices"][0]["change_pct"] == 0.62
+
+
+def test_global_cues_manual_refresh_reports_persistence_failure_without_losing_result(
+    client,
+    monkeypatch,
+):
+    from app.api.routes import market
+
+    payload = _global_refresh_payload()
+    monkeypatch.setattr(
+        market.global_market_service,
+        "snapshot",
+        lambda **kwargs: payload if kwargs.get("force_refresh") is True else None,
+    )
+    monkeypatch.setattr(
+        market,
+        "persist_global_evidence_snapshot",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("db unavailable")),
+    )
+
+    response = client.post("/api/market/global-cues/refresh")
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["us_indices"][0]["symbol"] == "SPX"
+    assert any("持久化失败：RuntimeError" in note for note in data["notes"])
 
 
 def _persist_opportunity_radar_snapshot(

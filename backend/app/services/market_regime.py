@@ -7,7 +7,7 @@ import threading
 import time as clock
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from io import BytesIO
 from typing import Any
 
@@ -24,6 +24,10 @@ from app.schemas.trading import (
     MarketSectorEvidenceOut,
 )
 from app.services.market_data import MarketDataProvider
+from app.services.trading_calendar import (
+    is_a_share_trading_day,
+    previous_a_share_trading_day,
+)
 
 
 EASTMONEY_HOSTS = (
@@ -38,6 +42,10 @@ INDEX_DEFINITIONS = {
     "000688": ("科创50", "1.000688"),
 }
 REGIME_CACHE_SECONDS = 120
+FULL_MARKET_MIN_TOTAL = 4_000
+FULL_MARKET_MIN_COVERAGE_RATIO = 0.995
+FULL_MARKET_MAX_MISSING = 20
+FULL_MARKET_MAX_INTRADAY_AGE_SECONDS = 10 * 60
 _CACHE_LOCK = threading.Lock()
 _REGIME_CACHE: tuple[float, MarketRegimeOut] | None = None
 
@@ -83,8 +91,12 @@ def _json_list(raw: str | None) -> list[Any]:
 
 def _market_progress(now: datetime) -> float | None:
     """Elapsed A-share continuous-auction fraction; no pre-open projection."""
+    # Full holiday validation is performed once at the provider boundary by
+    # ``_expected_full_market_trade_date``.  Keep this arithmetic helper free
+    # of calendar refresh side effects because it is also used by pure summary
+    # and test paths.
     if now.weekday() >= 5:
-        return 1.0
+        return None
     minute = now.hour * 60 + now.minute
     if minute < 9 * 60 + 35:
         return None
@@ -95,6 +107,108 @@ def _market_progress(now: datetime) -> float | None:
     if minute <= 15 * 60:
         return min(1.0, 0.5 + (minute - 13 * 60) / 240)
     return 1.0
+
+
+def _coverage_is_incomplete(actual: int, expected: int) -> bool:
+    if expected <= 0:
+        return True
+    missing = max(0, expected - actual)
+    return actual / expected < FULL_MARKET_MIN_COVERAGE_RATIO or missing > FULL_MARKET_MAX_MISSING
+
+
+def _expected_full_market_trade_date(now: datetime) -> date:
+    """Return the provider date that is valid at this Shanghai wall-clock time."""
+
+    today_is_open = is_a_share_trading_day(now.date())
+    minute = now.hour * 60 + now.minute
+    if today_is_open and minute >= 9 * 60 + 25:
+        return now.date()
+    return previous_a_share_trading_day(now.date(), inclusive=not today_is_open)
+
+
+def _validate_full_market_source_time(
+    rows: list[dict[str, Any]],
+    *,
+    now: datetime,
+) -> datetime:
+    """Require a near-complete, correctly dated and phase-fresh provider clock.
+
+    ``f124`` is the only trustworthy business-date/freshness marker in the
+    Eastmoney full-market response.  Falling back to the API server clock can
+    turn a stale holiday or pre-open payload into an apparently current market
+    snapshot, so an unverifiable clock is a hard data gap.
+    """
+
+    active_rows = [
+        row
+        for row in rows
+        if (_optional_float(row.get("f2")) or 0) > 0
+        and _optional_float(row.get("f3")) is not None
+    ]
+    if not active_rows:
+        raise ValueError("全A行情没有可校验时间戳的有效交易证券")
+
+    expected_date = _expected_full_market_trade_date(now)
+    dated_rows: list[datetime] = []
+    for row in active_rows:
+        stamp = _optional_int(row.get("f124"))
+        if stamp is None or stamp <= 0:
+            continue
+        try:
+            captured_at = shanghai_from_timestamp(stamp)
+        except (OverflowError, OSError, ValueError):
+            continue
+        if (
+            captured_at.date() == expected_date
+            and captured_at <= now + timedelta(minutes=2)
+        ):
+            dated_rows.append(captured_at)
+
+    if _coverage_is_incomplete(len(dated_rows), len(active_rows)):
+        missing = max(0, len(active_rows) - len(dated_rows))
+        raise ValueError(
+            "全A行情供应商时间戳覆盖不足或交易日不匹配："
+            f"有效{len(dated_rows)}/{len(active_rows)}只，缺失或错日{missing}只，"
+            f"期望交易日{expected_date.isoformat()}"
+        )
+
+    minute = now.hour * 60 + now.minute
+    fresh_rows = list(dated_rows)
+    if expected_date != now.date():
+        # Pre-open, weekend and exchange-holiday refreshes may only reuse a
+        # completed previous-session payload.  An early intraday remnant is not
+        # a valid completed-day snapshot.
+        fresh_rows = [item for item in dated_rows if item.hour * 60 + item.minute >= 14 * 60 + 50]
+    elif 9 * 60 + 25 <= minute < 9 * 60 + 30:
+        fresh_rows = [
+            item
+            for item in dated_rows
+            if -120 <= (now - item).total_seconds() <= FULL_MARKET_MAX_INTRADAY_AGE_SECONDS
+        ]
+    elif (
+        9 * 60 + 30 <= minute <= 11 * 60 + 30
+        or 13 * 60 <= minute <= 15 * 60
+    ):
+        fresh_rows = [
+            item
+            for item in dated_rows
+            if -120 <= (now - item).total_seconds() <= FULL_MARKET_MAX_INTRADAY_AGE_SECONDS
+            and not (minute >= 9 * 60 + 35 and item.hour * 60 + item.minute < 9 * 60 + 30)
+        ]
+    elif 11 * 60 + 30 < minute < 13 * 60:
+        fresh_rows = [item for item in dated_rows if item.hour * 60 + item.minute >= 11 * 60 + 20]
+    elif minute > 15 * 60:
+        fresh_rows = [item for item in dated_rows if item.hour * 60 + item.minute >= 14 * 60 + 50]
+
+    if _coverage_is_incomplete(len(fresh_rows), len(active_rows)):
+        missing = max(0, len(active_rows) - len(fresh_rows))
+        latest = max(dated_rows) if dated_rows else None
+        raise ValueError(
+            "全A行情供应商时间戳已过期或不符合当前交易阶段："
+            f"阶段内有效{len(fresh_rows)}/{len(active_rows)}只，缺失或过期{missing}只，"
+            f"最新时间{latest.isoformat(sep=' ') if latest else '未知'}"
+        )
+    return max(fresh_rows)
 
 
 def _daily_limit_pct(code: str, name: str) -> float:
@@ -130,9 +244,15 @@ def summarize_all_a_rows(
 
     notes: list[str] = []
     if expected_total and len(rows) < expected_total:
-        notes.append(f"全A行情仅返回{len(rows)}/{expected_total}条，广度和订单流方向统计标记为缺口。")
-        if len(rows) / max(1, expected_total) < 0.90:
-            return {}, notes + ["全A覆盖率不足90%，拒绝用涨幅排序的局部榜单推断全市场。"]
+        missing = max(0, expected_total - len(rows))
+        notes.append(
+            f"全A行情仅返回{len(rows)}/{expected_total}条，缺失{missing}条，"
+            "广度和订单流方向统计标记为缺口。"
+        )
+        if _coverage_is_incomplete(len(rows), expected_total):
+            return {}, notes + [
+                "全A覆盖率低于99.5%或缺失超过20只，拒绝用局部行情推断全市场。"
+            ]
     if not active:
         return {}, notes + ["全A行情未返回可用交易股票，不生成市场广度。"]
 
@@ -167,19 +287,41 @@ def summarize_all_a_rows(
         notes.append(f"供应商大单方向字段覆盖{len(main_flow_values)}/{len(active)}，不足90%，不输出全市场大单方向估算。")
 
     source_time = shanghai_from_timestamp(max(source_timestamps)) if source_timestamps else None
+    market_progress = _market_progress(now)
+    stale_before_session = bool(source_time is not None and source_time.date() < now.date())
+    undated_before_session = source_time is None and market_progress is None
+    if stale_before_session or undated_before_session:
+        stale_label = source_time.date().isoformat() if source_time is not None else "未知交易日"
+        turnover_yi = None
+        main_net_yi = None
+        notes.append(
+            f"行情源仍停留在{stale_label}；盘前不将旧日成交额和订单流冒充当日数据。"
+        )
+    elif source_time is not None and source_time.date() == now.date() and market_progress is None:
+        # Auction-only cumulative fields are not comparable with continuous-
+        # auction turnover.  Keep breadth visible but withhold monetary totals
+        # until the first completed five-minute bar at 09:35.
+        turnover_yi = None
+        main_net_yi = None
+        notes.append("09:35前仅保留集合竞价广度，成交额和订单流等待首个完整五分钟样本。")
     # Before the next session opens, quote endpoints still expose the previous
     # completed trading day. Treat that dated snapshot as a full session rather
     # than suppressing the volume ratio merely because wall-clock time is early.
     progress = (
         1.0
         if source_time is not None and source_time.date() < now.date()
-        else _market_progress(now)
+        else market_progress
     )
-    projected = round(turnover_yi / progress, 2) if turnover_yi is not None and progress and progress >= 0.02 else None
+    # A-share turnover is strongly U-shaped intraday.  Dividing the current
+    # cumulative amount by elapsed auction minutes creates a precise-looking,
+    # but materially biased, full-day projection.  Keep this compatibility
+    # field only when the source snapshot is already a completed session;
+    # intraday volume strength is calculated from same-minute history below.
+    projected = turnover_yi if turnover_yi is not None and progress == 1.0 else None
     if turnover_yi is not None and progress is None:
         notes.append("09:35前不线性外推全天成交额，等待连续竞价形成有效进度。")
-    elif projected is not None and progress < 1:
-        notes.append(f"预计全天成交额按真实累计成交额/交易进度({progress:.1%})计算，属于显式估算值。")
+    elif turnover_yi is not None and progress is not None and progress < 1:
+        notes.append("盘中成交额仅保留真实累计值；量能同比改用同分钟历史成交额，不再线性外推全天。")
 
     return {
         "active_stock_count": len(active),
@@ -253,6 +395,7 @@ def _fetch_limit_pool_count(path: str, trade_date: str) -> int:
 
 
 def _fetch_all_a_market(now: datetime) -> tuple[dict[str, Any], str, list[str]]:
+    now = shanghai_now_naive(now)
     params = {
         "pn": "1",
         # Eastmoney currently caps this endpoint near 100 rows even when a
@@ -265,23 +408,35 @@ def _fetch_all_a_market(now: datetime) -> tuple[dict[str, Any], str, list[str]]:
         "ut": "8dec03ba335b81bf4ebdf7b29ec27d15",
         "fltt": "2",
         "invt": "2",
-        "fid": "f3",
+        # Price-change sorting is unstable while quotes update: securities can
+        # cross page boundaries between concurrent page requests, creating
+        # duplicates and omissions.  Code order is stable for a full snapshot.
+        "fid": "f12",
         "fs": "m:0+t:6,m:0+t:80,m:1+t:2,m:1+t:23,m:0+t:81+s:2048",
         "fields": "f12,f13,f14,f2,f3,f6,f62,f15,f16,f17,f18,f124",
     }
     payload, host = _get_json_from_hosts("/api/qt/clist/get", params)
     data = payload.get("data") or {}
     first_page = list(data.get("diff") or [])
-    total = _optional_int(data.get("total")) or len(first_page)
-    actual_page_size = len(first_page)
+    if not first_page:
+        raise ValueError("供应商返回了空的全A行情首页")
+    raw_total = data.get("total")
+    if raw_total in (None, "", "-", "--"):
+        raise ValueError("供应商没有返回全A行情总数")
+    total = _optional_int(raw_total)
+    if total is None or total < FULL_MARKET_MIN_TOTAL:
+        raise ValueError(
+            f"供应商声明的全A覆盖仅{total or 0}只，低于{FULL_MARKET_MIN_TOTAL}只安全下限"
+        )
+    page_size = int(params["pz"])
     rows = list(first_page)
-    if total > len(rows) and actual_page_size:
-        page_count = math.ceil(total / actual_page_size)
+    if total > len(rows) and page_size:
+        page_count = math.ceil(total / page_size)
 
         def _fetch_page(page: int) -> list[dict[str, Any]]:
             page_payload, _ = _get_json_from_hosts(
                 "/api/qt/clist/get",
-                {**params, "pn": str(page), "pz": str(actual_page_size)},
+                {**params, "pn": str(page), "pz": str(page_size)},
             )
             return list((page_payload.get("data") or {}).get("diff") or [])
 
@@ -295,8 +450,8 @@ def _fetch_all_a_market(now: datetime) -> tuple[dict[str, Any], str, list[str]]:
                 page = futures[future]
                 try:
                     pages[page] = future.result()
-                except Exception:
-                    pages[page] = []
+                except Exception as exc:
+                    raise ValueError(f"全A行情第{page}页采集失败：{exc.__class__.__name__}") from exc
             for page in range(2, page_count + 1):
                 rows.extend(pages.get(page, []))
 
@@ -306,7 +461,21 @@ def _fetch_all_a_market(now: datetime) -> tuple[dict[str, Any], str, list[str]]:
         if key[1]:
             deduplicated[key] = row
     rows = list(deduplicated.values())
+    if _coverage_is_incomplete(len(rows), total):
+        missing = max(0, total - len(rows))
+        raise ValueError(
+            "供应商全A分页覆盖不完整："
+            f"实取{len(rows)}/{total}只，缺失{missing}只"
+        )
+
+    provider_source_time = _validate_full_market_source_time(rows, now=now)
     summary, notes = summarize_all_a_rows(rows, expected_total=total, now=now)
+    if not summary:
+        raise ValueError("全A行情完整性校验失败，不生成市场状态")
+    # Use the validated provider clock rather than the maximum raw timestamp;
+    # a small tolerated number of stale/future rows must not move the snapshot
+    # to the wrong business date or trading phase.
+    summary["source_time"] = provider_source_time
     source = f"eastmoney-all-a@{host.split('//')[-1]}"
     source_time = summary.get("source_time")
     trade_date = (
@@ -452,6 +621,217 @@ def _fetch_index_daily_amount(secid: str) -> dict[str, float]:
         if amount is not None and amount >= 0:
             result[parts[0]] = amount / 1e8
     return result
+
+
+def _fetch_index_minute_amount(
+    secid: str,
+    trade_date: str,
+) -> dict[str, list[tuple[datetime, float]]]:
+    """Fetch recent five-minute index turnover bars, normalised to 亿元.
+
+    The market-regime volume comparison uses the broad SSE/SZSE composite
+    indices on both sides of the ratio.  It intentionally does not mix the
+    current all-A quote total with historical full-day index totals.
+    """
+    target = datetime.strptime(trade_date, "%Y-%m-%d")
+    params = {
+        "secid": secid,
+        # Eastmoney's 1-minute k-line endpoint only exposes the latest session
+        # even when beg/end are supplied.  Five-minute bars are genuinely
+        # historical and preserve a sufficiently fine comparable progress.
+        "klt": "5",
+        "fqt": "0",
+        "lmt": "2400",
+        "beg": (target - timedelta(days=20)).strftime("%Y%m%d"),
+        "end": target.strftime("%Y%m%d") + "150000",
+        "fields1": "f1,f2,f3,f4,f5,f6",
+        "fields2": "f51,f52,f53,f54,f55,f56,f57",
+    }
+    headers = {
+        "User-Agent": "Mozilla/5.0",
+        "Referer": "https://quote.eastmoney.com/",
+        "Accept": "application/json,text/plain,*/*",
+    }
+    rows: list[str] = []
+    last_error: Exception | None = None
+    for host in ("https://push2his.eastmoney.com", "https://push2delay.eastmoney.com"):
+        try:
+            response = requests.get(
+                f"{host}/api/qt/stock/kline/get",
+                params=params,
+                headers=headers,
+                timeout=8,
+            )
+            response.raise_for_status()
+            rows = list((response.json().get("data") or {}).get("klines") or [])
+            if rows:
+                break
+        except Exception as exc:
+            last_error = exc
+    if not rows:
+        if last_error:
+            raise last_error
+        raise ValueError(f"minute turnover is absent for {secid}")
+
+    result: dict[str, list[tuple[datetime, float]]] = {}
+    for row in rows:
+        parts = str(row).split(",")
+        if len(parts) < 7:
+            continue
+        try:
+            captured_at = datetime.strptime(parts[0].strip(), "%Y-%m-%d %H:%M")
+        except ValueError:
+            continue
+        amount = _optional_float(parts[6])
+        if amount is None or amount < 0:
+            continue
+        result.setdefault(captured_at.date().isoformat(), []).append(
+            (captured_at, amount / 1e8)
+        )
+    return result
+
+
+def _continuous_auction_bar_count(cutoff: datetime) -> int:
+    """Expected five-minute bars through a Shanghai-session cutoff."""
+    minute = cutoff.hour * 60 + cutoff.minute
+    if minute < 9 * 60 + 35:
+        return 0
+    if minute <= 11 * 60 + 30:
+        return (minute - (9 * 60 + 30)) // 5
+    if minute < 13 * 60:
+        return 24
+    return 24 + min(24, max(0, minute - 13 * 60) // 5)
+
+
+def _normalise_comparison_cutoff(source_time: datetime | None) -> datetime | None:
+    if source_time is None:
+        return None
+    minute = source_time.hour * 60 + source_time.minute
+    if minute < 9 * 60 + 30:
+        return None
+    if minute > 15 * 60:
+        return source_time.replace(hour=15, minute=0, second=0, microsecond=0)
+    if 11 * 60 + 30 < minute < 13 * 60:
+        return source_time.replace(hour=11, minute=30, second=0, microsecond=0)
+    return source_time.replace(second=0, microsecond=0)
+
+
+def _summarize_same_time_turnover_series(
+    series: list[dict[str, list[tuple[datetime, float]]]],
+    *,
+    trade_date: str,
+    source_time: datetime | None,
+) -> tuple[float | None, float | None, float | None, datetime | None, list[str]]:
+    """Compare paired exchange index turnover at an identical market minute.
+
+    A date is accepted only when both indices reach the common cutoff and have
+    near-complete minute coverage.  Missing bars therefore produce an explicit
+    gap rather than an underestimated denominator.
+    """
+    requested_cutoff = _normalise_comparison_cutoff(source_time)
+    if requested_cutoff is None or requested_cutoff.date().isoformat() != trade_date:
+        return None, None, None, None, ["缺少可靠的行情时间戳，同进度量能比保持为空。"]
+    if len(series) != 2:
+        return None, None, None, None, ["上深两个宽基指数分钟成交额未完整配对，同进度量能比保持为空。"]
+
+    current_last: list[datetime] = []
+    for exchange_rows in series:
+        candidates = [
+            stamp for stamp, _ in exchange_rows.get(trade_date, [])
+            if stamp <= requested_cutoff
+        ]
+        if not candidates:
+            return None, None, None, None, ["当日上深指数分钟成交额缺失，同进度量能比保持为空。"]
+        current_last.append(max(candidates))
+
+    # Quote and k-line endpoints can differ by one minute.  Compare every day
+    # at the latest minute actually available on both current index series.
+    effective_cutoff = min(current_last).replace(second=0, microsecond=0)
+    expected_count = _continuous_auction_bar_count(effective_cutoff)
+    if expected_count <= 0:
+        return None, None, None, None, ["连续竞价尚未形成可比分钟样本，同进度量能比保持为空。"]
+
+    # The union is deliberate: a day returned by only one exchange is a known
+    # incomplete trading day and must not be silently skipped/replaced by an
+    # older day when calculating "previous" or the latest five sessions.
+    candidate_dates = sorted(set(series[0]) | set(series[1]))
+    totals: dict[str, float] = {}
+    incomplete_dates: list[str] = []
+    for date in candidate_dates:
+        exchange_totals: list[float] = []
+        complete = True
+        for exchange_rows in series:
+            # De-duplicate provider retries by minute before summing.
+            by_minute = {
+                stamp.replace(second=0, microsecond=0): amount
+                for stamp, amount in exchange_rows.get(date, [])
+                if (stamp.hour, stamp.minute) <= (effective_cutoff.hour, effective_cutoff.minute)
+            }
+            date_cutoff = effective_cutoff.replace(
+                year=int(date[:4]), month=int(date[5:7]), day=int(date[8:10])
+            )
+            if date_cutoff not in by_minute or len(by_minute) != expected_count:
+                complete = False
+                break
+            exchange_totals.append(sum(by_minute.values()))
+        if complete and len(exchange_totals) == 2:
+            totals[date] = round(sum(exchange_totals), 2)
+        else:
+            incomplete_dates.append(date)
+
+    current = totals.get(trade_date)
+    if current is None or current <= 0:
+        return None, None, None, effective_cutoff, [
+            f"当日{effective_cutoff:%H:%M}分钟成交额覆盖不完整，同进度量能比保持为空。"
+        ]
+
+    prior_dates = [date for date in candidate_dates if date < trade_date]
+    previous_date = prior_dates[-1] if prior_dates else None
+    previous = totals.get(previous_date) if previous_date else None
+    latest5_dates = prior_dates[-5:]
+    avg5 = (
+        round(sum(totals[date] for date in latest5_dates) / 5, 2)
+        if len(latest5_dates) == 5 and all(date in totals for date in latest5_dates)
+        else None
+    )
+    notes = [
+        f"量能比使用上证综指+深证综指截至{effective_cutoff:%H:%M}的真实5分钟成交额，"
+        "同进度、同指数口径比较，不线性外推全天。"
+    ]
+    if avg5 is None:
+        complete_latest5 = sum(date in totals for date in latest5_dates)
+        notes.append(
+            f"最近5个可识别交易日仅{complete_latest5}个具备完整同分钟样本，"
+            "拒绝用更早日期替补生成5日均值。"
+        )
+    if incomplete_dates:
+        notes.append(f"已排除{len(incomplete_dates)}个分钟覆盖不完整的交易日。")
+    return current, previous, avg5, effective_cutoff, notes
+
+
+def _fetch_same_time_turnover_history(
+    trade_date: str,
+    source_time: datetime | None,
+) -> tuple[float | None, float | None, float | None, str, list[str]]:
+    try:
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            futures = [
+                executor.submit(_fetch_index_minute_amount, "1.000001", trade_date),
+                executor.submit(_fetch_index_minute_amount, "0.399106", trade_date),
+            ]
+            series = [future.result() for future in futures]
+        current, previous, avg5, _, notes = _summarize_same_time_turnover_series(
+            series,
+            trade_date=trade_date,
+            source_time=source_time,
+        )
+        if current is not None:
+            return current, previous, avg5, "eastmoney-composite-5minute-amount", notes
+        return None, None, None, "unavailable", notes
+    except Exception as exc:
+        return None, None, None, "unavailable", [
+            f"同进度历史成交额采集失败：{exc.__class__.__name__}；不回退线性外推，量能比保持为空。"
+        ]
 
 
 def _fetch_sse_stock_turnover_yi(trade_date: str) -> float:
@@ -753,8 +1133,8 @@ def _fetch_sector_evidence(force_refresh: bool) -> tuple[dict[str, Any], str, li
 def _missing_metric_fields(metrics: MarketRegimeMetrics) -> list[str]:
     labels = {
         "advance_ratio": "上涨家数占比",
-        "volume_ratio_previous": "预计全天成交额/前日成交额",
-        "volume_ratio_5d": "预计全天成交额/5日均额",
+        "volume_ratio_previous": "同时间进度成交额/前日",
+        "volume_ratio_5d": "同时间进度成交额/5日均值",
         "index_composite_change_pct": "主要指数合成涨跌幅",
         "limit_up_count": "涨停家数",
         "limit_down_count": "跌停家数",
@@ -802,7 +1182,7 @@ def classify_market_regime(
     missing = _missing_metric_fields(metrics)
     required = {
         "上涨家数占比",
-        "预计全天成交额/5日均额",
+        "同时间进度成交额/5日均值",
         "主要指数合成涨跌幅",
         "涨停家数",
         "跌停家数",
@@ -845,10 +1225,10 @@ def classify_market_regime(
     evidence = [
         f"上涨占比{advance_ratio:.1%}，涨停{limit_up}只、跌停{limit_down}只。",
         (
-            f"预计全天成交额为前日的{volume_ratio_previous:.2f}倍、5日均额的{volume_ratio:.2f}倍，"
+            f"同一交易进度成交额为前日的{volume_ratio_previous:.2f}倍、5日均值的{volume_ratio:.2f}倍，"
             f"主要指数合成涨跌{index_change:+.2f}%。"
             if volume_ratio_previous is not None
-            else f"预计全天成交额为5日均额的{volume_ratio:.2f}倍，主要指数合成涨跌{index_change:+.2f}%。"
+            else f"同一交易进度成交额为5日均值的{volume_ratio:.2f}倍，主要指数合成涨跌{index_change:+.2f}%。"
         ),
         f"全市场大单方向估算{main_flow:+.2f}亿，行业正向比例{sector_ratio:.1%}；该值来自供应商算法，不是账户真实流水。",
     ]
@@ -954,7 +1334,9 @@ def collect_market_regime_inputs(force_refresh: bool = False, now: datetime | No
     all_a: dict[str, Any] = {}
     indices: list[MarketIndexStateOut] = []
     sector: dict[str, Any] = {}
-    history: tuple[float | None, float | None, str, list[str]] = (None, None, "unavailable", [])
+    history: tuple[float | None, float | None, float | None, str, list[str]] = (
+        None, None, None, "unavailable", []
+    )
 
     with ThreadPoolExecutor(max_workers=4) as executor:
         tasks = {
@@ -975,16 +1357,23 @@ def collect_market_regime_inputs(force_refresh: bool = False, now: datetime | No
                 sources.append(source)
                 notes.extend(task_notes)
             except Exception as exc:
-                notes.append(f"{key}真实数据采集失败：{exc.__class__.__name__}；对应字段保持为空。")
+                reason = str(exc).strip() if isinstance(exc, ValueError) else exc.__class__.__name__
+                notes.append(
+                    f"{key}真实数据采集失败：{reason or exc.__class__.__name__}；"
+                    "对应字段保持为空。"
+                )
 
     source_time = all_a.get("source_time")
     trade_date = source_time.date().isoformat() if isinstance(source_time, datetime) else now.date().isoformat()
-    try:
-        history = _fetch_turnover_history(trade_date)
-        sources.append(history[2])
-        notes.extend(history[3])
-    except Exception as exc:
-        notes.append(f"历史成交额采集失败：{exc.__class__.__name__}；量能比字段保持为空。")
+    if isinstance(source_time, datetime) and source_time.date() == now.date():
+        try:
+            history = _fetch_same_time_turnover_history(trade_date, source_time)
+            sources.append(history[3])
+            notes.extend(history[4])
+        except Exception as exc:
+            notes.append(f"历史成交额采集失败：{exc.__class__.__name__}；量能比字段保持为空。")
+    else:
+        notes.append("当日行情时间戳尚未形成；不读取旧交易日的同进度量能比。")
 
     valid_indices = [item for item in indices if item.change_pct is not None]
     above_vwap = [item for item in indices if item.above_vwap is not None]
@@ -992,15 +1381,14 @@ def collect_market_regime_inputs(force_refresh: bool = False, now: datetime | No
         round(sum(float(item.change_pct) for item in valid_indices) / len(valid_indices), 3)
         if len(valid_indices) >= 2 else None
     )
-    previous_turnover, avg5_turnover = history[0], history[1]
-    projected = all_a.get("projected_turnover_yi")
+    comparable_turnover, previous_turnover, avg5_turnover = history[0], history[1], history[2]
     volume_ratio_previous = (
-        round(float(projected) / float(previous_turnover), 4)
-        if projected is not None and previous_turnover and previous_turnover > 0 else None
+        round(float(comparable_turnover) / float(previous_turnover), 4)
+        if comparable_turnover is not None and previous_turnover and previous_turnover > 0 else None
     )
     volume_ratio = (
-        round(float(projected) / float(avg5_turnover), 4)
-        if projected is not None and avg5_turnover and avg5_turnover > 0 else None
+        round(float(comparable_turnover) / float(avg5_turnover), 4)
+        if comparable_turnover is not None and avg5_turnover and avg5_turnover > 0 else None
     )
     metrics = MarketRegimeMetrics(
         **{key: value for key, value in all_a.items() if key in MarketRegimeMetrics.model_fields},

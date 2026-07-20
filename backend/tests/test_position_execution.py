@@ -24,6 +24,64 @@ from app.models.trading import (
 from app.services.intraday_evidence_engine import collect_holding_evidence, nearest_sample_label
 
 
+def test_sector_distribution_event_freezes_expansion_but_never_sells_alone(db_session, monkeypatch):
+    holding = Holding(
+        code="600900",
+        name="板块派发联动测试",
+        quantity=1000,
+        cost_price=10,
+        current_price=10,
+        total_asset=100000,
+        position_type="普通持仓",
+        next_discipline="等待个股预期与量价确认",
+    )
+    db_session.add(holding)
+    db_session.commit()
+    db_session.refresh(holding)
+    high_distribution = {
+        "items": [{
+            "name": "半导体",
+            "heat_score": 82,
+            "distribution_state": "高位派发风险",
+            "distribution_risk_level": "HIGH",
+            "distribution_risk_score": 86,
+            "distribution_confirmation_count": 3,
+            "order_flow_exhausted": True,
+            "leverage_crowding": True,
+            "price_response_weak": True,
+            "distribution_evidence": ["历史净流入后当日转为流出", "价格对新增资金响应转弱"],
+        }],
+    }
+    monkeypatch.setattr(
+        "app.api.helpers.execution._get_response_cache",
+        lambda key, allow_stale=False: high_distribution if key.endswith("|行业") else None,
+    )
+    seesaw = SimpleNamespace(
+        risk_level="低",
+        signal="板块尚未形成个股卖出共振",
+        sector_ebb_trigger=[],
+        stock_weakening_trigger=[],
+        profit_drawdown_trigger=[],
+        holding_theme="半导体",
+        primary_industry_sector="半导体",
+        matched_flow_sector="半导体",
+        concept_flow_sectors=[],
+    )
+
+    state = build_position_execution_state(
+        db_session,
+        holding,
+        quote={"price": 10, "high": 10.1, "low": 9.9, "open": 10, "note": "实时行情"},
+        seesaw=seesaw,
+        persist=False,
+    )
+
+    assert state.recommended_reduce_ratio == 0
+    assert "禁止加仓" in state.recommended_action or "禁止加仓" in " ".join(state.evidence)
+    assert any("不据此单独机械卖出" in item for item in state.evidence)
+    assert any(event.event_type == "SECTOR_DISTRIBUTION_RISK" for event in state.events)
+
+
 def test_position_execution_profit_drawdown_requires_reduce(db_session):
     holding = Holding(
         code="600000",
@@ -1877,6 +1935,7 @@ def test_intraday_evidence_engine_saves_sample_event(monkeypatch, db_session):
         holding,
         stage="09:35确认",
         now=datetime(2026, 7, 12, 9, 35),
+        global_cues=_global_snapshot(datetime(2026, 7, 12, 9, 35), -2.0),
     )
 
     assert nearest_sample_label(datetime(2026, 7, 12, 9, 36)) == "09:35"
@@ -1884,3 +1943,4 @@ def test_intraday_evidence_engine_saves_sample_event(monkeypatch, db_session):
     assert sample.confirmed is True
     assert sample.recommendation_id == state.recommendation.id
     assert "09:35" in sample.group_key
+    assert any("外围环境扩仓分" in item for item in state.evidence)

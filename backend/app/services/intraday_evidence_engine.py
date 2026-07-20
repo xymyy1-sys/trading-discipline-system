@@ -4,7 +4,7 @@ import json
 import hashlib
 import time as time_module
 from datetime import datetime, time
-from typing import Any
+from typing import Any, Mapping
 
 from sqlalchemy.orm import Session
 
@@ -115,6 +115,7 @@ def collect_holding_evidence(
     stage: str | None = None,
     now: datetime | None = None,
     seesaw: Any | None = None,
+    global_cues: Mapping[str, Any] | None = None,
 ) -> tuple[VolumePriceSnapshotOut, PositionExecutionStateOut, IntradayEvidenceEvent]:
     now = shanghai_now_naive(now)
     fetch_started = time_module.perf_counter()
@@ -142,6 +143,7 @@ def collect_holding_evidence(
         holding,
         quote=quote,
         seesaw=seesaw,
+        global_cues=global_cues,
         expectation=expectation,
         volume_price=volume,
     )

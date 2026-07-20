@@ -1160,17 +1160,44 @@ def _market_entry_context(db: Session, theme: dict[str, Any]) -> tuple[dict[str,
     if matched_temperature:
         temperature_quality = str(matched_temperature.get("data_quality") or "missing").lower()
         crowding_evaluated = temperature_quality in {"high", "good"}
+        distribution_level = str(
+            matched_temperature.get("distribution_risk_level") or "UNKNOWN"
+        ).upper()
+        distribution_state = str(
+            matched_temperature.get("distribution_state") or "数据不足"
+        )
         sector_context.update(
+            name=str(matched_temperature.get("name") or ""),
+            board_type=str(matched_temperature.get("board_type") or ""),
             status=str(matched_temperature.get("status") or sector_context["status"]),
             heat_status=str(matched_temperature.get("status") or ""),
             heat_score=int(matched_temperature.get("heat_score") or 0),
             flow_turning=matched_temperature.get("flow_turning") or sector_context.get("flow_turning"),
             margin_score=matched_temperature.get("margin_score"),
             attention_score=matched_temperature.get("attention_score"),
-            overheated="过热" in str(matched_temperature.get("status") or ""),
+            distribution_state=distribution_state,
+            distribution_risk_level=distribution_level,
+            distribution_risk_score=int(matched_temperature.get("distribution_risk_score") or 0),
+            distribution_risk=distribution_level in {"HIGH", "CRITICAL"},
+            order_flow_exhausted=bool(matched_temperature.get("order_flow_exhausted")),
+            leverage_crowding=bool(matched_temperature.get("leverage_crowding")),
+            price_response_weak=bool(matched_temperature.get("price_response_weak")),
+            distribution_confirmation_count=int(
+                matched_temperature.get("distribution_confirmation_count") or 0
+            ),
+            distribution_evidence=list(matched_temperature.get("distribution_evidence") or []),
+            distribution_counter_evidence=list(
+                matched_temperature.get("distribution_counter_evidence") or []
+            ),
+            distribution_actions=list(matched_temperature.get("distribution_actions") or []),
+            overheated=(
+                "过热" in str(matched_temperature.get("status") or "")
+                or distribution_state == "高位派发风险"
+            ),
             crowding_evaluated=crowding_evaluated,
             temperature_data_quality=temperature_quality,
             provider_trade_date=matched_temperature.get("provider_trade_date"),
+            updated_at=matched_temperature.get("updated_at"),
         )
     return market_context, sector_context
 

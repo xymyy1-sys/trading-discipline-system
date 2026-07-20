@@ -6840,6 +6840,42 @@ h3 {
 .effective-capital-boundary { margin: 9px 0 0; color: var(--ink-muted); font-size: 12px; line-height: 1.5; }
 
 .sector-temperature-board { padding: 16px; }
+.distribution-divergence-panel { margin-bottom: 18px; padding: 16px; border: 1px solid #cbd5e1; border-radius: 12px; background: linear-gradient(135deg, #f8fafc, #fff); }
+.distribution-divergence-panel > header { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }
+.distribution-divergence-panel > header h3 { display: flex; align-items: center; gap: 7px; margin: 0; font-size: 19px; }
+.distribution-divergence-panel > header p { margin: 6px 0 0; color: var(--ink-muted); line-height: 1.55; }
+.distribution-count { flex: 0 0 auto; padding: 6px 9px; border: 1px solid var(--line); border-radius: 999px; color: var(--ink-muted); background: var(--panel); font-size: 12px; font-weight: 800; }
+.distribution-count.high { border-color: #fecaca; color: #b91c1c; background: #fff1f2; }
+.distribution-boundary { margin: 12px 0; padding: 9px 11px; border-left: 4px solid #2563eb; border-radius: 6px; color: #334155; background: #eff6ff; font-size: 13px; line-height: 1.55; }
+.distribution-divergence-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+.distribution-divergence-card { padding: 13px; border: 1px solid var(--line); border-left: 5px solid var(--line); border-radius: 10px; background: var(--panel); }
+.distribution-divergence-card.risk-high { border-color: #fecaca; border-left-color: #dc2626; background: color-mix(in srgb, #dc2626 5%, var(--panel)); }
+.distribution-divergence-card.risk-medium { border-color: #fed7aa; border-left-color: #d97706; background: color-mix(in srgb, #d97706 5%, var(--panel)); }
+.distribution-divergence-card > header { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; }
+.distribution-divergence-card > header > div:first-child { display: grid; gap: 4px; }
+.distribution-divergence-card > header span { color: var(--ink-muted); font-size: 12px; }
+.distribution-score { display: grid; min-width: 54px; justify-items: end; }
+.distribution-score b { font-size: 24px; line-height: 1; }
+.distribution-score small { margin-top: 4px; color: var(--ink-muted); }
+.distribution-divergence-card.risk-high .distribution-score { color: #b91c1c; }
+.distribution-divergence-card.risk-medium .distribution-score { color: #b45309; }
+.distribution-confirmation { display: flex; align-items: center; justify-content: space-between; margin-top: 10px; padding-top: 9px; border-top: 1px solid var(--line); font-size: 12px; }
+.distribution-confirmation span { color: var(--ink-muted); }
+.distribution-factor-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px; margin-top: 8px; }
+.distribution-flag { display: grid; gap: 3px; padding: 7px; border: 1px solid var(--line); border-radius: 7px; background: var(--surface); font-size: 11px; }
+.distribution-flag small { color: var(--ink-muted); }
+.distribution-flag.confirmed { border-color: #fdba74; background: #fff7ed; color: #9a3412; }
+.distribution-flag.missing { border-style: dashed; color: var(--ink-muted); }
+.distribution-time-row { display: flex; flex-wrap: wrap; gap: 4px 12px; margin-top: 9px; color: var(--ink-muted); }
+.distribution-primary-action { margin: 10px 0 0; padding: 8px 9px; border-radius: 6px; background: var(--surface); font-weight: 750; line-height: 1.5; }
+.distribution-divergence-card details { margin-top: 10px; border-top: 1px dashed var(--line); padding-top: 9px; }
+.distribution-divergence-card summary { cursor: pointer; color: var(--accent-strong); font-weight: 750; }
+.distribution-evidence-list { margin-top: 10px; }
+.distribution-evidence-list h4 { margin: 0 0 5px; font-size: 12px; }
+.distribution-evidence-list p { margin: 3px 0; color: var(--ink-muted); font-size: 12px; line-height: 1.5; }
+.distribution-detail-boundary { margin: 10px 0 0; padding: 8px 9px; border-left: 3px solid #2563eb; background: #eff6ff; color: #334155; font-size: 12px; line-height: 1.5; }
+.distribution-empty { padding: 16px; border: 1px dashed var(--line); border-radius: 8px; color: var(--ink-muted); background: var(--panel); text-align: center; line-height: 1.6; }
+.distribution-updated-at { display: block; margin-top: 10px; color: var(--ink-muted); }
 .temperature-summary-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; margin-bottom: 16px; }
 .temperature-summary-grid article { padding: 13px; border: 1px solid var(--line); border-radius: 10px; background: var(--panel); }
 .temperature-summary-grid h3 { margin: 0 0 9px; font-size: 15px; }
@@ -6862,6 +6898,9 @@ h3 {
 .temperature-window-row span { padding: 6px; border-radius: 6px; background: var(--surface); font-size: 12px; }
 .temperature-card p { margin: 8px 0 0; line-height: 1.45; }
 .temperature-card ul { margin: 10px 0; padding-left: 18px; color: var(--ink-muted); }
+.temperature-distribution-signal { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 9px; padding: 7px 8px; border: 1px solid var(--line); border-radius: 6px; background: var(--surface); font-size: 12px; }
+.temperature-distribution-signal.risk-high { border-color: #fecaca; color: #b91c1c; background: #fff1f2; }
+.temperature-distribution-signal.risk-medium { border-color: #fed7aa; color: #b45309; background: #fff7ed; }
 .temperature-action { display: block; padding-top: 8px; border-top: 1px solid var(--line); }
 
 @media (max-width: 900px) {
@@ -6870,7 +6909,9 @@ h3 {
   .effective-capital-metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .effective-capital-columns { grid-template-columns: minmax(0, 1fr); }
   .temperature-summary-grid,
-  .temperature-card-grid { grid-template-columns: minmax(0, 1fr); }
+  .temperature-card-grid,
+  .distribution-divergence-grid { grid-template-columns: minmax(0, 1fr); }
+  .distribution-divergence-panel > header { flex-direction: column; }
 }
 
 /* Keep responsive cockpit rules last so later feature styles cannot restore desktop grids. */

@@ -262,6 +262,39 @@ def _sector_supportive(sector: Mapping[str, Any]) -> bool:
     )
 
 
+def _sector_distribution_risk(sector: Mapping[str, Any]) -> tuple[bool, bool]:
+    """Return confirmed/high and watch-level distribution states.
+
+    Financing is deliberately not evaluated on its own here.  The upstream
+    sector state machine must have confirmed weakening cash order flow and weak
+    price response before it may mark a distribution state as high risk.
+    Leverage crowding is an optional T+1 corroboration, never a prerequisite or
+    a standalone trigger.  This gate only freezes chasing/expansion; it never
+    creates a sell instruction for an existing holding.
+    """
+
+    level = _text(sector, "distribution_risk_level").upper()
+    state = _text(sector, "distribution_state")
+    confirmations = int(_number(sector, "distribution_confirmation_count") or 0)
+    flow_exhausted = _boolean(sector, "order_flow_exhausted") is True
+    price_response_weak = _boolean(sector, "price_response_weak") is True
+    confirmed = bool(
+        level in {"HIGH", "CRITICAL"}
+        and state == "高位派发风险"
+        and confirmations >= 3
+        and flow_exhausted
+        and price_response_weak
+    )
+    watch = bool(
+        not confirmed
+        and (
+            level in {"MEDIUM", "WATCH"}
+            or state in {"资金承载衰减", "杠杆追涨观察", "去杠杆踩踏"}
+        )
+    )
+    return confirmed, watch
+
+
 def _volume_contraction_on_spike(bars: list[dict[str, float | str | None]], volume_ratio: float | None) -> bool:
     if volume_ratio is not None and 0 < volume_ratio <= 0.8:
         return True
@@ -522,6 +555,7 @@ def evaluate_entry_gate(
     sector_hot = _sector_overheated(sector_data)
     sector_rolling_over = _sector_weakening(sector_data)
     sector_supportive = _sector_supportive(sector_data)
+    sector_distribution_high, sector_distribution_watch = _sector_distribution_risk(sector_data)
     if sector_hot:
         _reason(reason_codes, evidence, "SECTOR_OVERHEATED", "所属板块处于过热或高拥挤区，继续追价的赔率下降。")
         score += 15
@@ -530,6 +564,22 @@ def evaluate_entry_gate(
         score += 15
     elif sector_supportive:
         counter_evidence.append("板块订单流方向估算边际改善，但仍不能替代个股回踩确认。")
+    if sector_distribution_high:
+        _reason(
+            reason_codes,
+            evidence,
+            "SECTOR_DISTRIBUTION_RISK",
+            "所属板块同时出现资金承载衰减与价格负反馈，已构成高位派发联合证据；两融仅作T+1佐证。禁止追涨和扩大仓位，但该结论不会单独要求已有持仓卖出。",
+        )
+        score += 25
+    elif sector_distribution_watch:
+        _reason(
+            reason_codes,
+            evidence,
+            "SECTOR_DISTRIBUTION_WATCH",
+            "所属板块出现资金承载或杠杆拥挤观察信号，证据尚未闭环；等待板块订单流和个股量价重新确认，不把单一两融变化当作方向。",
+        )
+        score += 10
 
     consensus_score = _number(consensus_data, "score")
     consensus_level = _text(consensus_data, "level", "risk_level").upper()
@@ -603,6 +653,7 @@ def evaluate_entry_gate(
         "OUT_OF_TRADING_MODE",
         "EXPECTATION_NEGATIVE",
         "MARKET_GATE_BLOCKED",
+        "SECTOR_DISTRIBUTION_RISK",
         "SECTOR_CONTEXT_MISSING",
         "PLAN_POSITION_CAP_MISSING",
     }

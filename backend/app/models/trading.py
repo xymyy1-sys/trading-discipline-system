@@ -1,9 +1,18 @@
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import Boolean, DateTime, Float, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.core.database import Base
+
+
+_SHANGHAI_TZ = timezone(timedelta(hours=8))
+
+
+def _shanghai_now_naive() -> datetime:
+    """Return a timezone-naive Shanghai wall-clock timestamp for DB storage."""
+
+    return datetime.now(_SHANGHAI_TZ).replace(tzinfo=None)
 
 
 class Holding(Base):
@@ -196,6 +205,118 @@ class MarketRegimeSnapshot(Base):
     evidence_json: Mapped[str] = mapped_column(Text, default="[]")
     missing_fields_json: Mapped[str] = mapped_column(Text, default="[]")
     notes_json: Mapped[str] = mapped_column(Text, default="[]")
+
+
+class SectorCrowdingDailySnapshot(Base):
+    """One auditable end-of-day crowding record per logical sector.
+
+    Intraday providers can refresh the same board repeatedly.  The composite
+    key deliberately collapses those refreshes into the latest daily state,
+    while ``raw_payload_json`` and ``payload_hash`` preserve the exact evidence
+    envelope used by the model at that point in time.
+    """
+
+    __tablename__ = "sector_crowding_daily_snapshots"
+    __table_args__ = (
+        UniqueConstraint(
+            "trade_date",
+            "board_type",
+            "board_key",
+            name="uq_sector_crowding_daily_board",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    trade_date: Mapped[str] = mapped_column(String(16), index=True)
+    board_type: Mapped[str] = mapped_column(String(16), default="行业", index=True)
+    board_key: Mapped[str] = mapped_column(String(160), index=True)
+    board_code: Mapped[str] = mapped_column(String(32), default="", index=True)
+    board_name: Mapped[str] = mapped_column(String(128), default="", index=True)
+    captured_at: Mapped[datetime] = mapped_column(DateTime, index=True)
+    source: Mapped[str] = mapped_column(String(512), default="")
+    data_quality: Mapped[str] = mapped_column(String(24), default="missing", index=True)
+    provider_trade_date: Mapped[str] = mapped_column(String(16), default="", index=True)
+    provider_updated_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+    heat_score: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    status: Mapped[str] = mapped_column(String(64), default="数据不足", index=True)
+    risk_level: Mapped[str] = mapped_column(String(16), default="UNKNOWN", index=True)
+    trend_score: Mapped[float | None] = mapped_column(Float, nullable=True)
+    flow_score: Mapped[float | None] = mapped_column(Float, nullable=True)
+    crowding_score: Mapped[float | None] = mapped_column(Float, nullable=True)
+    margin_score: Mapped[float | None] = mapped_column(Float, nullable=True)
+    attention_score: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+    change_pct: Mapped[float | None] = mapped_column(Float, nullable=True)
+    change_pct_5d: Mapped[float | None] = mapped_column(Float, nullable=True)
+    change_pct_10d: Mapped[float | None] = mapped_column(Float, nullable=True)
+    net_inflow: Mapped[float | None] = mapped_column(Float, nullable=True)
+    net_inflow_5d: Mapped[float | None] = mapped_column(Float, nullable=True)
+    net_inflow_10d: Mapped[float | None] = mapped_column(Float, nullable=True)
+    flow_speed: Mapped[float | None] = mapped_column(Float, nullable=True)
+    flow_acceleration: Mapped[float | None] = mapped_column(Float, nullable=True)
+    flow_turning: Mapped[str] = mapped_column(String(48), default="")
+    limit_up_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
+    financing_balance: Mapped[float | None] = mapped_column(Float, nullable=True)
+    financing_net_buy: Mapped[float | None] = mapped_column(Float, nullable=True)
+    financing_balance_ratio: Mapped[float | None] = mapped_column(Float, nullable=True)
+    financing_net_buy_5d: Mapped[float | None] = mapped_column(Float, nullable=True)
+    financing_net_buy_10d: Mapped[float | None] = mapped_column(Float, nullable=True)
+    financing_net_buy_20d: Mapped[float | None] = mapped_column(Float, nullable=True)
+    margin_as_of: Mapped[str] = mapped_column(String(16), default="")
+    margin_realtime: Mapped[bool] = mapped_column(Boolean, default=False)
+
+    # Explicit high-level distribution contract.  These fields are joint
+    # evidence, never aliases for a mechanically confirmed market top.
+    distribution_state: Mapped[str] = mapped_column(String(48), default="数据不足", index=True)
+    distribution_risk_level: Mapped[str] = mapped_column(String(16), default="UNKNOWN", index=True)
+    distribution_risk_score: Mapped[float | None] = mapped_column(Float, nullable=True)
+    order_flow_exhausted: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    leverage_crowding: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    price_response_weak: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    distribution_confirmation_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
+    evidence_json: Mapped[str] = mapped_column(Text, default="[]")
+    counter_evidence_json: Mapped[str] = mapped_column(Text, default="[]")
+    actions_json: Mapped[str] = mapped_column(Text, default="[]")
+    distribution_evidence_json: Mapped[str] = mapped_column(Text, default="[]")
+    distribution_counter_evidence_json: Mapped[str] = mapped_column(Text, default="[]")
+    distribution_actions_json: Mapped[str] = mapped_column(Text, default="[]")
+    raw_payload_json: Mapped[str] = mapped_column(Text, default="{}")
+    payload_hash: Mapped[str] = mapped_column(String(64), default="", index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_shanghai_now_naive)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime,
+        default=_shanghai_now_naive,
+        onupdate=_shanghai_now_naive,
+    )
+
+
+class GlobalEvidenceSnapshot(Base):
+    """Deduplicated immutable envelope for overseas/global market evidence."""
+
+    __tablename__ = "global_evidence_snapshots"
+    __table_args__ = (
+        UniqueConstraint(
+            "trade_date",
+            "payload_hash",
+            name="uq_global_evidence_trade_date_payload_hash",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    trade_date: Mapped[str] = mapped_column(String(16), default="", index=True)
+    captured_at: Mapped[datetime] = mapped_column(
+        DateTime,
+        default=_shanghai_now_naive,
+        index=True,
+    )
+    as_of: Mapped[str] = mapped_column(String(64), default="", index=True)
+    source: Mapped[str] = mapped_column(String(512), default="")
+    data_quality: Mapped[str] = mapped_column(String(24), default="missing", index=True)
+    payload_hash: Mapped[str] = mapped_column(String(64), index=True)
+    payload_json: Mapped[str] = mapped_column(Text, default="{}")
 
 
 class NextDayPlan(Base):

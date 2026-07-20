@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import date, datetime, timedelta, timezone
 from io import BytesIO
 
 import pytest
@@ -13,6 +13,7 @@ from app.schemas.trading import (
 )
 from app.services.market_regime import (
     MarketRegimeCollection,
+    _fetch_all_a_market,
     _fetch_official_turnover_day,
     _fetch_official_turnover_history,
     _fetch_limit_pool_count,
@@ -20,8 +21,10 @@ from app.services.market_regime import (
     _fetch_sse_stock_turnover_yi,
     _fetch_szse_stock_turnover_yi,
     _fetch_turnover_history,
+    _summarize_same_time_turnover_series,
     classify_market_regime,
     clear_market_regime_cache,
+    collect_market_regime_inputs,
     summarize_all_a_rows,
 )
 
@@ -145,7 +148,7 @@ def test_classifier_returns_unknown_instead_of_filling_a_critical_gap():
     result = classify_market_regime(_metrics(volume_ratio_5d=None))
 
     assert result.regime_code == "UNKNOWN"
-    assert "预计全天成交额/5日均额" in result.missing_fields
+    assert "同时间进度成交额/5日均值" in result.missing_fields
     assert result.confidence < 0.98
 
 
@@ -215,10 +218,258 @@ def test_all_a_summary_rejects_a_truncated_sorted_page():
     result, notes = summarize_all_a_rows(rows, expected_total=100, now=datetime(2026, 7, 13, 15, 0))
 
     assert result == {}
-    assert any("拒绝用涨幅排序的局部榜单" in item for item in notes)
+    assert any("全A覆盖率低于99.5%或缺失超过20只" in item for item in notes)
 
 
-def test_completed_previous_trade_day_keeps_full_turnover_before_next_open():
+SHANGHAI_TZ = timezone(timedelta(hours=8))
+
+
+def _provider_stamp(value: datetime) -> int:
+    return int(value.replace(tzinfo=SHANGHAI_TZ).timestamp())
+
+
+def _install_full_a_provider(
+    monkeypatch,
+    *,
+    total: int | None = 4_000,
+    row_count: int | None = None,
+    stamp: int | None = None,
+    missing_timestamp_count: int = 0,
+    fail_page: int | None = None,
+    omit_total: bool = False,
+) -> list[dict[str, str]]:
+    captured_params: list[dict[str, str]] = []
+    effective_count = row_count if row_count is not None else max(100, total or 100)
+    rows: list[dict[str, object]] = []
+    for index in range(effective_count):
+        row: dict[str, object] = {
+            "f13": index % 2,
+            "f12": f"{index + 1:06d}",
+            "f14": f"样本{index + 1}",
+            "f2": 10,
+            "f3": 1 if index % 2 == 0 else -1,
+            "f6": 1e8,
+            "f62": 1e7 if index % 2 == 0 else -1e7,
+        }
+        if stamp is not None and index >= missing_timestamp_count:
+            row["f124"] = stamp
+        rows.append(row)
+
+    def fake_json(path, params, timeout=8):
+        captured_params.append(dict(params))
+        page = int(params.get("pn") or 1)
+        if fail_page == page:
+            raise RuntimeError("provider page failed")
+        start = (page - 1) * 100
+        data = {"diff": rows[start:start + 100]}
+        if not omit_total:
+            data["total"] = total
+        return {"data": data}, "https://push2.eastmoney.com"
+
+    monkeypatch.setattr("app.services.market_regime._get_json_from_hosts", fake_json)
+    monkeypatch.setattr("app.services.market_regime._fetch_limit_pool_count", lambda path, trade_date: 0)
+    return captured_params
+
+
+def _use_weekday_calendar(monkeypatch):
+    monkeypatch.setattr(
+        "app.services.market_regime.is_a_share_trading_day",
+        lambda value: value.weekday() < 5,
+    )
+
+
+def test_all_a_pagination_uses_stable_security_code_order(monkeypatch):
+    stamp = _provider_stamp(datetime(2026, 7, 14, 10, 30))
+    captured_params = _install_full_a_provider(monkeypatch, stamp=stamp)
+    _use_weekday_calendar(monkeypatch)
+
+    result, _, _ = _fetch_all_a_market(datetime(2026, 7, 14, 10, 30))
+
+    assert result["active_stock_count"] == 4_000
+    assert result["turnover_yi"] == 4_000.0
+    assert result["source_time"] == datetime(2026, 7, 14, 10, 30)
+    assert len(captured_params) == 40
+    assert all(params["fid"] == "f12" for params in captured_params)
+
+
+@pytest.mark.parametrize(
+    ("total", "omit_total"),
+    [(None, True), (3_999, False)],
+)
+def test_all_a_fetch_rejects_missing_or_implausible_total(monkeypatch, total, omit_total):
+    _install_full_a_provider(
+        monkeypatch,
+        total=total,
+        row_count=100,
+        stamp=_provider_stamp(datetime(2026, 7, 14, 10, 30)),
+        omit_total=omit_total,
+    )
+    _use_weekday_calendar(monkeypatch)
+
+    with pytest.raises(ValueError, match="总数|安全下限"):
+        _fetch_all_a_market(datetime(2026, 7, 14, 10, 30))
+
+
+def test_all_a_fetch_rejects_a_failed_page(monkeypatch):
+    _install_full_a_provider(
+        monkeypatch,
+        stamp=_provider_stamp(datetime(2026, 7, 14, 10, 30)),
+        fail_page=2,
+    )
+    _use_weekday_calendar(monkeypatch)
+
+    with pytest.raises(ValueError, match="第2页采集失败"):
+        _fetch_all_a_market(datetime(2026, 7, 14, 10, 30))
+
+
+def test_all_a_fetch_rejects_more_than_twenty_missing_rows(monkeypatch):
+    _install_full_a_provider(
+        monkeypatch,
+        row_count=3_979,
+        stamp=_provider_stamp(datetime(2026, 7, 14, 10, 30)),
+    )
+    _use_weekday_calendar(monkeypatch)
+
+    with pytest.raises(ValueError, match="分页覆盖不完整"):
+        _fetch_all_a_market(datetime(2026, 7, 14, 10, 30))
+
+
+def test_all_a_fetch_accepts_exact_pagination_safety_boundary(monkeypatch):
+    _install_full_a_provider(
+        monkeypatch,
+        row_count=3_980,
+        stamp=_provider_stamp(datetime(2026, 7, 14, 10, 30)),
+    )
+    _use_weekday_calendar(monkeypatch)
+
+    result, _, _ = _fetch_all_a_market(datetime(2026, 7, 14, 10, 30))
+
+    assert result["active_stock_count"] == 3_980
+
+
+def test_all_a_fetch_rejects_insufficient_provider_timestamp_coverage(monkeypatch):
+    _install_full_a_provider(
+        monkeypatch,
+        stamp=_provider_stamp(datetime(2026, 7, 14, 10, 30)),
+        missing_timestamp_count=21,
+    )
+    _use_weekday_calendar(monkeypatch)
+
+    with pytest.raises(ValueError, match="时间戳覆盖不足"):
+        _fetch_all_a_market(datetime(2026, 7, 14, 10, 30))
+
+
+def test_all_a_fetch_rejects_previous_day_quotes_during_current_session(monkeypatch):
+    _install_full_a_provider(
+        monkeypatch,
+        stamp=_provider_stamp(datetime(2026, 7, 13, 15, 0)),
+    )
+    _use_weekday_calendar(monkeypatch)
+
+    with pytest.raises(ValueError, match="交易日不匹配"):
+        _fetch_all_a_market(datetime(2026, 7, 14, 10, 30))
+
+
+def test_all_a_fetch_rejects_provider_clock_far_in_the_future(monkeypatch):
+    _install_full_a_provider(
+        monkeypatch,
+        stamp=_provider_stamp(datetime(2026, 7, 14, 10, 40)),
+    )
+    _use_weekday_calendar(monkeypatch)
+
+    with pytest.raises(ValueError, match="时间戳覆盖不足"):
+        _fetch_all_a_market(datetime(2026, 7, 14, 10, 30))
+
+
+@pytest.mark.parametrize(
+    ("now", "previous_session"),
+    [
+        (datetime(2026, 7, 18, 10, 30), date(2026, 7, 17)),
+        (datetime(2026, 10, 1, 10, 30), date(2026, 9, 30)),
+    ],
+)
+def test_non_trading_day_refresh_keeps_previous_session_date(
+    monkeypatch,
+    now,
+    previous_session,
+):
+    _install_full_a_provider(
+        monkeypatch,
+        stamp=_provider_stamp(datetime.combine(previous_session, datetime.min.time()).replace(hour=15)),
+    )
+    monkeypatch.setattr(
+        "app.services.market_regime.is_a_share_trading_day",
+        lambda value: False if value == now.date() else value.weekday() < 5,
+    )
+    monkeypatch.setattr(
+        "app.services.market_regime.previous_a_share_trading_day",
+        lambda value, inclusive=False: previous_session,
+    )
+
+    result, _, _ = _fetch_all_a_market(now)
+
+    assert result["source_time"].date() == previous_session
+    assert result["turnover_yi"] is None
+    assert result["market_main_net_inflow_yi"] is None
+
+
+def test_all_a_fetch_rejects_intraday_clock_older_than_ten_minutes(monkeypatch):
+    _install_full_a_provider(
+        monkeypatch,
+        stamp=_provider_stamp(datetime(2026, 7, 14, 9, 28)),
+    )
+    _use_weekday_calendar(monkeypatch)
+
+    with pytest.raises(ValueError, match="时间戳已过期"):
+        _fetch_all_a_market(datetime(2026, 7, 14, 10, 30))
+
+
+def test_pre_0935_snapshot_withholds_turnover_and_order_flow(monkeypatch):
+    _install_full_a_provider(
+        monkeypatch,
+        stamp=_provider_stamp(datetime(2026, 7, 14, 9, 33)),
+    )
+    _use_weekday_calendar(monkeypatch)
+
+    result, _, notes = _fetch_all_a_market(datetime(2026, 7, 14, 9, 34))
+
+    assert result["turnover_yi"] is None
+    assert result["projected_turnover_yi"] is None
+    assert result["market_main_net_inflow_yi"] is None
+    assert any("09:35前" in item for item in notes)
+
+
+def test_full_market_collection_gap_cannot_produce_actionable_regime(monkeypatch):
+    monkeypatch.setattr(
+        "app.services.market_regime._fetch_all_a_market",
+        lambda now: (_ for _ in ()).throw(ValueError("全A分页覆盖不完整")),
+    )
+    monkeypatch.setattr(
+        "app.services.market_regime._fetch_indices",
+        lambda: ([
+            MarketIndexStateOut(code="000001", name="上证指数", change_pct=1.2),
+            MarketIndexStateOut(code="399001", name="深证成指", change_pct=1.4),
+        ], "index-test", []),
+    )
+    monkeypatch.setattr(
+        "app.services.market_regime._fetch_sector_evidence",
+        lambda force_refresh: ({
+            "positive_sector_count": 80,
+            "negative_sector_count": 10,
+            "positive_sector_ratio": 0.89,
+            "top3_inflow_share": 0.6,
+        }, "sector-test", []),
+    )
+
+    collection = collect_market_regime_inputs(now=datetime(2026, 7, 14, 10, 30))
+    classification = classify_market_regime(collection.metrics)
+
+    assert classification.regime_code == "UNKNOWN"
+    assert collection.metrics.active_stock_count is None
+    assert any("全A分页覆盖不完整" in item for item in collection.notes)
+
+
+def test_completed_previous_trade_day_is_not_presented_as_current_before_next_open():
     source_stamp = int(datetime(2026, 7, 13, 15, 0).timestamp())
     rows = [
         {"f12": "600001", "f14": "样本", "f2": 10, "f3": -1, "f6": 2e8, "f62": -1e7, "f124": source_stamp}
@@ -230,9 +481,141 @@ def test_completed_previous_trade_day_keeps_full_turnover_before_next_open():
         now=datetime(2026, 7, 14, 8, 30),
     )
 
-    assert result["turnover_yi"] == 2.0
-    assert result["projected_turnover_yi"] == 2.0
+    assert result["turnover_yi"] is None
+    assert result["projected_turnover_yi"] is None
+    assert result["market_main_net_inflow_yi"] is None
+    assert any("不将旧日成交额" in item for item in notes)
     assert not any("09:35前" in item for item in notes)
+
+
+def _minute_amount_series(totals: dict[str, float]) -> dict[str, list[tuple[datetime, float]]]:
+    result: dict[str, list[tuple[datetime, float]]] = {}
+    for date, total in totals.items():
+        start = datetime.strptime(f"{date} 09:35", "%Y-%m-%d %H:%M")
+        points = 12
+        result[date] = [
+            (start + timedelta(minutes=offset * 5), total / points)
+            for offset in range(points)
+        ]
+    return result
+
+
+def test_same_time_turnover_uses_identical_minute_and_index_scope():
+    totals = {
+        "2026-07-07": 300.0,
+        "2026-07-08": 350.0,
+        "2026-07-09": 400.0,
+        "2026-07-10": 450.0,
+        "2026-07-13": 500.0,
+        "2026-07-14": 600.0,
+    }
+    # Split every session equally between the two broad exchange indices.
+    exchange = _minute_amount_series({date: total / 2 for date, total in totals.items()})
+
+    current, previous, avg5, cutoff, notes = _summarize_same_time_turnover_series(
+        [exchange, exchange],
+        trade_date="2026-07-14",
+        source_time=datetime(2026, 7, 14, 10, 30),
+    )
+
+    assert current == pytest.approx(600.0, abs=0.01)
+    assert previous == pytest.approx(500.0, abs=0.01)
+    assert avg5 == pytest.approx(400.0, abs=0.01)
+    assert cutoff == datetime(2026, 7, 14, 10, 30)
+    assert any("同进度、同指数口径" in item for item in notes)
+
+
+def test_same_time_turnover_does_not_replace_incomplete_previous_day():
+    totals = {
+        "2026-07-07": 300.0,
+        "2026-07-08": 350.0,
+        "2026-07-09": 400.0,
+        "2026-07-10": 450.0,
+        "2026-07-13": 500.0,
+        "2026-07-14": 600.0,
+    }
+    first = _minute_amount_series({date: total / 2 for date, total in totals.items()})
+    second = _minute_amount_series({date: total / 2 for date, total in totals.items()})
+    second["2026-07-13"] = second["2026-07-13"][:-1]
+
+    current, previous, avg5, _, notes = _summarize_same_time_turnover_series(
+        [first, second],
+        trade_date="2026-07-14",
+        source_time=datetime(2026, 7, 14, 10, 30),
+    )
+
+    assert current == pytest.approx(600.0, abs=0.01)
+    assert previous is None
+    assert avg5 is None
+    assert any("拒绝用更早日期替补" in item for item in notes)
+
+
+def test_market_regime_ratios_ignore_linear_full_day_projection(monkeypatch):
+    source_time = datetime(2026, 7, 14, 10, 30)
+    monkeypatch.setattr(
+        "app.services.market_regime._fetch_all_a_market",
+        lambda now: ({
+            "turnover_yi": 2000.0,
+            "projected_turnover_yi": 99999.0,
+            "source_time": source_time,
+        }, "all-a-test", []),
+    )
+    monkeypatch.setattr(
+        "app.services.market_regime._fetch_indices",
+        lambda: ([
+            MarketIndexStateOut(code="000001", name="上证指数", change_pct=0.1),
+            MarketIndexStateOut(code="399001", name="深证成指", change_pct=0.2),
+        ], "index-test", []),
+    )
+    monkeypatch.setattr(
+        "app.services.market_regime._fetch_sector_evidence",
+        lambda force_refresh: ({}, "sector-test", []),
+    )
+    monkeypatch.setattr(
+        "app.services.market_regime._fetch_same_time_turnover_history",
+        lambda trade_date, stamp: (
+            600.0, 500.0, 400.0, "eastmoney-composite-5minute-amount", ["同进度测试"]
+        ),
+    )
+
+    result = collect_market_regime_inputs(now=source_time)
+
+    assert result.metrics.turnover_yi == 2000.0
+    assert result.metrics.projected_turnover_yi == 99999.0
+    assert result.metrics.volume_ratio_previous == 1.2
+    assert result.metrics.volume_ratio_5d == 1.5
+
+
+def test_market_regime_leaves_ratios_empty_when_same_time_history_is_missing(monkeypatch):
+    source_time = datetime(2026, 7, 14, 10, 30)
+    monkeypatch.setattr(
+        "app.services.market_regime._fetch_all_a_market",
+        lambda now: ({
+            "turnover_yi": 2000.0,
+            "projected_turnover_yi": 99999.0,
+            "source_time": source_time,
+        }, "all-a-test", []),
+    )
+    monkeypatch.setattr(
+        "app.services.market_regime._fetch_indices",
+        lambda: ([], "index-test", []),
+    )
+    monkeypatch.setattr(
+        "app.services.market_regime._fetch_sector_evidence",
+        lambda force_refresh: ({}, "sector-test", []),
+    )
+    monkeypatch.setattr(
+        "app.services.market_regime._fetch_same_time_turnover_history",
+        lambda trade_date, stamp: (
+            None, None, None, "unavailable", ["同期分钟基准缺失"]
+        ),
+    )
+
+    result = collect_market_regime_inputs(now=source_time)
+
+    assert result.metrics.volume_ratio_previous is None
+    assert result.metrics.volume_ratio_5d is None
+    assert any("同期分钟基准缺失" in item for item in result.notes)
 
 
 def test_official_turnover_day_requires_both_exchange_totals(monkeypatch):

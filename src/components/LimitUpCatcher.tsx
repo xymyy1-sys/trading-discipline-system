@@ -180,15 +180,15 @@ export default function LimitUpCatcher() {
 
       {!error && hasDataGap && (
         <div className="data-gap-state" role="status">
-          <b>真实行情暂未取到</b>
-          <p>{data?.notes?.[0] || '服务端尚无可用快照，请点击“刷新真实行情”。'}不能把数据缺口伪装成“暂无标的”。</p>
+          <b>行情供应商采集失败（不是0匹配）</b>
+          <p>{(data?.notes || []).join('；') || '服务端尚无可用快照，请点击“刷新真实行情”。'}本次没有完成全A扫描，不能解释为“当前没有候选股”。</p>
         </div>
       )}
 
       {!error && refreshGap && data?.data_status === 'ok' && (
         <div className="data-gap-state limit-up-refresh-gap" role="alert">
-          <b>刷新未取得新行情，继续显示上次成功快照</b>
-          <p>{refreshGap.notes?.[0] || '本次真实行情源暂未返回。'}当前表格仍是上次成功结果，更新时间为 {displayTime(data.updated_at)}，没有冒充本次刷新数据。</p>
+          <b>刷新未完成全A扫描，继续显示上次成功快照</b>
+          <p>{(refreshGap.notes || []).join('；') || '本次真实行情源暂未返回。'}这不是“0只匹配”；当前表格仍是上次成功结果，更新时间为 {displayTime(data.updated_at)}，没有冒充本次刷新数据。</p>
         </div>
       )}
 

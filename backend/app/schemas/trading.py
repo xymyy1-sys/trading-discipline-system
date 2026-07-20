@@ -1638,6 +1638,16 @@ class SectorTemperatureItemOut(BaseModel):
     financing_net_buy_20d: float | None = None
     margin_as_of: str = ""
     margin_realtime: bool = False
+    distribution_state: str = "数据不足"
+    distribution_risk_level: str = "UNKNOWN"
+    distribution_risk_score: int = 0
+    order_flow_exhausted: bool = False
+    leverage_crowding: bool = False
+    price_response_weak: bool = False
+    distribution_confirmation_count: int = 0
+    distribution_evidence: list[str] = Field(default_factory=list)
+    distribution_counter_evidence: list[str] = Field(default_factory=list)
+    distribution_actions: list[str] = Field(default_factory=list)
     evidence: list[str] = Field(default_factory=list)
     counter_evidence: list[str] = Field(default_factory=list)
     actions: list[str] = Field(default_factory=list)

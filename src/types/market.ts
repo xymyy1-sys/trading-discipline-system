@@ -455,6 +455,16 @@ export interface SectorTemperatureItem {
   financing_net_buy_20d: number | null;
   margin_as_of: string;
   margin_realtime: boolean;
+  distribution_state: string;
+  distribution_risk_level: 'HIGH' | 'MEDIUM' | 'LOW' | 'UNKNOWN';
+  distribution_risk_score: number;
+  order_flow_exhausted: boolean;
+  leverage_crowding: boolean;
+  price_response_weak: boolean;
+  distribution_confirmation_count: number;
+  distribution_evidence: string[];
+  distribution_counter_evidence: string[];
+  distribution_actions: string[];
   evidence: string[];
   counter_evidence: string[];
   actions: string[];
