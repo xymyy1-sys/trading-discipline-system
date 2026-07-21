@@ -1725,6 +1725,30 @@ class MarketDataProvider:
                     change_pct=round(float(raw.get("change_pct") or 0), 2),
                     net_inflow=round(net, 2),
                     main_inflow=round(float(raw.get("main_inflow") or 0), 2),
+                    turnover_amount=(
+                        round(_safe_float(raw.get("turnover_amount")), 4)
+                        if raw.get("turnover_amount") not in (None, "", "-")
+                        else None
+                    ),
+                    turnover_rate=(
+                        round(_safe_float(raw.get("turnover_rate")), 4)
+                        if raw.get("turnover_rate") not in (None, "", "-")
+                        else None
+                    ),
+                    flow_ratio=(
+                        round(_safe_float(raw.get("flow_ratio")), 4)
+                        if raw.get("flow_ratio") not in (None, "", "-")
+                        else None
+                    ),
+                    leader_change_pct=(
+                        round(_safe_float(raw.get("leader_change_pct")), 4)
+                        if raw.get("leader_change_pct") not in (None, "", "-")
+                        else None
+                    ),
+                    up_count=int(raw.get("up_count") or 0),
+                    down_count=int(raw.get("down_count") or 0),
+                    flat_count=int(raw.get("flat_count") or 0),
+                    stock_count=int(raw.get("stock_count") or 0),
                     limit_up_count=int(raw.get("limit_up_count") or 0),
                     strength=max(0, min(100, int(raw.get("strength") or 50))),
                     rank=idx,
@@ -3043,7 +3067,7 @@ class MarketDataProvider:
             # f174, which rendered two UI evidence columns from one value and
             # double-weighted the same signal in the score.
             "今日": ("f62", "1", "f62", "f72", "f184", "f128", "f3",
-                     "f12,f14,f2,f3,f15,f17,f18,f62,f184,f66,f69,f72,f75,f78,f81,f84,f87,f104,f105,f106,f128,f136,f140,f141,f204,f205,f206,f124,f1,f13"),
+                     "f12,f14,f2,f3,f5,f6,f8,f15,f17,f18,f62,f184,f66,f69,f72,f75,f78,f81,f84,f87,f104,f105,f106,f128,f136,f140,f141,f204,f205,f206,f124,f1,f13"),
             "5日": ("f164", "5", "f164", "f168", "f165", "f257", "f109",
                      "f12,f14,f2,f109,f164,f165,f166,f167,f168,f169,f170,f171,f172,f173,f104,f105,f106,f257,f258,f124,f1,f13"),
             "10日": ("f174", "10", "f174", "f178", "f175", "f260", "f160",
@@ -3150,6 +3174,21 @@ class MarketDataProvider:
                 "high_price": _safe_float(row.get("f15")) if period == "今日" else None,
                 "open_price": _safe_float(row.get("f17")) if period == "今日" else None,
                 "prev_close": _safe_float(row.get("f18")) if period == "今日" else None,
+                # f6 is the board's real traded amount in yuan when fltt=2.
+                # Keep it separate from the order-flow estimate: the former is
+                # the denominator required by financing-buy/turnover and
+                # capital-carrying-efficiency metrics, while f62 is only an
+                # inferred large-order direction amount.
+                "turnover_amount": (
+                    round(_safe_float(row.get("f6")) / 1e8, 4)
+                    if period == "今日" and _safe_float(row.get("f6")) > 0
+                    else None
+                ),
+                "turnover_rate": (
+                    round(_safe_float(row.get("f8")), 4)
+                    if period == "今日" and row.get("f8") not in (None, "-")
+                    else None
+                ),
                 # Eastmoney uses a different cumulative change field for every
                 # aggregation window (today=f3, 5d=f109, 10d=f160). Reading f3
                 # unconditionally turns the missing historical field into 0.0
@@ -3173,6 +3212,15 @@ class MarketDataProvider:
                     50 + _safe_float(row.get(change_key)) * 8 + _safe_float(row.get(net_key)) / 2e7
                 ))),
                 "leaders": [str(row.get(leader_key) or "待识别")],
+                # Eastmoney's board ranking pairs f128 (leading stock name)
+                # with f136 (that stock's change).  Preserve the provider
+                # value instead of deriving a leader return from the board
+                # average, so a leader/board divergence remains auditable.
+                "leader_change_pct": (
+                    round(_safe_float(row.get("f136")), 4)
+                    if period == "今日" and row.get("f136") not in (None, "-")
+                    else None
+                ),
                 # f104/f105/f106 are上涨/下跌/平盘家数 for board rows;
                 # f100 is not a limit-up count.  Exact near-limit counts are
                 # derived from the fetched constituents later.
@@ -3459,7 +3507,7 @@ class MarketDataProvider:
             missing.append("题材聚类")
 
         previous_date: str | None = None
-        previous_stocks: list[LimitUpStockOut] = []
+        previous_stocks: list[LimitUpStockOut] | None = None
         try:
             previous_date, previous_rows = self._find_previous_limit_up_pool(target_date)
             previous_stocks = [self._build_limit_up_stock(row) for row in previous_rows]
@@ -3545,6 +3593,7 @@ class MarketDataProvider:
             ladder=ladder,
             stocks=current_stocks,
             broken_stocks=broken_stocks,
+            previous_stocks=previous_stocks,
             atmosphere_decision=decision,
             theme_radar=theme_radar,
         )
@@ -3682,6 +3731,7 @@ class MarketDataProvider:
         ladder: LimitUpLadderOut,
         stocks: list[LimitUpStockOut],
         broken_stocks: list[LimitUpStockOut] | None,
+        previous_stocks: list[LimitUpStockOut] | None,
         atmosphere_decision: str,
         theme_radar: ThemeRadarOut | None = None,
     ) -> list[LimitUpThemeLadderOut]:
@@ -3697,7 +3747,7 @@ class MarketDataProvider:
             members = list({
                 stock.code or stock.name: stock
                 for stock in stocks
-                if cluster.name == stock.industry or cluster.name in stock.concepts
+                if self._stock_belongs_to_limit_up_theme(stock, cluster.name)
             }.values())
             if not members:
                 continue
@@ -3719,7 +3769,7 @@ class MarketDataProvider:
             if broken_stocks is not None:
                 theme_broken = [
                     stock for stock in broken_stocks
-                    if cluster.name == stock.industry or cluster.name in stock.concepts
+                    if self._stock_belongs_to_limit_up_theme(stock, cluster.name)
                 ]
             broken_count = None if theme_broken is None else len(theme_broken)
             attempted = len(members) + (broken_count or 0)
@@ -3728,6 +3778,46 @@ class MarketDataProvider:
                 if broken_count is not None and attempted > 0
                 else None
             )
+            # The failed-limit pool is the only auditable denominator for a
+            # theme break rate.  Do not infer zero failures merely because the
+            # sealed pool is available.
+            break_rate = (
+                round(100.0 - seal_rate, 1)
+                if broken_count is not None and seal_rate is not None
+                else None
+            )
+
+            previous_theme_members: list[LimitUpStockOut] | None = None
+            if previous_stocks is not None:
+                previous_theme_members = list({
+                    stock.code or stock.name: stock
+                    for stock in previous_stocks
+                    if self._stock_belongs_to_limit_up_theme(stock, cluster.name)
+                }.values())
+            previous_limit_up_count = (
+                None if previous_theme_members is None else len(previous_theme_members)
+            )
+            promoted_count: int | None = None
+            promotion_rate: float | None = None
+            if previous_theme_members is not None:
+                current_by_code = {
+                    stock.code: stock
+                    for stock in members
+                    if stock.code
+                }
+                promoted_count = sum(
+                    1
+                    for previous_stock in previous_theme_members
+                    if previous_stock.code
+                    and previous_stock.code in current_by_code
+                    and current_by_code[previous_stock.code].consecutive_limit_days
+                    > previous_stock.consecutive_limit_days
+                )
+                if previous_limit_up_count:
+                    promotion_rate = round(
+                        promoted_count / previous_limit_up_count * 100,
+                        1,
+                    )
 
             completeness_score = min(25, len(members) * 5)
             completeness_score += min(15, first_count * 5)
@@ -3817,11 +3907,29 @@ class MarketDataProvider:
                 global_highest=global_highest,
                 mainline_context=mainline_context,
             )
+            audit_evidence: list[str] = []
+            if seal_rate is not None and break_rate is not None:
+                audit_evidence.append(
+                    f"当日真实涨停池封板{len(members)}只、真实炸板池{broken_count or 0}只，"
+                    f"封板率{seal_rate:.1f}%、炸板率{break_rate:.1f}%。"
+                )
+            if previous_limit_up_count is not None:
+                if promotion_rate is None:
+                    audit_evidence.append("上一交易日该题材真实涨停数为0，晋级率无有效分母。")
+                else:
+                    audit_evidence.append(
+                        f"上一交易日同题材真实涨停{previous_limit_up_count}只，"
+                        f"今日晋级{promoted_count or 0}只，晋级率{promotion_rate:.1f}%。"
+                    )
             results.append(LimitUpThemeLadderOut(
                 name=cluster.name,
                 limit_up_count=len(members),
                 broken_count=broken_count,
                 seal_rate=seal_rate,
+                break_rate=break_rate,
+                previous_limit_up_count=previous_limit_up_count,
+                promoted_count=promoted_count,
+                promotion_rate=promotion_rate,
                 first_board_count=first_count,
                 second_board_count=second_count,
                 high_board_count=high_count,
@@ -3845,7 +3953,7 @@ class MarketDataProvider:
                 stage_position_rule=str(mainline_context["stage_position_rule"]),
                 max_position_ratio=float(mainline_context["max_position_ratio"]),
                 eligible_roles=list(mainline_context["eligible_roles"]),
-                evidence=list(mainline_context["evidence"]),
+                evidence=[*list(mainline_context["evidence"]), *audit_evidence],
             ))
         return sorted(
             results,
@@ -3858,6 +3966,30 @@ class MarketDataProvider:
             ),
             reverse=True,
         )[:12]
+
+    def _stock_belongs_to_limit_up_theme(
+        self,
+        stock: LimitUpStockOut,
+        theme_name: str,
+    ) -> bool:
+        """Match an explicit industry/concept label without substring joins.
+
+        The light normalization only removes provider suffixes such as “概念”
+        or “板块”; it never uses stock names, keyword containment or fuzzy
+        similarity.  This prevents, for example, “半导体设备” from being counted
+        in a “半导体” ladder unless the provider/classifier explicitly attached
+        the exact canonical “半导体” label to that stock.
+        """
+
+        target = self._normalize_theme_board_name(theme_name)
+        if not target:
+            return False
+        labels = [stock.industry, *stock.concepts]
+        return any(
+            self._normalize_theme_board_name(label) == target
+            for label in labels
+            if str(label or "").strip()
+        )
 
     def _match_limit_up_theme_radar(
         self,

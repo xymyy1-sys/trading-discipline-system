@@ -152,6 +152,33 @@ export interface GlobalQuote {
   theme: string | null;
   proxy_description: string | null;
   note: string;
+  source_url: string;
+  published_at: string | null;
+  observed_at: string | null;
+  related_a_share_sectors: string[];
+  metric_kind: string;
+  data_quality: string;
+}
+
+export interface GlobalMetric {
+  metric_id: string;
+  name: string;
+  market: string;
+  status: string;
+  value: number | null;
+  change: number | null;
+  change_pct: number | null;
+  direction: string | null;
+  unit: string;
+  period: string | null;
+  source: string;
+  source_url: string;
+  published_at: string | null;
+  observed_at: string | null;
+  related_a_share_sectors: string[];
+  metric_kind: string;
+  data_quality: string;
+  note: string;
 }
 
 export interface GlobalMarketCues {
@@ -159,13 +186,26 @@ export interface GlobalMarketCues {
   as_of: string;
   quality: string;
   data_quality: string;
+  quote_quality: string;
+  institutional_flow_quality: string;
   sources: string[];
   source: string[];
   notes: string[];
+  quality_details: Record<string, unknown>;
+  official_adapters: Record<string, unknown>;
   korea_indices: GlobalQuote[];
   korea_equities: GlobalQuote[];
   us_indices: GlobalQuote[];
   us_sector_rank: GlobalQuote[];
+  strategic_assets: GlobalQuote[];
+  macro_indicators: GlobalQuote[];
+  etf_flows: GlobalMetric[];
+  korea_foreign_flows: GlobalMetric[];
+  korea_leverage_products: GlobalMetric[];
+  official_rates: GlobalMetric[];
+  snapshot_id?: number | null;
+  snapshot_origin?: 'process_cache' | 'database' | 'unavailable' | string;
+  persisted_at?: string | null;
 }
 
 export interface OpportunitySectorAssessment {
@@ -446,6 +486,9 @@ export interface SectorTemperatureItem {
   net_inflow: number | null;
   net_inflow_5d: number | null;
   net_inflow_10d: number | null;
+  flow_ratio?: number | null;
+  flow_ratio_5d?: number | null;
+  flow_ratio_10d?: number | null;
   flow_speed: number | null;
   flow_acceleration: number | null;
   flow_turning: string | null;
@@ -453,11 +496,21 @@ export interface SectorTemperatureItem {
   provider_updated_at: string | null;
   limit_up_count: number;
   financing_balance: number | null;
+  financing_buy?: number | null;
+  financing_reference_turnover?: number | null;
+  financing_turnover_as_of?: string;
   financing_net_buy: number | null;
   financing_balance_ratio: number | null;
   financing_net_buy_5d: number | null;
   financing_net_buy_10d: number | null;
   financing_net_buy_20d: number | null;
+  financing_net_buy_slope_5d?: number | null;
+  financing_net_buy_slope_10d?: number | null;
+  financing_net_buy_slope_20d?: number | null;
+  financing_balance_ratio_percentile_60d?: number | null;
+  financing_balance_ratio_percentile_120d?: number | null;
+  margin_history_sample_count?: number;
+  margin_history_method?: string;
   margin_as_of: string;
   margin_realtime: boolean;
   distribution_state: string;
@@ -467,6 +520,56 @@ export interface SectorTemperatureItem {
   leverage_crowding: boolean;
   price_response_weak: boolean;
   distribution_confirmation_count: number;
+  capital_price_carrying_efficiency?: number | null;
+  capital_price_carrying_sample_count?: number;
+  capital_price_carrying_span_minutes?: number | null;
+  capital_price_carrying_slope?: number | null;
+  capital_price_carrying_method?: string;
+  sector_turnover_amount?: number | null;
+  financing_buy_turnover_ratio?: number | null;
+  financing_turnover_date_aligned?: boolean;
+  non_leveraged_net_inflow?: number | null;
+  non_leveraged_flow_audited?: boolean;
+  non_leveraged_flow_source_url?: string;
+  non_leveraged_flow_published_at?: string | null;
+  non_leveraged_net_inflow_unit?: string;
+  non_leveraged_methodology_id?: string;
+  etf_share_net_change?: number | null;
+  etf_share_change_pct?: number | null;
+  etf_flow_audited?: boolean;
+  etf_id?: string;
+  etf_share_unit?: string;
+  etf_share_base?: number | null;
+  etf_methodology_id?: string;
+  leader_change_pct?: number | null;
+  leader_divergence_pct?: number | null;
+  advance_count?: number | null;
+  decline_count?: number | null;
+  constituent_count?: number | null;
+  advance_ratio?: number | null;
+  new_high_count?: number | null;
+  new_high_ratio?: number | null;
+  promotion_rate?: number | null;
+  break_rate?: number | null;
+  sector_price?: number | null;
+  sector_vwap?: number | null;
+  sector_vwap_reliable?: boolean;
+  sector_below_vwap?: boolean | null;
+  strict_state?: string | null;
+  instantaneous_distribution_state?: string | null;
+  confirmed_state?: string | null;
+  sample_confirmation_count?: number;
+  sample_confirmation_min_interval_seconds?: number;
+  trading_day_confirmation_count?: number;
+  persistence_confirmed?: boolean;
+  persistence_state?: string | null;
+  persistence_basis?: string[];
+  data_as_of?: string | null;
+  last_sample_at?: string | null;
+  recent_state_samples?: SectorStateSample[];
+  recent_samples?: SectorStateSample[];
+  margin_history_degraded?: boolean;
+  margin_history_sequence_complete?: boolean;
   distribution_evidence: string[];
   distribution_counter_evidence: string[];
   distribution_actions: string[];
@@ -474,6 +577,16 @@ export interface SectorTemperatureItem {
   counter_evidence: string[];
   actions: string[];
   data_quality: string;
+}
+
+export interface SectorStateSample {
+  trade_date: string;
+  captured_at: string;
+  provider_updated_at: string | null;
+  data_quality: string;
+  strict_state: string;
+  risk_level: 'HIGH' | 'MEDIUM' | 'LOW' | 'UNKNOWN';
+  risk_score: number | null;
 }
 
 export interface SectorTemperatureOut {

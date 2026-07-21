@@ -237,6 +237,10 @@ class SectorCrowdingDailySnapshot(Base):
     data_quality: Mapped[str] = mapped_column(String(24), default="missing", index=True)
     provider_trade_date: Mapped[str] = mapped_column(String(16), default="", index=True)
     provider_updated_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    # True only when the archived board turnover came from a completed market
+    # session.  Intraday turnover must never be reused as the T+1 financing
+    # denominator on the following request.
+    turnover_complete: Mapped[bool] = mapped_column(Boolean, default=False)
 
     heat_score: Mapped[int | None] = mapped_column(Integer, nullable=True)
     status: Mapped[str] = mapped_column(String(64), default="数据不足", index=True)
@@ -291,6 +295,65 @@ class SectorCrowdingDailySnapshot(Base):
         default=_shanghai_now_naive,
         onupdate=_shanghai_now_naive,
     )
+
+
+class SectorCrowdingSnapshotSample(Base):
+    """Immutable intraday sector-state sample.
+
+    ``SectorCrowdingDailySnapshot`` remains the latest daily summary used by
+    existing readers.  This table keeps every materially distinct collection
+    envelope, so persistence can be evaluated from evidence that was actually
+    visible at each point in time instead of reconstructing an intraday path
+    from the final daily row.
+    """
+
+    __tablename__ = "sector_crowding_snapshot_samples"
+    __table_args__ = (
+        UniqueConstraint(
+            "trade_date",
+            "board_type",
+            "board_key",
+            "payload_hash",
+            name="uq_sector_crowding_sample_payload",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    trade_date: Mapped[str] = mapped_column(String(16), index=True)
+    board_type: Mapped[str] = mapped_column(String(16), default="行业", index=True)
+    board_key: Mapped[str] = mapped_column(String(160), index=True)
+    board_code: Mapped[str] = mapped_column(String(32), default="", index=True)
+    board_name: Mapped[str] = mapped_column(String(128), default="", index=True)
+    captured_at: Mapped[datetime] = mapped_column(DateTime, index=True)
+    provider_updated_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    source: Mapped[str] = mapped_column(String(512), default="")
+    data_quality: Mapped[str] = mapped_column(String(24), default="missing", index=True)
+
+    status: Mapped[str] = mapped_column(String(64), default="数据不足", index=True)
+    risk_level: Mapped[str] = mapped_column(String(16), default="UNKNOWN", index=True)
+    distribution_state: Mapped[str] = mapped_column(String(48), default="数据不足", index=True)
+    instantaneous_distribution_state: Mapped[str] = mapped_column(
+        String(48), default="数据不足", index=True
+    )
+    distribution_risk_level: Mapped[str] = mapped_column(String(16), default="UNKNOWN", index=True)
+    distribution_risk_score: Mapped[float | None] = mapped_column(Float, nullable=True)
+    distribution_confirmation_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
+    change_pct: Mapped[float | None] = mapped_column(Float, nullable=True)
+    net_inflow: Mapped[float | None] = mapped_column(Float, nullable=True)
+    flow_speed: Mapped[float | None] = mapped_column(Float, nullable=True)
+    flow_acceleration: Mapped[float | None] = mapped_column(Float, nullable=True)
+    flow_turning: Mapped[str] = mapped_column(String(48), default="")
+    financing_balance: Mapped[float | None] = mapped_column(Float, nullable=True)
+    financing_net_buy: Mapped[float | None] = mapped_column(Float, nullable=True)
+    margin_as_of: Mapped[str] = mapped_column(String(16), default="")
+
+    evidence_json: Mapped[str] = mapped_column(Text, default="[]")
+    counter_evidence_json: Mapped[str] = mapped_column(Text, default="[]")
+    actions_json: Mapped[str] = mapped_column(Text, default="[]")
+    raw_payload_json: Mapped[str] = mapped_column(Text, default="{}")
+    payload_hash: Mapped[str] = mapped_column(String(64), index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_shanghai_now_naive)
 
 
 class GlobalEvidenceSnapshot(Base):

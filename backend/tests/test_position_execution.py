@@ -4,6 +4,7 @@ from datetime import datetime, timedelta, timezone
 from app.api.helpers.execution import (
     _confirmation_deadline,
     _confirmation_policy,
+    _load_global_market_snapshot,
     build_position_execution_state,
     global_market_execution_gate,
 )
@@ -80,6 +81,56 @@ def test_sector_distribution_event_freezes_expansion_but_never_sells_alone(db_se
     assert "禁止加仓" in state.recommended_action or "禁止加仓" in " ".join(state.evidence)
     assert any("不据此单独机械卖出" in item for item in state.evidence)
     assert any(event.event_type == "SECTOR_DISTRIBUTION_RISK" for event in state.events)
+
+
+def test_healthy_incremental_sector_state_is_recognized_as_counter_evidence(db_session, monkeypatch):
+    holding = Holding(
+        code="600901",
+        name="健康增量兼容测试",
+        quantity=100,
+        cost_price=10,
+        current_price=10,
+        total_asset=100000,
+        position_type="普通持仓",
+        next_discipline="按计划执行",
+    )
+    db_session.add(holding)
+    db_session.commit()
+    db_session.refresh(holding)
+    healthy_distribution = {
+        "items": [{
+            "name": "半导体",
+            "distribution_state": "健康增量",
+            "distribution_risk_level": "LOW",
+            "distribution_confirmation_count": 3,
+        }],
+    }
+    monkeypatch.setattr(
+        "app.api.helpers.execution._get_response_cache",
+        lambda key, allow_stale=False: healthy_distribution if key.endswith("|行业") else None,
+    )
+    seesaw = SimpleNamespace(
+        risk_level="低",
+        signal="板块资金健康",
+        sector_ebb_trigger=[],
+        stock_weakening_trigger=[],
+        profit_drawdown_trigger=[],
+        holding_theme="半导体",
+        primary_industry_sector="半导体",
+        matched_flow_sector="半导体",
+        concept_flow_sectors=[],
+    )
+
+    state = build_position_execution_state(
+        db_session,
+        holding,
+        quote={"price": 10, "high": 10.1, "low": 9.9, "open": 10, "note": "实时行情"},
+        seesaw=seesaw,
+        persist=False,
+    )
+
+    assert any("资金与价格响应仍属健康" in item for item in state.counter_evidence)
+    assert not any(event.event_type == "SECTOR_DISTRIBUTION_RISK" for event in state.events)
 
 
 def test_position_execution_profit_drawdown_requires_reduce(db_session):
@@ -1816,6 +1867,40 @@ def test_fresh_broad_global_weakness_freezes_only_new_exposure():
     assert any("冻结新增风险" in item for item in gate["evidence"])
 
 
+def test_execution_loader_prefers_newer_persisted_global_snapshot(
+    db_session,
+    monkeypatch,
+):
+    from app.api.helpers import execution
+    from app.services.sector_evidence_history import persist_global_evidence_snapshot
+
+    stale_cache = _global_snapshot(datetime.now(), -1.0)
+    stale_cache.update({
+        "generated_at": "2026-07-20T08:30:00+08:00",
+        "as_of": "2026-07-20T08:30:00+08:00",
+        "source": ["worker-cache"],
+    })
+    persisted = _global_snapshot(datetime.now(), -2.5)
+    persisted.update({
+        "generated_at": "2026-07-20T09:00:00+08:00",
+        "as_of": "2026-07-20T09:00:00+08:00",
+        "source": ["database-worker"],
+    })
+    row = persist_global_evidence_snapshot(db_session, persisted)
+    monkeypatch.setattr(
+        execution.global_market_service,
+        "read_cached_snapshot",
+        lambda: stale_cache,
+    )
+
+    result = _load_global_market_snapshot(db=db_session)
+
+    assert result is not None
+    assert result["snapshot_origin"] == "database"
+    assert result["snapshot_id"] == row.id
+    assert result["us_indices"][0]["change_pct"] == -2.5
+
+
 def test_stale_global_quotes_are_ignored_instead_of_becoming_a_risk_score():
     now = datetime.now()
     snapshot = _global_snapshot(now, -3.0)
@@ -1844,6 +1929,121 @@ def test_missing_global_change_is_not_coerced_to_a_flat_quote():
     assert gate["valid_quote_count"] == 0
     assert gate["score"] == 0
     assert gate["freeze_expansion"] is False
+
+
+def test_strategic_macro_and_authorised_flows_enter_only_the_expansion_gate():
+    now = datetime.now(timezone(timedelta(hours=8)))
+    quote_as_of = (now - timedelta(hours=12)).isoformat()
+    metric_as_of = (now - timedelta(hours=2)).isoformat()
+
+    def metric(metric_id, name, kind, value, *, direction=None, change_pct=None):
+        return {
+            "metric_id": metric_id,
+            "name": name,
+            "status": "ok",
+            "value": value,
+            "direction": direction,
+            "change_pct": change_pct,
+            "metric_kind": kind,
+            "source": "licensed adapter",
+            "source_url": f"https://licensed.example.test/{metric_id}",
+            "published_at": metric_as_of,
+            "data_quality": "official_audited",
+        }
+
+    snapshot = {
+        "data_quality": "degraded",
+        "quote_quality": "ok",
+        "institutional_flow_quality": "ok",
+        "us_indices": [],
+        "korea_indices": [],
+        "korea_equities": [],
+        "us_sector_rank": [],
+        "strategic_assets": [
+            {"symbol": "EWY", "name": "韩国ETF", "status": "delayed", "change_pct": -2.0, "as_of": quote_as_of, "source": "yahoo"},
+            {"symbol": "MU", "name": "美光", "status": "delayed", "change_pct": -2.4, "as_of": quote_as_of, "source": "yahoo"},
+        ],
+        "macro_indicators": [
+            {"symbol": "USDKRW", "name": "美元兑韩元", "status": "delayed", "change_pct": 1.0, "as_of": quote_as_of, "source": "yahoo"},
+            {"symbol": "DXY", "name": "美元指数", "status": "delayed", "change_pct": 0.7, "as_of": quote_as_of, "source": "yahoo"},
+        ],
+        "etf_flows": [metric("EWY_NET", "EWY净申赎", "etf_share_creation_redemption", -1, direction="outflow")],
+        "korea_foreign_flows": [metric("KR_FLOW", "韩国外资净买卖", "korea_foreign_net_flow", -50)],
+        "korea_leverage_products": [metric("KR_LEV", "韩国杠杆产品规模", "korea_single_stock_leverage_product", 100, change_pct=8)],
+        "official_rates": [metric("KR_RATE", "韩国官方利率", "official_interest_rate", 2.5)],
+    }
+
+    gate = global_market_execution_gate(snapshot, now=now)
+
+    assert gate["freeze_expansion"] is True
+    assert gate["freeze_actions"] == ["追高", "补仓", "做T回补"]
+    assert gate["can_trigger_sell"] is False
+    assert gate["valid_quote_count"] == 4
+    assert gate["valid_official_metric_count"] == 4
+    assert any("战略资产共振偏弱" in item for item in gate["evidence"])
+    assert any("汇率/美元/利率代理共振收紧" in item for item in gate["evidence"])
+    assert any("可审计机构/杠杆证据共振偏弱" in item for item in gate["evidence"])
+
+
+def test_official_metric_kind_and_quality_must_match_configured_evidence_group():
+    now = datetime.now(timezone(timedelta(hours=8)))
+    published_at = (now - timedelta(hours=2)).isoformat()
+    base = {
+        "metric_id": "EWY_NET",
+        "name": "EWY净申赎",
+        "status": "ok",
+        "value": -1,
+        "direction": "outflow",
+        "metric_kind": "official_interest_rate",
+        "source": "licensed adapter",
+        "source_url": "https://licensed.example.test/EWY_NET",
+        "published_at": published_at,
+        "data_quality": "official",
+    }
+    snapshot = {
+        "quote_quality": "missing",
+        "institutional_flow_quality": "partial",
+        "etf_flows": [base],
+    }
+
+    mismatched = global_market_execution_gate(snapshot, now=now)
+    assert mismatched["valid_official_metric_count"] == 0
+    assert "ETF真实份额申赎" in mismatched["missing_evidence_groups"]
+
+    base["metric_kind"] = "etf_share_creation_redemption"
+    base["data_quality"] = "ok"
+    unaudited = global_market_execution_gate(snapshot, now=now)
+    assert unaudited["valid_official_metric_count"] == 0
+
+    base["data_quality"] = "official"
+    base["published_at"] = (now - timedelta(hours=2)).replace(tzinfo=None).isoformat()
+    timezone_missing = global_market_execution_gate(snapshot, now=now)
+    assert timezone_missing["valid_official_metric_count"] == 0
+
+
+def test_missing_official_global_metrics_stay_unknown_instead_of_zero():
+    now = datetime.now()
+    snapshot = {
+        "data_quality": "missing",
+        "quote_quality": "missing",
+        "institutional_flow_quality": "missing",
+        "etf_flows": [{"status": "unavailable", "value": None}],
+        "korea_foreign_flows": [{"status": "unavailable", "value": None}],
+        "korea_leverage_products": [{"status": "unavailable", "value": None}],
+        "official_rates": [{"status": "unavailable", "value": None}],
+    }
+
+    gate = global_market_execution_gate(snapshot, now=now)
+
+    assert gate["score"] == 0
+    assert gate["freeze_expansion"] is False
+    assert gate["valid_official_metric_count"] == 0
+    assert set(gate["missing_evidence_groups"]) == {
+        "ETF真实份额申赎",
+        "韩国外资净买卖",
+        "韩国单股杠杆产品",
+        "韩国官方利率",
+    }
 
 
 def test_global_risk_never_becomes_a_standalone_sell_instruction(db_session):

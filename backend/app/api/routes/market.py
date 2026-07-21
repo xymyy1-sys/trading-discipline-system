@@ -1,7 +1,7 @@
 from concurrent.futures import ThreadPoolExecutor
 import json
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy.orm import Session
 from app.core.database import get_db
 from app.core.trading_clock import shanghai_now_naive
@@ -34,9 +34,18 @@ from app.services.market_data import (
     _limit_up_default_candidate_dates,
 )
 from app.services.sector_margin import fetch_sector_margin
+from app.services.sector_audited_flow import fetch_sector_audited_flow
 from app.services.sector_temperature import build_sector_temperature
 from app.services.sector_evidence_history import (
+    build_global_evidence_evolution,
+    build_sector_state_evolution,
+    global_evidence_recency_key,
+    load_global_evidence_history,
+    load_latest_global_evidence_snapshot,
+    load_latest_sector_temperature_snapshot,
     load_sector_history,
+    load_sector_persistence_features,
+    load_sector_samples,
     persist_global_evidence_snapshot,
     persist_sector_temperature_snapshot,
 )
@@ -358,6 +367,116 @@ def _sector_temperature_snapshot(
     current_rows, current_cache = all_rows(current, "今日")
     five_rows, _ = all_rows(five_day, "5日")
     ten_rows, _ = all_rows(ten_day, "10日")
+    current_trade_dates = sorted({
+        str(row.get("provider_trade_date") or "")[:10]
+        for row in current_rows
+        if str(row.get("provider_trade_date") or "")[:10]
+    })
+    current_trade_date = current_trade_dates[-1] if current_trade_dates else ""
+
+    audited_flow_note = ""
+    audited_flow_merged = False
+    if current_trade_date:
+        audited_flow = fetch_sector_audited_flow(current_trade_date)
+        merge_map = audited_flow.get("merge_map") or {}
+        if audited_flow.get("status") == "ok" and isinstance(merge_map, dict):
+            for row in current_rows:
+                row_trade_date = str(row.get("provider_trade_date") or "")[:10]
+                if row_trade_date != current_trade_date:
+                    # A mixed-date upstream cache must never receive the newest
+                    # day's audited cash-flow facts before it is archived.
+                    continue
+                audited_item = None
+                for alias in (
+                    str(row.get("name") or "").strip(),
+                    str(row.get("display_name") or "").strip(),
+                    str(row.get("raw_name") or "").strip(),
+                    str(row.get("board_code") or "").strip().upper(),
+                ):
+                    if alias and isinstance(merge_map.get(alias), dict):
+                        audited_item = merge_map[alias]
+                        break
+                if audited_item is None:
+                    continue
+                if str(audited_item.get("trade_date") or "")[:10] != row_trade_date:
+                    continue
+                row["non_leveraged_net_inflow"] = audited_item.get(
+                    "non_leveraged_net_inflow"
+                )
+                row["non_leveraged_flow_audited"] = True
+                row["non_leveraged_flow_source_url"] = audited_item.get("source_url")
+                row["non_leveraged_flow_published_at"] = (
+                    audited_item.get("published_at") or audited_item.get("observed_at")
+                )
+                row["non_leveraged_net_inflow_unit"] = audited_item.get(
+                    "non_leveraged_net_inflow_unit"
+                )
+                row["non_leveraged_methodology_id"] = audited_item.get(
+                    "methodology_id"
+                )
+                if audited_item.get("new_high_count") is not None:
+                    row["new_high_count"] = audited_item.get("new_high_count")
+                    row["constituent_count"] = audited_item.get("constituent_count")
+                if audited_item.get("etf_flow_audited") is True:
+                    row["etf_share_net_change"] = audited_item.get("etf_share_net_change")
+                    row["etf_share_change_pct"] = audited_item.get("etf_share_change_pct")
+                    row["etf_id"] = audited_item.get("etf_id")
+                    row["etf_share_unit"] = audited_item.get("etf_share_unit")
+                    row["etf_share_base"] = audited_item.get("etf_share_base")
+                    row["etf_methodology_id"] = audited_item.get("etf_methodology_id")
+                    row["etf_flow_audited"] = True
+                audited_flow_merged = True
+            audited_flow_note = (
+                f"已按 {current_trade_date} 合并经授权审计的非杠杆板块净流入；"
+                "未返回的板块保持空值。"
+            )
+        else:
+            audited_flow_note = "；".join(str(note) for note in audited_flow.get("notes") or [])
+
+    # 晋级率与炸板率来自真实、带日期的涨停池和炸板池。只按板块/题材
+    # 名称精确匹配，并且只在交易日一致时并入；数据缺失时保持 None。
+    structure_note = ""
+    try:
+        atmosphere = market_provider.limit_up_atmosphere(
+            trade_date=current_trade_date or None,
+            force_refresh=False,
+        )
+        if current_trade_date and atmosphere.trade_date == current_trade_date:
+            ladder_by_name = {
+                str(item.name or "").strip(): item
+                for item in atmosphere.theme_ladders
+                if str(item.name or "").strip()
+            }
+            for row in current_rows:
+                ladder_item = None
+                for alias in (
+                    str(row.get("name") or "").strip(),
+                    str(row.get("display_name") or "").strip(),
+                    str(row.get("raw_name") or "").strip(),
+                ):
+                    if alias and alias in ladder_by_name:
+                        ladder_item = ladder_by_name[alias]
+                        break
+                if ladder_item is None:
+                    continue
+                row["limit_up_count"] = int(ladder_item.limit_up_count)
+                if ladder_item.promotion_rate is not None:
+                    row["promotion_rate"] = float(ladder_item.promotion_rate)
+                if ladder_item.break_rate is not None:
+                    row["break_rate"] = float(ladder_item.break_rate)
+            structure_note = (
+                f"涨停晋级率与炸板率按 {current_trade_date} 真实涨停/炸板池精确题材归属并入；"
+                "未匹配板块保持空值。"
+            )
+        else:
+            structure_note = (
+                "涨停结构数据与板块行情交易日不一致，晋级率和炸板率未并入六态判断。"
+            )
+    except Exception as exc:
+        structure_note = (
+            f"真实涨停结构暂不可用：{exc.__class__.__name__}；"
+            "晋级率和炸板率保持空值，不以零代替。"
+        )
     provider_updates = [
         str(row.get("provider_updated_at") or "").strip()
         for row in current_rows
@@ -365,17 +484,139 @@ def _sector_temperature_snapshot(
     ]
     effective_updated_at = max(provider_updates) if provider_updates else current.updated_at
 
+    persistence_by_name: dict[str, dict[str, object]] = {}
+    persistence_note = ""
+    if db is not None and hasattr(db, "query"):
+        try:
+            persistence_by_name = load_sector_persistence_features(
+                db,
+                board_type=normalized,
+            )
+        except Exception as exc:
+            db.rollback()
+            persistence_note = (
+                f"板块持续性与本地历史特征暂不可用：{exc.__class__.__name__}；"
+                "高危状态保持待持续确认，历史斜率与分位不使用替代值。"
+            )
+
+    # Prefer the provider's exact deep history.  When it is unavailable, use
+    # only locally persisted, distinct T+1 disclosure dates as a fallback.
+    # Cumulative 5/10/20-day totals are never re-labelled as daily slopes.
+    margin_by_name: dict[str, dict[str, object]] = {
+        str(name): dict(values)
+        for name, values in (margin.get("items") or {}).items()
+        if isinstance(values, dict)
+    }
+    local_history_fields = (
+        "financing_net_buy_slope_5d",
+        "financing_net_buy_slope_10d",
+        "financing_net_buy_slope_20d",
+        "financing_balance_ratio_percentile_60d",
+        "financing_balance_ratio_percentile_120d",
+    )
+    for name, values in margin_by_name.items():
+        feature = persistence_by_name.get(name)
+        board_code = str(values.get("board_code") or "").strip().upper()
+        if feature is None and board_code:
+            feature = persistence_by_name.get(board_code)
+        if not feature:
+            values["margin_history_degraded"] = bool(
+                values.get("margin_history_degraded", True)
+            )
+            continue
+        fallback_used = False
+        for field in local_history_fields:
+            if values.get(field) is None and feature.get(field) is not None:
+                values[field] = feature[field]
+                fallback_used = True
+        provider_count = int(values.get("margin_history_sample_count") or 0)
+        local_count = int(feature.get("financing_net_buy_observations") or 0)
+        values["margin_history_sample_count"] = max(provider_count, local_count)
+        provider_sequence_complete = bool(
+            values.get("margin_history_sequence_complete", False)
+        )
+        local_sequence_complete = bool(
+            feature.get("margin_history_sequence_complete", False)
+        )
+        if fallback_used:
+            values["margin_history_sequence_complete"] = local_sequence_complete
+            values["margin_history_degraded"] = bool(
+                feature.get("margin_history_degraded", True)
+                or not local_sequence_complete
+            )
+        else:
+            values["margin_history_sequence_complete"] = provider_sequence_complete
+            values["margin_history_degraded"] = bool(
+                values.get("margin_history_degraded", not provider_sequence_complete)
+                or not provider_sequence_complete
+            )
+        # 两融是 T+1 日终披露，分母必须取同一披露交易日已经归档的
+        # 板块真实成交额。禁止拿今天盘中的成交额除以前一交易日的
+        # 融资买入额，否则比率会产生系统性错配。
+        margin_date = str(values.get("as_of") or values.get("trade_date") or "")[:10]
+        archived_turnover = feature.get("daily_turnover_by_trade_date")
+        if margin_date and isinstance(archived_turnover, dict):
+            matched_turnover = archived_turnover.get(margin_date)
+            try:
+                matched_turnover_value = float(matched_turnover)
+            except (TypeError, ValueError):
+                matched_turnover_value = 0.0
+            if matched_turnover_value > 0:
+                values["financing_reference_turnover"] = matched_turnover_value
+                values["financing_turnover_as_of"] = margin_date
+        if fallback_used and not str(values.get("margin_history_method") or "").strip():
+            values["margin_history_method"] = (
+                "本系统按 distinct margin_as_of 持久化的逐日融资净买入OLS斜率；"
+                "融资余额占比60/120日经验历史分位"
+            )
+
     result = build_sector_temperature(
         current_rows,
         five_rows,
         ten_rows,
-        margin_by_name=margin.get("items") or {},
+        margin_by_name=margin_by_name,
         attention_by_name=attention_by_name,
+        persistence_by_name=persistence_by_name,
         board_type=normalized,
         updated_at=effective_updated_at,
     )
+    if db is not None and hasattr(db, "query") and result.get("items"):
+        try:
+            # Persistence confirmation must include the fact visible in this
+            # very refresh.  Persist the instantaneous envelope first, reload
+            # the immutable facts-only history, then build the final gated
+            # conclusion.  The second write below is idempotent because the
+            # sample fingerprint excludes derived confirmation fields.
+            preliminary = SectorTemperatureOut.model_validate(result)
+            persist_sector_temperature_snapshot(db, preliminary)
+            persistence_by_name = load_sector_persistence_features(
+                db,
+                board_type=normalized,
+            )
+            result = build_sector_temperature(
+                current_rows,
+                five_rows,
+                ten_rows,
+                margin_by_name=margin_by_name,
+                attention_by_name=attention_by_name,
+                persistence_by_name=persistence_by_name,
+                board_type=normalized,
+                updated_at=effective_updated_at,
+            )
+        except Exception as exc:
+            db.rollback()
+            persistence_note = (
+                f"当前事实先入账并重算持续性失败：{exc.__class__.__name__}；"
+                "本轮保持瞬时观察结论，不提前确认高风险状态。"
+            )
     notes = list(result.get("notes") or [])
     notes.extend(margin.get("notes") or [])
+    if audited_flow_note:
+        notes.append(audited_flow_note)
+    if structure_note:
+        notes.append(structure_note)
+    if persistence_note:
+        notes.append(persistence_note)
     if current_cache["used"]:
         cache_time = max(provider_updates) if provider_updates else "精确更新时间缺失"
         cache_date = f"，缓存日期 {current_cache['trade_date']}" if current_cache["trade_date"] else ""
@@ -397,6 +638,8 @@ def _sector_temperature_snapshot(
         if margin.get("items")
         else fund_source
     )
+    if audited_flow_merged:
+        result["source"] += "+授权审计非杠杆资金"
     validated = SectorTemperatureOut.model_validate(result)
     _set_response_cache(response_cache_key, validated)
     if db is not None and hasattr(db, "query"):
@@ -413,12 +656,20 @@ def _sector_temperature_snapshot(
 def sector_temperature(
     request: Request,
     board_type: str = "行业",
+    db: Session = Depends(get_db),
 ) -> SectorTemperatureOut:
     """Read the last explicitly collected multi-window temperature snapshot."""
 
     normalized = "概念" if board_type == "概念" else "行业"
     cached = _get_response_cache(f"sector-temperature|{normalized}", allow_stale=True)
-    return cached or SectorTemperatureOut(
+    if cached is not None:
+        return cached
+    persisted = load_latest_sector_temperature_snapshot(db, board_type=normalized)
+    if persisted is not None:
+        restored = SectorTemperatureOut.model_validate(persisted)
+        _set_response_cache(f"sector-temperature|{normalized}", restored)
+        return restored
+    return SectorTemperatureOut(
         source="cache-unavailable",
         updated_at=shanghai_now_naive(),
         board_type=normalized,
@@ -448,9 +699,63 @@ def sector_temperature_history(
     start_date: str | None = None,
     end_date: str | None = None,
     limit: int = 60,
+    scope: str = "daily",
     db: Session = Depends(get_db),
 ) -> list[dict[str, object]]:
-    """Return auditable daily board evidence without recalculating history."""
+    """Return archived evidence without reconstructing unavailable history.
+
+    ``daily`` keeps the backward-compatible daily summaries; ``intraday``
+    returns immutable provider observations; ``evolution`` returns the
+    consecutive-sample/day confirmation path used by the strict six-state
+    gate.
+    """
+
+    normalized_scope = (scope or "daily").strip().lower()
+    if normalized_scope == "evolution":
+        return build_sector_state_evolution(
+            db,
+            board_type=board_type,
+            board_code=board_code,
+            board_name=board_name,
+            sample_limit=min(max(int(limit), 1), 24),
+            board_limit=20,
+        )
+    if normalized_scope == "intraday":
+        samples = load_sector_samples(
+            db,
+            board_type=board_type,
+            board_code=board_code,
+            board_name=board_name,
+            start_date=start_date,
+            end_date=end_date,
+            limit=limit,
+            ascending=True,
+        )
+        return [
+            {
+                "trade_date": row.trade_date,
+                "board_type": row.board_type,
+                "board_code": row.board_code,
+                "name": row.board_name,
+                "captured_at": row.captured_at,
+                "provider_updated_at": row.provider_updated_at,
+                "source": row.source,
+                "data_quality": row.data_quality,
+                "instantaneous_state": row.instantaneous_distribution_state,
+                "resolved_state": row.distribution_state,
+                "risk_level": row.distribution_risk_level,
+                "risk_score": row.distribution_risk_score,
+                "change_pct": row.change_pct,
+                "net_inflow": row.net_inflow,
+                "flow_speed": row.flow_speed,
+                "flow_acceleration": row.flow_acceleration,
+                "flow_turning": row.flow_turning,
+                "margin_as_of": row.margin_as_of,
+            }
+            for row in samples
+        ]
+    if normalized_scope != "daily":
+        raise HTTPException(status_code=422, detail="scope 仅支持 daily、intraday 或 evolution")
 
     rows = load_sector_history(
         db,
@@ -585,11 +890,103 @@ def market_reflexivity(
 @limiter.limit("12/minute")
 def global_market_cues(
     request: Request,
+    db: Session = Depends(get_db),
 ) -> GlobalMarketOut:
-    """Return traceable overseas evidence; unavailable quotes remain null."""
-    return GlobalMarketOut.model_validate(
-        global_market_service.read_cached_snapshot()
+    """Return traceable overseas evidence without a provider call on GET.
+
+    A worker restart clears the process cache but not the evidence ledger.  In
+    that case the newest immutable DB snapshot is returned with its persisted
+    origin and timestamp instead of a misleading empty panel.
+    """
+
+    cached = global_market_service.read_cached_snapshot()
+    quote_groups = (
+        "korea_indices",
+        "korea_equities",
+        "us_indices",
+        "us_sector_rank",
+        "strategic_assets",
+        "macro_indicators",
     )
+    metric_groups = (
+        "etf_flows",
+        "korea_foreign_flows",
+        "korea_leverage_products",
+        "official_rates",
+    )
+    has_cached_evidence = any(
+        str(item.get("status") or "").lower() in {"ok", "delayed"}
+        for key in quote_groups
+        for item in list(cached.get(key) or [])
+        if isinstance(item, dict)
+    ) or any(
+        str(item.get("status") or "").lower() == "ok"
+        for key in metric_groups
+        for item in list(cached.get(key) or [])
+        if isinstance(item, dict)
+    )
+    persisted = load_latest_global_evidence_snapshot(db)
+    persisted_is_newer = (
+        persisted is not None
+        and (
+            not has_cached_evidence
+            or global_evidence_recency_key(persisted) > global_evidence_recency_key(cached)
+        )
+    )
+    if persisted_is_newer:
+        notes = list(persisted.get("notes") or [])
+        notes.append(
+            "当前展示数据库中的最新不可变外围证据快照；它比本进程缓存更新，且本次未触发外部刷新。"
+            if has_cached_evidence
+            else "进程缓存为空，当前展示数据库中的最近一次不可变外围证据快照；未触发外部刷新。"
+        )
+        persisted["notes"] = list(dict.fromkeys(notes))
+        return GlobalMarketOut.model_validate(persisted)
+
+    if has_cached_evidence:
+        payload = dict(cached)
+        payload["snapshot_origin"] = "process_cache"
+        return GlobalMarketOut.model_validate(payload)
+
+    if persisted is not None:
+        notes = list(persisted.get("notes") or [])
+        notes.append("进程缓存为空，当前展示数据库中最近一次不可变外围证据快照；未触发外部刷新。")
+        persisted["notes"] = list(dict.fromkeys(notes))
+        return GlobalMarketOut.model_validate(persisted)
+    payload = dict(cached)
+    payload["snapshot_origin"] = "unavailable"
+    return GlobalMarketOut.model_validate(payload)
+
+
+@router.get("/market/global-cues/history")
+@limiter.limit("12/minute")
+def global_market_cues_history(
+    request: Request,
+    scope: str = "snapshots",
+    start_date: str | None = None,
+    end_date: str | None = None,
+    limit: int = 60,
+    db: Session = Depends(get_db),
+) -> list[dict[str, object]]:
+    """Read the auditable global evidence ledger or its transition path."""
+
+    normalized_scope = str(scope or "snapshots").strip().lower()
+    if normalized_scope == "snapshots":
+        return load_global_evidence_history(
+            db,
+            start_date=start_date,
+            end_date=end_date,
+            limit=limit,
+            ascending=False,
+        )
+    if normalized_scope == "evolution":
+        return build_global_evidence_evolution(
+            db,
+            start_date=start_date,
+            end_date=end_date,
+            limit=limit,
+        )
+    raise HTTPException(status_code=422, detail="scope 仅支持 snapshots 或 evolution")
 
 
 @router.post("/market/global-cues/refresh", response_model=GlobalMarketOut)

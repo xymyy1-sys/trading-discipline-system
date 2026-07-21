@@ -331,6 +331,50 @@ def test_global_evidence_deduplicates_collection_time_but_not_market_content(db_
     assert db_session.query(GlobalEvidenceSnapshot).count() == 3
 
 
+def test_global_evidence_hash_recursively_ignores_collector_time_only(db_session):
+    payload = {
+        "generated_at": "2026-07-20T08:20:00+08:00",
+        "as_of": "2026-07-20T08:20:00+08:00",
+        "source": ["licensed-adapter"],
+        "data_quality": "official",
+        "etf_flows": [{
+            "metric_id": "EWY_SHARES",
+            "value": -100.0,
+            "published_at": "2026-07-19T20:00:00-04:00",
+            "as_of": "2026-07-19T16:00:00-04:00",
+            "observed_at": "2026-07-20T08:19:58+08:00",
+            "adapter_trace": {
+                "received_at": "2026-07-20T08:19:59+08:00",
+                "observed_at": "2026-07-20T08:20:00+08:00",
+            },
+        }],
+    }
+    first = persist_global_evidence_snapshot(db_session, payload)
+
+    recollected = json.loads(json.dumps(payload))
+    recollected["generated_at"] = "2026-07-20T08:25:00+08:00"
+    recollected["as_of"] = "2026-07-20T08:25:00+08:00"
+    recollected["etf_flows"][0]["observed_at"] = "2026-07-20T08:25:00+08:00"
+    recollected["etf_flows"][0]["adapter_trace"] = {
+        "received_at": "2026-07-20T08:25:01+08:00",
+        "observed_at": "2026-07-20T08:25:02+08:00",
+    }
+    duplicate = persist_global_evidence_snapshot(db_session, recollected)
+
+    provider_time_changed = json.loads(json.dumps(recollected))
+    provider_time_changed["etf_flows"][0]["as_of"] = "2026-07-19T16:05:00-04:00"
+    second = persist_global_evidence_snapshot(db_session, provider_time_changed)
+
+    publication_changed = json.loads(json.dumps(recollected))
+    publication_changed["etf_flows"][0]["published_at"] = "2026-07-19T20:05:00-04:00"
+    third = persist_global_evidence_snapshot(db_session, publication_changed)
+
+    assert duplicate.id == first.id
+    assert second.id != first.id
+    assert third.id not in {first.id, second.id}
+    assert db_session.query(GlobalEvidenceSnapshot).count() == 3
+
+
 def test_empty_sector_payload_is_a_noop(db_session):
     assert persist_sector_temperature_snapshot(db_session, {"items": []}) == []
     assert db_session.query(SectorCrowdingDailySnapshot).count() == 0

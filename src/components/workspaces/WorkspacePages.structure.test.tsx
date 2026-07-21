@@ -22,6 +22,15 @@ describe('今日决策信息架构', () => {
     expect(source).not.toContain("return 'risk-low'")
   })
 
+  test('外围行情和机构资金证据分别评级，并标注持久快照来源', () => {
+    const source = readFileSync(resolve(process.cwd(), 'src/components/workspaces/WorkspacePages.tsx'), 'utf8')
+    expect(source).toContain('基础行情质量')
+    expect(source).toContain('机构资金证据质量')
+    expect(source).toContain('globalCues?.quote_quality')
+    expect(source).toContain('globalCues?.institutional_flow_quality')
+    expect(source).toContain('数据库持久快照')
+  })
+
   test('退役旧 Service Worker，入口和静态资源采用可验证缓存策略', () => {
     const html = readFileSync(resolve(process.cwd(), 'index.html'), 'utf8')
     const worker = readFileSync(resolve(process.cwd(), 'public/sw.js'), 'utf8')

@@ -1346,6 +1346,33 @@ class GlobalQuoteOut(BaseModel):
     theme: str | None = None
     proxy_description: str | None = None
     note: str = ""
+    source_url: str = ""
+    published_at: str | None = None
+    observed_at: str | None = None
+    related_a_share_sectors: list[str] = Field(default_factory=list)
+    metric_kind: str = "price_quote"
+    data_quality: str = "unknown"
+
+
+class GlobalMetricOut(BaseModel):
+    metric_id: str
+    name: str
+    market: str
+    status: str
+    value: float | None = None
+    change: float | None = None
+    change_pct: float | None = None
+    direction: str | None = None
+    unit: str = ""
+    period: str | None = None
+    source: str = ""
+    source_url: str = ""
+    published_at: str | None = None
+    observed_at: str | None = None
+    related_a_share_sectors: list[str] = Field(default_factory=list)
+    metric_kind: str = ""
+    data_quality: str = "missing"
+    note: str = ""
 
 
 class GlobalQuoteEnvelopeOut(GlobalQuoteOut):
@@ -1357,15 +1384,28 @@ class GlobalMarketOut(BaseModel):
     as_of: str
     quality: str
     data_quality: str
+    quote_quality: str = "missing"
+    institutional_flow_quality: str = "missing"
     sources: list[str] = Field(default_factory=list)
     source: list[str] = Field(default_factory=list)
     notes: list[str] = Field(default_factory=list)
+    quality_details: dict[str, Any] = Field(default_factory=dict)
     kis: dict[str, Any] = Field(default_factory=dict)
+    official_adapters: dict[str, Any] = Field(default_factory=dict)
     korea_indices: list[GlobalQuoteOut] = Field(default_factory=list)
     korea_equities: list[GlobalQuoteOut] = Field(default_factory=list)
     us_indices: list[GlobalQuoteOut] = Field(default_factory=list)
     us_sector_rank: list[GlobalQuoteOut] = Field(default_factory=list)
+    strategic_assets: list[GlobalQuoteOut] = Field(default_factory=list)
+    macro_indicators: list[GlobalQuoteOut] = Field(default_factory=list)
+    etf_flows: list[GlobalMetricOut] = Field(default_factory=list)
+    korea_foreign_flows: list[GlobalMetricOut] = Field(default_factory=list)
+    korea_leverage_products: list[GlobalMetricOut] = Field(default_factory=list)
+    official_rates: list[GlobalMetricOut] = Field(default_factory=list)
     items: list[GlobalQuoteEnvelopeOut] = Field(default_factory=list)
+    snapshot_id: int | None = None
+    snapshot_origin: str = "process_cache"
+    persisted_at: str | None = None
 
 
 class OpportunitySectorAssessmentOut(BaseModel):
@@ -1560,6 +1600,14 @@ class SectorFlowItem(BaseModel):
     change_pct: float
     net_inflow: float
     main_inflow: float
+    turnover_amount: float | None = None
+    turnover_rate: float | None = None
+    flow_ratio: float | None = None
+    leader_change_pct: float | None = None
+    up_count: int | None = None
+    down_count: int | None = None
+    flat_count: int | None = None
+    stock_count: int | None = None
     limit_up_count: int = 0
     strength: int
     rank: int
@@ -1624,6 +1672,9 @@ class SectorTemperatureItemOut(BaseModel):
     net_inflow: float | None = None
     net_inflow_5d: float | None = None
     net_inflow_10d: float | None = None
+    flow_ratio: float | None = None
+    flow_ratio_5d: float | None = None
+    flow_ratio_10d: float | None = None
     flow_speed: float | None = None
     flow_acceleration: float | None = None
     flow_turning: str | None = None
@@ -1631,20 +1682,79 @@ class SectorTemperatureItemOut(BaseModel):
     provider_updated_at: str | None = None
     limit_up_count: int = 0
     financing_balance: float | None = None
+    financing_buy: float | None = None
+    financing_reference_turnover: float | None = None
+    financing_turnover_as_of: str = ""
     financing_net_buy: float | None = None
     financing_balance_ratio: float | None = None
     financing_net_buy_5d: float | None = None
     financing_net_buy_10d: float | None = None
     financing_net_buy_20d: float | None = None
+    financing_net_buy_slope_5d: float | None = None
+    financing_net_buy_slope_10d: float | None = None
+    financing_net_buy_slope_20d: float | None = None
+    financing_balance_ratio_percentile_60d: float | None = None
+    financing_balance_ratio_percentile_120d: float | None = None
+    margin_history_sample_count: int = 0
+    margin_history_method: str = ""
     margin_as_of: str = ""
     margin_realtime: bool = False
     distribution_state: str = "数据不足"
+    instantaneous_distribution_state: str = "数据不足"
     distribution_risk_level: str = "UNKNOWN"
     distribution_risk_score: int = 0
     order_flow_exhausted: bool = False
     leverage_crowding: bool = False
     price_response_weak: bool = False
     distribution_confirmation_count: int = 0
+    capital_price_carrying_efficiency: float | None = None
+    capital_price_carrying_sample_count: int = 0
+    capital_price_carrying_span_minutes: float | None = None
+    capital_price_carrying_slope: float | None = None
+    capital_price_carrying_method: str = "immutable_intraday_delta_rolling"
+    sector_turnover_amount: float | None = None
+    financing_buy_turnover_ratio: float | None = None
+    financing_turnover_date_aligned: bool = False
+    non_leveraged_net_inflow: float | None = None
+    non_leveraged_flow_audited: bool = False
+    non_leveraged_flow_source_url: str = ""
+    non_leveraged_flow_published_at: str | None = None
+    non_leveraged_net_inflow_unit: str = ""
+    non_leveraged_methodology_id: str = ""
+    etf_share_net_change: float | None = None
+    etf_share_change_pct: float | None = None
+    etf_flow_audited: bool = False
+    etf_id: str = ""
+    etf_share_unit: str = ""
+    etf_share_base: float | None = None
+    etf_methodology_id: str = ""
+    leader_change_pct: float | None = None
+    leader_divergence_pct: float | None = None
+    advance_count: int | None = None
+    decline_count: int | None = None
+    constituent_count: int | None = None
+    advance_ratio: float | None = None
+    new_high_count: int | None = None
+    new_high_ratio: float | None = None
+    promotion_rate: float | None = None
+    break_rate: float | None = None
+    sector_price: float | None = None
+    sector_vwap: float | None = None
+    sector_vwap_reliable: bool = False
+    sector_below_vwap: bool | None = None
+    strict_state: str = ""
+    confirmed_state: str = ""
+    persistence_state: str = ""
+    sample_confirmation_count: int = 0
+    sample_confirmation_min_interval_seconds: int = 300
+    trading_day_confirmation_count: int = 0
+    persistence_confirmed: bool = False
+    persistence_basis: list[str] = Field(default_factory=list)
+    last_sample_at: datetime | str | None = None
+    last_trade_date: str | None = None
+    recent_state_samples: list[dict[str, Any]] = Field(default_factory=list)
+    margin_history_degraded: bool = False
+    margin_history_sequence_complete: bool = False
     distribution_evidence: list[str] = Field(default_factory=list)
     distribution_counter_evidence: list[str] = Field(default_factory=list)
     distribution_actions: list[str] = Field(default_factory=list)
@@ -1975,6 +2085,10 @@ class LimitUpThemeLadderOut(BaseModel):
     limit_up_count: int
     broken_count: int | None = None
     seal_rate: float | None = None
+    break_rate: float | None = None
+    previous_limit_up_count: int | None = None
+    promoted_count: int | None = None
+    promotion_rate: float | None = None
     first_board_count: int = 0
     second_board_count: int = 0
     high_board_count: int = 0

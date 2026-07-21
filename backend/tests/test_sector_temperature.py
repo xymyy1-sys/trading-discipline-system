@@ -32,6 +32,18 @@ def _item(result, name: str):
     return next(item for item in result["items"] if item["name"] == name)
 
 
+def _confirmed(state: str) -> dict:
+    return {
+        "strict_state": state,
+        "sample_confirmation_count": 2,
+        "trading_day_confirmation_count": 1,
+        "persistence_confirmed": True,
+        "confirmation_basis": ["连续2个有效采样点"],
+        "data_as_of": "2026-07-17T10:29:00+08:00",
+        "recent_samples": [{"strict_state": state}, {"strict_state": state}],
+    }
+
+
 def test_overheated_healthy_trend_is_distinct_from_turning_down():
     five = [_row("健康热门", 14, 150), _row("兑现热门", 14, 150)]
     ten = [_row("健康热门", 24, 260), _row("兑现热门", 24, 260)]
@@ -119,7 +131,13 @@ def test_high_distribution_requires_price_cash_flow_joint_confirmation(monkeypat
         }
     }
 
-    item = _item(build_sector_temperature(current, five, ten, margin_by_name=margin), "高位承载转弱")
+    item = _item(build_sector_temperature(
+        current,
+        five,
+        ten,
+        margin_by_name=margin,
+        persistence_by_name={"高位承载转弱": _confirmed("高位派发风险")},
+    ), "高位承载转弱")
 
     assert item["distribution_state"] == "高位派发风险"
     assert item["distribution_risk_level"] == "HIGH"
@@ -142,6 +160,18 @@ def test_positive_order_flow_without_price_response_is_carrying_decay():
     assert item["price_response_weak"] is True
     assert item["order_flow_exhausted"] is False
     assert any("有效价格推进" in action for action in item["distribution_actions"])
+
+
+def test_sustained_negative_price_and_order_flow_is_not_called_healthy_increment():
+    current = [_row("持续负反馈", -1.2, -18)]
+    five = [_row("持续负反馈", -3.5, -70)]
+    ten = [_row("持续负反馈", -6.0, -120)]
+
+    item = _item(build_sector_temperature(current, five, ten), "持续负反馈")
+
+    assert item["distribution_state"] == "资金承载衰减"
+    assert item["distribution_risk_level"] == "MEDIUM"
+    assert item["strict_state"] != "健康增量"
 
 
 def test_leverage_crowding_is_observation_only_and_capped_below_high_risk():
@@ -195,7 +225,13 @@ def test_deleveraging_stampede_needs_negative_price_and_cash_order_flow(monkeypa
         }
     }
 
-    item = _item(build_sector_temperature(current, five, ten, margin_by_name=margin), "联合踩踏")
+    item = _item(build_sector_temperature(
+        current,
+        five,
+        ten,
+        margin_by_name=margin,
+        persistence_by_name={"联合踩踏": _confirmed("去杠杆踩踏")},
+    ), "联合踩踏")
 
     assert item["distribution_state"] == "去杠杆踩踏"
     assert item["distribution_risk_level"] == "HIGH"
@@ -220,7 +256,7 @@ def test_negative_financing_alone_does_not_create_stampede_or_trade_action():
 
     item = _item(build_sector_temperature(current, five, ten, margin_by_name=margin), "融资减但价格健康")
 
-    assert item["distribution_state"] == "健康"
+    assert item["distribution_state"] == "健康增量"
     assert item["distribution_risk_level"] == "LOW"
     assert item["distribution_risk_score"] < 25
     assert not any("卖出" in action or "清仓" in action for action in item["distribution_actions"])
@@ -246,6 +282,20 @@ def test_rounding_dust_flow_cannot_create_exhaustion_or_weak_price_response():
     assert item["price_response_weak"] is False
     assert item["distribution_risk_level"] != "HIGH"
     assert item["distribution_confirmation_count"] == 0
+    assert item["distribution_state"] == "数据不足"
+
+
+def test_neutral_values_are_not_mislabelled_as_healthy_increment():
+    current = [_row("中性零值", 0.0, 0.0)]
+    five = [_row("中性零值", 0.0, 0.0)]
+    ten = [_row("中性零值", 0.0, 0.0)]
+
+    item = _item(build_sector_temperature(current, five, ten), "中性零值")
+
+    assert item["distribution_state"] == "数据不足"
+    assert item["instantaneous_distribution_state"] == "数据不足"
+    assert item["distribution_risk_level"] == "UNKNOWN"
+    assert any("不把中性或零值行情误标" in text for text in item["distribution_counter_evidence"])
 
 
 def test_partial_snapshot_caps_strong_distribution_candidate_at_watch_level():
@@ -290,6 +340,7 @@ def test_relative_flow_significance_can_confirm_a_smaller_board(monkeypatch):
         [current_row],
         [_row("小板块相对显著", 9.0, 6.0)],
         [_row("小板块相对显著", 10.0, 12.0)],
+        persistence_by_name={"小板块相对显著": _confirmed("高位派发风险")},
     ), "小板块相对显著")
 
     assert item["order_flow_exhausted"] is True
@@ -395,3 +446,280 @@ def test_cached_current_snapshot_is_capped_below_high_quality(monkeypatch):
 
     assert item["data_quality"] == "partial"
     assert any("来自 eastmoney 缓存" in text for text in item["counter_evidence"])
+
+
+def test_high_risk_instantaneous_state_waits_for_distinct_persistence(monkeypatch):
+    tz = timezone(timedelta(hours=8))
+    monkeypatch.setattr(
+        sector_temperature_service,
+        "_shanghai_now",
+        lambda: datetime(2026, 7, 17, 10, 30, tzinfo=tz),
+    )
+    current = _row(
+        "待持续确认",
+        -2.0,
+        -40,
+        speed=-1.2,
+        acceleration=-0.2,
+        turning="INFLOW_FADING",
+    )
+    current.update({
+        "provider_trade_date": "2026-07-17",
+        "provider_updated_at": "2026-07-17T10:29:00+08:00",
+    })
+
+    item = _item(build_sector_temperature(
+        [current],
+        [_row("待持续确认", 12.0, 150)],
+        [_row("待持续确认", 22.0, 260)],
+    ), "待持续确认")
+
+    assert item["instantaneous_distribution_state"] == "高位派发风险"
+    assert item["distribution_state"] == "资金承载衰减"
+    assert item["strict_state"] == "资金承载衰减"
+    assert item["persistence_confirmed"] is False
+    assert any("连续" in text and "确认" in text for text in item["distribution_counter_evidence"])
+
+
+def test_current_unpersisted_provider_timestamp_cannot_confirm_persistence(monkeypatch):
+    tz = timezone(timedelta(hours=8))
+    monkeypatch.setattr(
+        sector_temperature_service,
+        "_shanghai_now",
+        lambda: datetime(2026, 7, 17, 10, 31, tzinfo=tz),
+    )
+    current = _row(
+        "实时补计",
+        -2.0,
+        -40,
+        speed=-1.2,
+        acceleration=-0.2,
+        turning="INFLOW_FADING",
+    )
+    current.update({
+        "provider_trade_date": "2026-07-17",
+        "provider_updated_at": "2026-07-17T10:30:00+08:00",
+    })
+    prior = {
+        "strict_state": "高位派发风险",
+        "sample_confirmation_count": 1,
+        "trading_day_confirmation_count": 1,
+        "last_sample_at": "2026-07-17T10:25:00+08:00",
+        "last_trade_date": "2026-07-17",
+        "recent_samples": [{"strict_state": "高位派发风险"}],
+    }
+
+    item = _item(build_sector_temperature(
+        [current],
+        [_row("实时补计", 12.0, 150)],
+        [_row("实时补计", 22.0, 260)],
+        persistence_by_name={"实时补计": prior},
+    ), "实时补计")
+
+    assert item["distribution_state"] == "资金承载衰减"
+    assert item["sample_confirmation_count"] == 1
+    assert item["persistence_confirmed"] is False
+    assert item["confirmed_state"] == ""
+    assert len(item["recent_state_samples"]) == 1
+
+    same_timestamp = {**prior, "last_sample_at": "2026-07-17T10:30:00+08:00"}
+    duplicate = _item(build_sector_temperature(
+        [current],
+        [_row("实时补计", 12.0, 150)],
+        [_row("实时补计", 22.0, 260)],
+        persistence_by_name={"实时补计": same_timestamp},
+    ), "实时补计")
+    assert duplicate["sample_confirmation_count"] == 1
+    assert duplicate["persistence_confirmed"] is False
+    assert duplicate["distribution_state"] == "资金承载衰减"
+
+    older_timestamp = {**prior, "last_sample_at": "2026-07-17T10:31:00+08:00"}
+    out_of_order = _item(build_sector_temperature(
+        [current],
+        [_row("实时补计", 12.0, 150)],
+        [_row("实时补计", 22.0, 260)],
+        persistence_by_name={"实时补计": older_timestamp},
+    ), "实时补计")
+    assert out_of_order["sample_confirmation_count"] == 1
+    assert out_of_order["persistence_confirmed"] is False
+
+
+def test_financing_buy_turnover_ratio_requires_same_trade_date(monkeypatch):
+    tz = timezone(timedelta(hours=8))
+    monkeypatch.setattr(
+        sector_temperature_service,
+        "_shanghai_now",
+        lambda: datetime(2026, 7, 17, 10, 30, tzinfo=tz),
+    )
+    current = _row("融资成交占比", 1.0, 10, speed=0.2, acceleration=0.1)
+    current.update({
+        "provider_trade_date": "2026-07-17",
+        "provider_updated_at": "2026-07-17T10:29:00+08:00",
+        "turnover_amount": 100.0,
+        "turnover_complete": True,
+    })
+    margin = {
+        "融资成交占比": {
+            "as_of": "2026-07-17",
+            "financing_buy": 12.0,
+            "financing_balance_ratio": 3.0,
+        }
+    }
+    aligned = _item(build_sector_temperature(
+        [current],
+        [_row("融资成交占比", 2.0, 20)],
+        [_row("融资成交占比", 3.0, 30)],
+        margin_by_name=margin,
+    ), "融资成交占比")
+    assert aligned["financing_buy_turnover_ratio"] == 12.0
+    assert aligned["financing_turnover_date_aligned"] is True
+
+    margin["融资成交占比"]["as_of"] = "2026-07-16"
+    mismatched = _item(build_sector_temperature(
+        [current],
+        [_row("融资成交占比", 2.0, 20)],
+        [_row("融资成交占比", 3.0, 30)],
+        margin_by_name=margin,
+    ), "融资成交占比")
+    assert mismatched["financing_buy_turnover_ratio"] is None
+    assert mismatched["financing_turnover_date_aligned"] is False
+
+    margin["融资成交占比"].update({
+        "financing_buy": 10.0,
+        "financing_reference_turnover": 50.0,
+        "financing_turnover_as_of": "2026-07-16",
+    })
+    historical_aligned = _item(build_sector_temperature(
+        [current],
+        [_row("融资成交占比", 2.0, 20)],
+        [_row("融资成交占比", 3.0, 30)],
+        margin_by_name=margin,
+    ), "融资成交占比")
+    assert historical_aligned["financing_buy_turnover_ratio"] == 20.0
+    assert historical_aligned["financing_turnover_date_aligned"] is True
+    assert historical_aligned["financing_turnover_as_of"] == "2026-07-16"
+
+
+def test_continuous_carrying_efficiency_requires_immutable_history():
+    current = _row("连续承载", -2.0, 30, speed=0.2, acceleration=0.1)
+    current["flow_ratio"] = 3.0
+    five = _row("连续承载", -1.0, 80)
+    five["flow_ratio"] = 4.0
+    ten = _row("连续承载", -2.0, 100)
+    ten["flow_ratio"] = 5.0
+
+    without_history = _item(
+        build_sector_temperature([current], [five], [ten]),
+        "连续承载",
+    )
+    assert without_history["capital_price_carrying_efficiency"] is None
+    assert without_history["capital_price_carrying_sample_count"] == 0
+
+    item = _item(build_sector_temperature(
+        [current],
+        [five],
+        [ten],
+        persistence_by_name={
+            "连续承载": {
+                "capital_price_carrying_efficiency": 28.0,
+                "capital_price_carrying_sample_count": 4,
+                "capital_price_carrying_span_minutes": 20.0,
+                "capital_price_carrying_slope": -3.0,
+            },
+        },
+    ), "连续承载")
+
+    assert item["capital_price_carrying_efficiency"] == 28.0
+    assert item["capital_price_carrying_efficiency"] < 40
+    assert item["capital_price_carrying_sample_count"] == 4
+    assert item["capital_price_carrying_span_minutes"] == 20.0
+    assert item["capital_price_carrying_slope"] == -3.0
+    assert item["new_high_count"] is None
+    assert item["promotion_rate"] is None
+    assert item["break_rate"] is None
+    assert item["sector_below_vwap"] is None
+
+
+def test_stale_snapshot_preserves_valid_archived_financing_turnover_ratio(monkeypatch):
+    tz = timezone(timedelta(hours=8))
+    monkeypatch.setattr(
+        sector_temperature_service,
+        "_shanghai_now",
+        lambda: datetime(2026, 7, 17, 10, 30, tzinfo=tz),
+    )
+    current = _row("历史描述比率", 1.0, 10)
+    current.update({
+        "provider_trade_date": "2026-07-16",
+        "provider_updated_at": "2026-07-16T15:05:00+08:00",
+    })
+    margin = {
+        "历史描述比率": {
+            "as_of": "2026-07-16",
+            "financing_buy": 10.0,
+            "financing_reference_turnover": 50.0,
+            "financing_turnover_as_of": "2026-07-16",
+        }
+    }
+
+    item = _item(build_sector_temperature(
+        [current],
+        [_row("历史描述比率", 2.0, 20)],
+        [_row("历史描述比率", 3.0, 30)],
+        margin_by_name=margin,
+    ), "历史描述比率")
+
+    assert item["data_quality"] == "stale"
+    assert item["distribution_state"] == "数据不足"
+    assert item["financing_buy_turnover_ratio"] == 20.0
+    assert item["financing_turnover_date_aligned"] is True
+
+
+def test_margin_history_features_are_exposed_without_fake_non_leveraged_flow():
+    current = _row("历史融资", 1.0, 15)
+    current.update({
+        "non_leveraged_net_inflow": 999.0,
+        "non_leveraged_flow_audited": False,
+    })
+    margin = {
+        "历史融资": {
+            "as_of": "2026-07-16",
+            "financing_net_buy_slope_5d": 1.2,
+            "financing_net_buy_slope_10d": 0.8,
+            "financing_net_buy_slope_20d": 0.4,
+            "financing_balance_ratio_percentile_60d": 92.0,
+            "financing_balance_ratio_percentile_120d": 88.0,
+            "margin_history_sample_count": 121,
+            "margin_history_method": "逐日真实序列",
+        }
+    }
+
+    item = _item(build_sector_temperature(
+        [current],
+        [_row("历史融资", 2.0, 20)],
+        [_row("历史融资", 3.0, 30)],
+        margin_by_name=margin,
+    ), "历史融资")
+
+    assert item["financing_net_buy_slope_5d"] == 1.2
+    assert item["financing_balance_ratio_percentile_120d"] == 88.0
+    assert item["margin_history_sample_count"] == 121
+    assert item["non_leveraged_net_inflow"] is None
+    assert item["non_leveraged_flow_audited"] is False
+    assert any("未把主力资金算法冒充" in text for text in item["distribution_counter_evidence"])
+
+
+def test_strict_business_state_is_one_of_exact_six_states():
+    result = build_sector_temperature(
+        [_row("六态约束", 1.0, 12)],
+        [_row("六态约束", 2.0, 20)],
+        [_row("六态约束", 3.0, 30)],
+    )
+    item = _item(result, "六态约束")
+    assert item["strict_state"] in {
+        "健康增量",
+        "杠杆追涨观察",
+        "资金承载衰减",
+        "高位派发风险",
+        "去杠杆踩踏",
+        "超跌企稳观察",
+    }

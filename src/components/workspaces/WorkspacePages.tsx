@@ -765,8 +765,13 @@ export function TodayDecisionSummary() {
       <section className="panel global-evidence-panel">
         <header>
           <h3><Activity size={16} />外围市场证据</h3>
-          <span className="stream-state">{globalCues?.data_quality === 'ok' ? '数据可用' : globalCues ? '部分数据降级' : '等待同步'} · {globalCues?.as_of ? new Date(globalCues.as_of).toLocaleString('zh-CN') : '--'}</span>
+          <span className="stream-state">{globalCues?.as_of ? new Date(globalCues.as_of).toLocaleString('zh-CN') : '等待同步'}</span>
         </header>
+        <div className="global-quality-summary" aria-label="外围证据质量分级">
+          <span>基础行情质量：<b>{globalQualityLabel(globalCues?.quote_quality)}</b></span>
+          <span>机构资金证据质量：<b>{globalQualityLabel(globalCues?.institutional_flow_quality)}</b></span>
+          <span>快照来源：<b>{globalSnapshotOriginLabel(globalCues?.snapshot_origin)}</b></span>
+        </div>
         <p className="global-evidence-summary">{globalEvidenceSummary(globalCues)}</p>
         <div className="global-cue-groups">
           <div>
@@ -790,6 +795,16 @@ export function TodayDecisionSummary() {
             {!(globalCues?.us_indices ?? []).length && <p>隔夜美股指数暂不可用。</p>}
           </div>
           <div>
+            <h4>汇率、利率与关键资产</h4>
+            {[...(globalCues?.macro_indicators ?? []), ...(globalCues?.strategic_assets ?? [])].map(item => (
+              <article key={`macro-${item.symbol}`} className={globalQuoteTone(item.change_pct, item.status)}>
+                <b>{item.name}</b><strong>{item.status === 'unavailable' ? '--' : formatSignedNumber(item.change_pct, '%')}</strong>
+                <small>{item.status === 'unavailable' ? item.note : `${formatNumber(item.price)} · ${item.data_quality || item.freshness}`}</small>
+                {!!item.source_url && <a href={item.source_url} target="_blank" rel="noreferrer">查看数据源</a>}
+              </article>
+            ))}
+          </div>
+          <div>
             <h4>隔夜美股行业表现</h4>
             {(globalCues?.us_sector_rank ?? []).slice(0, 8).map((item, index) => (
               <article key={item.symbol} className={globalQuoteTone(item.change_pct, item.status)}>
@@ -798,6 +813,21 @@ export function TodayDecisionSummary() {
               </article>
             ))}
             {!(globalCues?.us_sector_rank ?? []).length && <p>美股行业ETF排行暂不可用，不生成模拟排名。</p>}
+          </div>
+          <div>
+            <h4>授权资金与杠杆证据</h4>
+            {[
+              ...(globalCues?.etf_flows ?? []),
+              ...(globalCues?.korea_foreign_flows ?? []),
+              ...(globalCues?.korea_leverage_products ?? []),
+              ...(globalCues?.official_rates ?? []),
+            ].map(item => (
+              <article key={`official-${item.metric_id}`} className={item.status === 'ok' ? 'cue-neutral' : 'cue-unavailable'}>
+                <b>{item.name}</b><strong>{item.status === 'ok' && item.value !== null ? `${formatNumber(item.value)}${item.unit}` : '不可用'}</strong>
+                <small>{item.note || `${item.source} · ${item.published_at || '--'}`}</small>
+                {!!item.source_url && <a href={item.source_url} target="_blank" rel="noreferrer">查看数据源</a>}
+              </article>
+            ))}
           </div>
         </div>
         {(globalCues?.notes ?? []).slice(0, 4).map(note => <small className="global-data-note" key={note}>· {note}</small>)}
@@ -1145,17 +1175,36 @@ function globalQuoteTone(change?: number | null, status?: string) {
   return ''
 }
 
+function globalQualityLabel(value?: string | null) {
+  const quality = String(value || '').toLowerCase()
+  if (['ok', 'complete', 'realtime'].includes(quality)) return '完整可用'
+  if (['partial', 'degraded', 'delayed'].includes(quality)) return '部分可用'
+  return '缺失（保持未知）'
+}
+
+function globalSnapshotOriginLabel(value?: string | null) {
+  if (value === 'process_cache') return '进程缓存'
+  if (value === 'database') return '数据库持久快照'
+  if (value === 'unavailable') return '暂无可用快照'
+  return '等待同步'
+}
+
 function globalEvidenceSummary(cues: GlobalMarketCues | null) {
   if (!cues) return '正在读取韩国、隔夜美股及行业ETF代理数据；缺失数据不会以零值代替。'
   const negativeKorea = [...(cues.korea_indices ?? []), ...(cues.korea_equities ?? [])]
     .filter(item => item.change_pct !== null && item.change_pct <= -3)
   const negativeSemis = (cues.us_sector_rank ?? [])
     .filter(item => /半导体|SMH|SOXX/i.test(`${item.theme || ''}${item.symbol}`) && (item.change_pct ?? 0) < 0)
+  const negativeStrategic = (cues.strategic_assets ?? [])
+    .filter(item => ['EWY', 'MU'].includes(item.symbol) && (item.change_pct ?? 0) < 0)
   if (negativeKorea.length) {
     return `韩国市场出现显著负反馈：${negativeKorea.map(item => `${item.name} ${formatSignedNumber(item.change_pct, '%')}`).join('、')}。涉及半导体、存储或科技持仓时提高开仓门槛，外围证据只作加减分，不单独触发交易。`
   }
   if (negativeSemis.length) {
     return `隔夜半导体代理走弱：${negativeSemis.map(item => `${item.symbol} ${formatSignedNumber(item.change_pct, '%')}`).join('、')}。需等待A股板块订单流方向和个股VWAP独立确认。`
+  }
+  if (negativeStrategic.length) {
+    return `韩国ETF/美光出现负反馈：${negativeStrategic.map(item => `${item.symbol} ${formatSignedNumber(item.change_pct, '%')}`).join('、')}。这是跨市场修正证据，仍需A股资金、广度和个股量价共同确认。`
   }
   return '外围证据未出现明确系统性冲击；仍以A股全市场、板块订单流方向和个股量价为主，外围只作当日预期修正。'
 }

@@ -6,6 +6,7 @@ import math
 import re
 from datetime import datetime, time, timedelta, timezone
 from typing import Any, Mapping
+from urllib.parse import urlsplit
 
 from sqlalchemy.orm import Session
 
@@ -49,6 +50,10 @@ from app.schemas.trading import (
 )
 from app.services.flow_kinetics import FlowKinetics, classify_price_volume_flow_alerts
 from app.services.global_market import global_market_service
+from app.services.sector_evidence_history import (
+    global_evidence_recency_key,
+    load_latest_global_evidence_snapshot,
+)
 from app.services.cache import _get_response_cache
 
 WEAK_EXPECTATION_RESULTS = {"WEAKER", "INVALID", "SLIGHTLY_WEAKER"}
@@ -329,6 +334,96 @@ def _valid_global_quote(
     return change_pct, str(_global_value(item, "name") or _global_value(item, "symbol") or "外围标的")
 
 
+def _valid_global_metric(
+    item: Mapping[str, Any] | Any,
+    *,
+    now: datetime,
+    max_age: timedelta,
+    expected_kind: str,
+) -> dict[str, Any] | None:
+    """Validate one authorised metric without inferring a missing direction."""
+
+    status = str(_global_value(item, "status") or "").lower()
+    quality = str(_global_value(item, "data_quality") or "").lower()
+    source = str(_global_value(item, "source") or "")
+    source_url = str(_global_value(item, "source_url") or "")
+    metric_id = str(_global_value(item, "metric_id") or "").strip()
+    name = str(_global_value(item, "name") or "").strip()
+    metric_kind = str(_global_value(item, "metric_kind") or "").strip()
+    try:
+        parsed_source_url = urlsplit(source_url)
+    except ValueError:
+        return None
+    if (
+        status != "ok"
+        or quality not in {"audited", "official", "official_audited"}
+        or not metric_id
+        or not name
+        or not source.strip()
+        or metric_kind != expected_kind
+        or parsed_source_url.scheme.lower() != "https"
+        or not parsed_source_url.hostname
+        or parsed_source_url.username is not None
+        or parsed_source_url.password is not None
+        or any(marker in source.lower() for marker in ("mock", "manual", "simulat"))
+    ):
+        return None
+    raw_value = _global_value(item, "value")
+    if raw_value is None or isinstance(raw_value, bool):
+        return None
+    try:
+        value = float(raw_value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(value):
+        return None
+    raw_published_at = _global_value(item, "published_at") or _global_value(item, "as_of")
+    if isinstance(raw_published_at, datetime):
+        source_time = raw_published_at
+    else:
+        try:
+            source_time = datetime.fromisoformat(
+                str(raw_published_at or "").strip().replace("Z", "+00:00")
+            )
+        except ValueError:
+            return None
+    if source_time.tzinfo is None or source_time.utcoffset() is None:
+        return None
+    published_at = source_time.astimezone(
+        timezone(timedelta(hours=8))
+    ).replace(tzinfo=None)
+    if (
+        published_at is None
+        or published_at > now
+        or now - published_at > max_age
+    ):
+        return None
+
+    def optional_number(key: str) -> float | None:
+        raw = _global_value(item, key)
+        if raw is None or isinstance(raw, bool):
+            return None
+        try:
+            parsed = float(raw)
+        except (TypeError, ValueError):
+            return None
+        return parsed if math.isfinite(parsed) else None
+
+    direction = str(_global_value(item, "direction") or "").lower()
+    if direction not in {"inflow", "outflow", "up", "down"}:
+        direction = ""
+    return {
+        "metric_id": metric_id,
+        "name": name,
+        "metric_kind": metric_kind,
+        "value": value,
+        "change": optional_number("change"),
+        "change_pct": optional_number("change_pct"),
+        "direction": direction,
+        "source_url": source_url,
+    }
+
+
 def global_market_execution_gate(
     snapshot: Mapping[str, Any] | None,
     *,
@@ -348,20 +443,36 @@ def global_market_execution_gate(
     base: dict[str, Any] = {
         "score": 0,
         "freeze_expansion": False,
+        "freeze_actions": [],
+        "can_trigger_sell": False,
         "data_limited": True,
         "valid_quote_count": 0,
+        "valid_official_metric_count": 0,
+        "quote_quality": "missing",
+        "institutional_flow_quality": "missing",
+        "missing_evidence_groups": [],
         "evidence": [],
         "counter_evidence": [],
     }
     if not isinstance(snapshot, Mapping):
         base["evidence"] = ["外围市场证据缺口：不加分、不扣分，也不据此生成卖出结论。"]
         return base
-    quality = str(snapshot.get("data_quality") or snapshot.get("quality") or "").lower()
-    if quality not in {"ok", "complete", "realtime", "degraded"}:
-        base["evidence"] = ["外围市场数据质量不足：不加分、不扣分，也不据此生成卖出结论。"]
-        return base
+    quote_quality = str(
+        snapshot.get("quote_quality")
+        or snapshot.get("data_quality")
+        or snapshot.get("quality")
+        or "missing"
+    ).lower()
+    institutional_flow_quality = str(
+        snapshot.get("institutional_flow_quality") or "missing"
+    ).lower()
+    base["quote_quality"] = quote_quality
+    base["institutional_flow_quality"] = institutional_flow_quality
+    quote_gate_enabled = quote_quality in {"ok", "complete", "realtime", "degraded"}
 
     def valid_group(key: str, max_age: timedelta) -> list[tuple[float, str]]:
+        if not quote_gate_enabled:
+            return []
         values: list[tuple[float, str]] = []
         for item in list(snapshot.get(key) or []):
             normalized = _valid_global_quote(item, now=current, max_age=max_age)
@@ -376,7 +487,12 @@ def global_market_execution_gate(
     korea = valid_group("korea_indices", korea_age)
     korea_equities = valid_group("korea_equities", korea_age)
     us_sectors = valid_group("us_sector_rank", timedelta(hours=96))
-    base["valid_quote_count"] = len(us) + len(korea) + len(korea_equities) + len(us_sectors)
+    strategic = valid_group("strategic_assets", timedelta(hours=96))
+    macro = valid_group("macro_indicators", timedelta(hours=96))
+    base["valid_quote_count"] = (
+        len(us) + len(korea) + len(korea_equities) + len(us_sectors)
+        + len(strategic) + len(macro)
+    )
 
     score = 0
     evidence: list[str] = []
@@ -400,6 +516,21 @@ def global_market_execution_gate(
 
     score += broad_score("隔夜美股主要指数", us)
     score += broad_score("韩国主要指数", korea)
+
+    if len(strategic) >= 2:
+        average = sum(value for value, _ in strategic) / len(strategic)
+        negative_ratio = sum(value < 0 for value, _ in strategic) / len(strategic)
+        positive_ratio = sum(value > 0 for value, _ in strategic) / len(strategic)
+        if average <= -1.5 and negative_ratio >= 2 / 3:
+            score -= 1
+            evidence.append(
+                f"韩国ETF/美光等战略资产共振偏弱：有效样本{len(strategic)}个，平均{average:+.2f}%。"
+            )
+        elif average >= 1.5 and positive_ratio >= 2 / 3:
+            score += 1
+            counter.append(
+                f"韩国ETF/美光等战略资产共振偏强：有效样本{len(strategic)}个，平均{average:+.2f}%。"
+            )
 
     semiconductor_symbols = {"SOX", "SMH", "SOXX", "005930", "000660"}
     semiconductor: list[tuple[float, str]] = []
@@ -425,22 +556,162 @@ def global_market_execution_gate(
             score += 1
             counter.append(f"海外半导体代理共振偏强：有效样本{len(semiconductor)}个，平均{average:+.2f}%。")
 
+    # Macro price proxies only contribute through an explicit, fresh move.
+    # Missing official rates do not get inferred from US10Y or DXY.
+    macro_by_symbol: dict[str, float] = {}
+    valid_macro_names = {name: value for value, name in macro}
+    for item in list(snapshot.get("macro_indicators") or []):
+        symbol = str(_global_value(item, "symbol") or "").upper()
+        name = str(_global_value(item, "name") or symbol)
+        if name in valid_macro_names:
+            macro_by_symbol[symbol] = valid_macro_names[name]
+    macro_risks: list[str] = []
+    macro_reliefs: list[str] = []
+    thresholds = {"USDKRW": 0.75, "DXY": 0.5, "US10Y": 1.5}
+    for symbol, threshold in thresholds.items():
+        value = macro_by_symbol.get(symbol)
+        if value is None:
+            continue
+        if value >= threshold:
+            macro_risks.append(f"{symbol} {value:+.2f}%")
+        elif value <= -threshold:
+            macro_reliefs.append(f"{symbol} {value:+.2f}%")
+    if len(macro_risks) >= 2:
+        score -= 1
+        evidence.append(f"汇率/美元/利率代理共振收紧：{'、'.join(macro_risks)}。")
+    elif len(macro_reliefs) >= 2:
+        score += 1
+        counter.append(f"汇率/美元/利率代理共振缓和：{'、'.join(macro_reliefs)}。")
+
+    metric_groups = {
+        "ETF真实份额申赎": ("etf_flows", "etf_share_creation_redemption"),
+        "韩国外资净买卖": ("korea_foreign_flows", "korea_foreign_net_flow"),
+        "韩国单股杠杆产品": ("korea_leverage_products", "korea_single_stock_leverage_product"),
+        "韩国官方利率": ("official_rates", "official_interest_rate"),
+    }
+    valid_metrics_by_label: dict[str, list[dict[str, Any]]] = {}
+    for label, (key, expected_kind) in metric_groups.items():
+        valid_metrics = [
+            normalized
+            for item in list(snapshot.get(key) or [])
+            if (normalized := _valid_global_metric(
+                item,
+                now=current,
+                max_age=timedelta(hours=120),
+                expected_kind=expected_kind,
+            )) is not None
+        ]
+        valid_metrics_by_label[label] = valid_metrics
+        if not valid_metrics:
+            base["missing_evidence_groups"].append(label)
+    base["valid_official_metric_count"] = sum(
+        len(values) for values in valid_metrics_by_label.values()
+    )
+
+    official_risks: list[str] = []
+    official_reliefs: list[str] = []
+    for label, metrics in valid_metrics_by_label.items():
+        group_risk = False
+        group_relief = False
+        for metric in metrics:
+            kind = metric["metric_kind"]
+            direction = metric["direction"]
+            value = metric["value"]
+            change = metric["change"]
+            change_pct = metric["change_pct"]
+            delta = change_pct if change_pct is not None else change
+            if kind == "korea_foreign_net_flow":
+                group_risk = group_risk or direction == "outflow" or value < 0
+                group_relief = group_relief or direction == "inflow" or value > 0
+            elif kind == "etf_share_creation_redemption":
+                # A total shares-outstanding level has no direction.  Only an
+                # explicit creation/redemption direction or change is usable.
+                group_risk = group_risk or direction == "outflow" or (delta is not None and delta < 0)
+                group_relief = group_relief or direction == "inflow" or (delta is not None and delta > 0)
+            elif kind in {"korea_single_stock_leverage_product", "official_interest_rate"}:
+                group_risk = group_risk or direction == "up" or (delta is not None and delta > 0)
+                group_relief = group_relief or direction == "down" or (delta is not None and delta < 0)
+        if group_risk and not group_relief:
+            official_risks.append(label)
+        elif group_relief and not group_risk:
+            official_reliefs.append(label)
+    if len(official_risks) >= 2:
+        score -= 2
+        evidence.append(f"可审计机构/杠杆证据共振偏弱：{'、'.join(official_risks)}。")
+    elif len(official_risks) == 1:
+        score -= 1
+        evidence.append(f"可审计机构/杠杆证据出现单项风险：{official_risks[0]}，等待独立证据确认。")
+    if len(official_reliefs) >= 2:
+        score += 1
+        counter.append(f"可审计机构/宏观证据边际缓和：{'、'.join(official_reliefs)}。")
+
     score = max(-3, min(3, score))
+    freeze_expansion = score <= -2
     base.update({
         "score": score,
-        "freeze_expansion": score <= -2,
-        "data_limited": not (len(us) >= 2 or len(korea) >= 2),
+        "freeze_expansion": freeze_expansion,
+        "freeze_actions": ["追高", "补仓", "做T回补"] if freeze_expansion else [],
+        "data_limited": bool(base["missing_evidence_groups"]) or not (
+            len(us) >= 2 or len(korea) >= 2
+        ),
         "evidence": evidence,
         "counter_evidence": counter,
     })
-    if base["valid_quote_count"] == 0:
-        base["evidence"] = ["外围行情均缺少有效时间戳、已过期或不可用：本次不参与执行门控。"]
+    if base["valid_quote_count"] == 0 and base["valid_official_metric_count"] == 0:
+        base["evidence"] = [
+            "外围行情与官方资金指标均缺少有效时间戳、已过期或不可用："
+            "本次不参与执行门控，也不据此生成卖出结论。"
+        ]
+    elif base["missing_evidence_groups"]:
+        base["counter_evidence"].append(
+            "以下证据缺失并保持未知，未按零值或利好处理："
+            f"{'、'.join(base['missing_evidence_groups'])}。"
+        )
     return base
 
 
-def _load_global_market_snapshot(*, force_refresh: bool = False) -> Mapping[str, Any] | None:
+def _load_global_market_snapshot(
+    *,
+    force_refresh: bool = False,
+    db: Session | None = None,
+) -> Mapping[str, Any] | None:
     try:
-        return global_market_service.snapshot(force_refresh=force_refresh)
+        if force_refresh:
+            return global_market_service.snapshot(force_refresh=True)
+        cached = global_market_service.read_cached_snapshot()
+        quote_keys = (
+            "korea_indices",
+            "korea_equities",
+            "us_indices",
+            "us_sector_rank",
+            "strategic_assets",
+            "macro_indicators",
+        )
+        metric_keys = (
+            "etf_flows",
+            "korea_foreign_flows",
+            "korea_leverage_products",
+            "official_rates",
+        )
+        has_evidence = any(
+            str(_global_value(item, "status") or "").lower() in {"ok", "delayed"}
+            for key in quote_keys
+            for item in list(cached.get(key) or [])
+        ) or any(
+            str(_global_value(item, "status") or "").lower() == "ok"
+            for key in metric_keys
+            for item in list(cached.get(key) or [])
+        )
+        if db is None:
+            return cached
+        persisted = load_latest_global_evidence_snapshot(db)
+        if persisted is None:
+            return cached
+        if not has_evidence:
+            return persisted
+        if global_evidence_recency_key(persisted) > global_evidence_recency_key(cached):
+            return persisted
+        return cached
     except Exception:
         return None
 
@@ -1809,7 +2080,10 @@ def build_position_execution_state(
         )
         if global_gate["freeze_expansion"]:
             market_expansion_frozen = True
-            invalid_conditions.append("外围主要指数出现新鲜且一致的显著弱势时，暂停加仓、抄底和做T买回。")
+            invalid_conditions.append(
+                "外围行情、战略资产、宏观代理或可审计机构资金形成弱势共振时，"
+                "暂停追高、补仓和做T买回；该闸门绝不单独产生卖出指令。"
+            )
             recovery_conditions.append("外围冻结解除后，仍需A股市场、所属板块与个股量价共同确认，才恢复扩仓评估。")
     sector_distribution = _cached_sector_distribution_context(seesaw)
     distribution_state = str(sector_distribution.get("distribution_state") or "")
@@ -1850,7 +2124,7 @@ def build_position_execution_state(
         evidence.append(
             f"板块观察信号：{sector_distribution.get('name') or '所属板块'}处于{distribution_state}；证据尚未闭环，暂停追高并等待资金和价格响应复核。"
         )
-    elif distribution_state in {"健康", "资金承载健康"}:
+    elif distribution_state in {"健康", "资金承载健康", "健康增量"}:
         counter_evidence.append(
             f"板块反证：{sector_distribution.get('name') or '所属板块'}资金与价格响应仍属健康，尚未形成派发联合证据。"
         )
@@ -2871,7 +3145,11 @@ def read_persisted_execution_states(
 
 def build_execution_states(db: Session, holdings: list[Holding], force_refresh: bool = False) -> list[PositionExecutionStateOut]:
     quotes = _latest_quotes(holdings)
-    global_cues = _load_global_market_snapshot(force_refresh=force_refresh) if holdings else None
+    global_cues = (
+        _load_global_market_snapshot(force_refresh=force_refresh, db=db)
+        if holdings
+        else None
+    )
     seesaw_by_code: dict[str, Any] = {}
     try:
         seesaw = _market_seesaw_monitor(holdings, force_refresh=force_refresh)

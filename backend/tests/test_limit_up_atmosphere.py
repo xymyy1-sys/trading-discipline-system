@@ -264,6 +264,12 @@ def test_limit_up_atmosphere_uses_real_pool_and_premium_samples(monkeypatch):
     assert theme.first_board_count == 1
     assert theme.second_board_count == 1
     assert theme.high_board_count == 1
+    assert theme.broken_count == 0
+    assert theme.seal_rate == 100
+    assert theme.break_rate == 0
+    assert theme.previous_limit_up_count == 2
+    assert theme.promoted_count == 2
+    assert theme.promotion_rate == 100
     assert theme.completeness_label == "多层梯队已成形"
     assert theme.action.startswith("允许观察前排")
     assert theme.mainline_level == "核心主线"
@@ -272,6 +278,65 @@ def test_limit_up_atmosphere_uses_real_pool_and_premium_samples(monkeypatch):
     assert theme.identity_roles[0].max_position_ratio == 0.1
     assert any("龙头候选" in item.roles for item in theme.identity_roles)
     assert "不代表已知主力意图" in result.role_disclaimer
+
+
+def test_theme_ladder_uses_exact_real_pool_membership_for_promotion_and_break_rate():
+    provider = MarketDataProvider()
+    ladder = _ladder()
+    current = [stock for group in ladder.groups for stock in group.stocks]
+
+    exact_broken = _stock("600090", "半导体炸板", 1)
+    false_broken = _stock("600091", "设备炸板", 1)
+    false_broken.industry = "半导体设备"
+    false_broken.concepts = ["半导体设备"]
+
+    previous_promoted = _stock("600001", "测试一", 3)
+    previous_not_promoted = _stock("600003", "测试三", 1)
+    false_previous = _stock("600099", "设备昨日涨停", 1)
+    false_previous.industry = "半导体设备"
+    false_previous.concepts = ["半导体设备"]
+
+    theme = provider._build_limit_up_theme_ladders(
+        ladder=ladder,
+        stocks=current,
+        broken_stocks=[exact_broken, false_broken],
+        previous_stocks=[previous_promoted, previous_not_promoted, false_previous],
+        atmosphere_decision="CAUTION",
+        theme_radar=_theme_radar(),
+    )[0]
+
+    assert theme.name == "半导体"
+    assert theme.limit_up_count == 3
+    assert theme.broken_count == 1
+    assert theme.seal_rate == 75
+    assert theme.break_rate == 25
+    assert theme.previous_limit_up_count == 2
+    assert theme.promoted_count == 1
+    assert theme.promotion_rate == 50
+    assert any("真实炸板池1只" in value for value in theme.evidence)
+    assert any("今日晋级1只" in value for value in theme.evidence)
+
+
+def test_theme_ladder_keeps_cross_day_and_break_metrics_null_when_pools_missing():
+    provider = MarketDataProvider()
+    ladder = _ladder()
+    current = [stock for group in ladder.groups for stock in group.stocks]
+
+    theme = provider._build_limit_up_theme_ladders(
+        ladder=ladder,
+        stocks=current,
+        broken_stocks=None,
+        previous_stocks=None,
+        atmosphere_decision="CAUTION",
+        theme_radar=_theme_radar(),
+    )[0]
+
+    assert theme.broken_count is None
+    assert theme.seal_rate is None
+    assert theme.break_rate is None
+    assert theme.previous_limit_up_count is None
+    assert theme.promoted_count is None
+    assert theme.promotion_rate is None
 
 
 def test_limit_up_atmosphere_never_allows_when_historical_quotes_are_missing(monkeypatch):

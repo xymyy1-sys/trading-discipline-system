@@ -80,6 +80,77 @@ bash scripts/server_upgrade.sh
 BASE_URL=https://trade.example.com AUTH_USERNAME=admin AUTH_PASSWORD='你的密码' bash scripts/production_smoke.sh
 ```
 
+## 可审计资金与跨市场适配器
+
+板块六态模型不会把东方财富“主力资金”等订单方向估算冒充为非杠杆资金，也不会用价格涨跌反推出 ETF 真实申赎、韩国外资或杠杆产品规模。未配置授权数据源时，对应指标显示“数据不足”，且不参与高风险确认。
+
+板块非杠杆资金适配器配置：
+
+```dotenv
+SECTOR_AUDITED_FLOW_URL=https://licensed-provider.example/sector-flow
+SECTOR_AUDITED_FLOW_TOKEN_FILE=/run/secrets/sector-flow-token
+```
+
+服务端会以 `GET ?trade_date=YYYY-MM-DD` 请求该地址，并携带 Bearer Token。返回值必须与请求交易日一致，且每条记录至少包含：
+
+```json
+{
+  "trade_date": "2026-07-21",
+  "data_quality": "audited",
+  "items": [
+    {
+      "board_name": "半导体",
+      "board_code": "BK1036",
+      "non_leveraged_net_inflow": 12.34,
+      "non_leveraged_net_inflow_unit": "亿元",
+      "methodology_id": "licensed-sector-flow-v1",
+      "new_high_count": 18,
+      "constituent_count": 120,
+      "new_high_window": 20,
+      "etf_share_net_change": 3200000,
+      "etf_share_change_pct": 1.25,
+      "etf_id": "510300",
+      "etf_share_unit": "份",
+      "etf_share_base": 256000000,
+      "etf_methodology_id": "official-etf-shares-v1",
+      "source": "授权供应商",
+      "source_url": "https://licensed-provider.example/evidence/123",
+      "published_at": "2026-07-21T15:30:00+08:00"
+    }
+  ]
+}
+```
+
+`non_leveraged_net_inflow` 是必填的可审计非杠杆净流入，必须显式以 `non_leveraged_net_inflow_unit=亿元` 声明单位，并提供可追踪口径版本的 `methodology_id`；不能用东方财富订单方向估算替代。其余字段为可选证据，但必须遵守成组契约：
+
+- `new_high_count` 与 `constituent_count` 必须同时提供，且 `new_high_window` 必须为 20；前者不能大于后者。
+- ETF 证据必须同时提供 `etf_id`、`etf_share_net_change`、`etf_share_change_pct`、`etf_share_unit=份`、正数 `etf_share_base` 与 `etf_methodology_id`。系统会校验净变化、基准份额与变化率的一致性；不得使用 ETF 价格、成交额或订单流估算替代。
+- 未取得任一可选证据时省略字段或返回空值；系统保持“数据不足”，不会按 0 写入，也不会让缺失证据参与六态高风险确认。
+
+接口必须使用 HTTPS；来源链接也必须是无嵌入凭据的 HTTPS；`published_at` 或 `observed_at` 必须带时区，换算上海时间后必须等于请求交易日，不能晚于服务器时间或超过 36 小时；`data_quality` 只能明确标记为 `audited`、`official` 或 `official_audited`。任一记录跨日、过期、重复、缺少溯源、字段只提供一半或契约不合格时，整批数据会被拒绝，避免部分旧数据混入模型。只有交易日一致且板块名称或代码精确匹配的记录才会合并；未匹配板块继续保持空值。
+
+六态审计接口：
+
+- `GET /api/market/sector-temperature/history?scope=daily`：按交易日保存的兼容汇总。
+- `GET /api/market/sector-temperature/history?scope=intraday`：不可变的盘中事实样本。
+- `GET /api/market/sector-temperature/history?scope=evolution`：严格六态的连续采样/跨交易日确认路径。
+
+可使用 `board_type`、`board_code`、`board_name`、`start_date`、`end_date` 和 `limit` 缩小审计范围。刷新时间本身不会制造新事实样本；盘中持续性确认默认要求有效样本至少间隔 5 分钟。
+
+跨市场授权适配器配置：
+
+```dotenv
+GLOBAL_ETF_FLOW_URL=https://licensed-provider.example/etf-flow
+GLOBAL_KOREA_FOREIGN_FLOW_URL=https://licensed-provider.example/korea-foreign-flow
+GLOBAL_KOREA_LEVERAGE_URL=https://licensed-provider.example/korea-leverage
+GLOBAL_KOREA_RATE_URL=https://official-provider.example/korea-rate
+GLOBAL_OFFICIAL_ADAPTER_TOKEN=服务端令牌
+```
+
+每个接口返回 JSON 数组，或含 `items` / `data` / `records` 的对象。每项必须至少包含 `metric_id`、`name`、`value`、`source`、`published_at`、`source_url` 和 `data_quality`，可选 `unit`、`direction`、`change_pct`、`related_a_share_sectors`。`data_quality` 只能是 `audited`、`official` 或 `official_audited`；`published_at` 必须带时区、不得晚于采集时间且不得超过 120 小时；`source_url` 必须是无嵌入账号密码的 HTTPS。指标类别由所配置的接口固定，返回记录中的 `metric_kind` 无权覆盖。没有真实份额申赎、外资净买卖或杠杆产品规模时必须保持空值，禁止用 ETF 价格、成交额或指数涨跌替代。
+
+密钥只放服务器 `.env` 或只读 Secret 文件，不写入 GitHub。升级后需执行数据库迁移；板块盘中状态和跨市场证据会保存为不可变快照，供持续性确认和重启后的审计读取。
+
 ## HTTPS 与防火墙
 
 应用容器不负责签发公网证书。建议将域名解析到服务器，并由宿主机反向代理自动签发 Let's Encrypt 证书。没有域名时可先使用云厂商 HTTPS 负载均衡；不要为了 `Secure` Cookie 使用自签名证书给普通浏览器访问。

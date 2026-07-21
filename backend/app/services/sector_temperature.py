@@ -37,6 +37,19 @@ def _optional_int(value: Any) -> int | None:
     return int(number) if number is not None else None
 
 
+def _optional_bool(value: Any) -> bool | None:
+    if value is None or value == "":
+        return None
+    if isinstance(value, bool):
+        return value
+    normalized = str(value).strip().lower()
+    if normalized in {"1", "true", "yes", "y", "是"}:
+        return True
+    if normalized in {"0", "false", "no", "n", "否"}:
+        return False
+    return None
+
+
 def _clamp(value: float, low: float = 0.0, high: float = 100.0) -> float:
     return max(low, min(high, value))
 
@@ -209,42 +222,332 @@ def _margin_fields(margin: Any) -> dict[str, Any]:
     if margin is None:
         return {
             "financing_balance": None,
+            "financing_buy": None,
+            "financing_reference_turnover": None,
+            "financing_turnover_as_of": "",
             "financing_net_buy": None,
             "financing_balance_ratio": None,
             "financing_net_buy_5d": None,
             "financing_net_buy_10d": None,
             "financing_net_buy_20d": None,
+            "financing_net_buy_slope_5d": None,
+            "financing_net_buy_slope_10d": None,
+            "financing_net_buy_slope_20d": None,
+            "financing_balance_ratio_percentile_60d": None,
+            "financing_balance_ratio_percentile_120d": None,
+            "margin_history_sample_count": 0,
+            "margin_history_degraded": True,
+            "margin_history_sequence_complete": False,
+            "margin_history_method": "",
             "margin_as_of": "",
             "margin_realtime": False,
             "margin_score": None,
         }
     balance = _optional_float(_value(margin, "financing_balance"))
+    financing_buy = _optional_float(_value(margin, "financing_buy"))
+    financing_reference_turnover = _optional_float(_value(
+        margin,
+        "financing_reference_turnover",
+        "reference_turnover_amount",
+    ))
+    financing_turnover_as_of = str(_value(
+        margin,
+        "financing_turnover_as_of",
+        "reference_turnover_as_of",
+        default="",
+    ) or "")[:10]
     net_buy = _optional_float(_value(margin, "financing_net_buy"))
     balance_ratio = _optional_float(_value(margin, "financing_balance_ratio"))
     net_buy_5d = _optional_float(_value(margin, "net_buy_5d", "financing_net_buy_5d"))
     net_buy_10d = _optional_float(_value(margin, "net_buy_10d", "financing_net_buy_10d"))
     net_buy_20d = _optional_float(_value(margin, "net_buy_20d", "financing_net_buy_20d"))
+    slope_5d = _optional_float(_value(margin, "financing_net_buy_slope_5d"))
+    slope_10d = _optional_float(_value(margin, "financing_net_buy_slope_10d"))
+    slope_20d = _optional_float(_value(margin, "financing_net_buy_slope_20d"))
+    percentile_60d = _optional_float(_value(margin, "financing_balance_ratio_percentile_60d"))
+    percentile_120d = _optional_float(_value(margin, "financing_balance_ratio_percentile_120d"))
+    history_sample_count = _optional_int(_value(margin, "margin_history_sample_count", default=0)) or 0
+    history_degraded = bool(_optional_bool(_value(
+        margin,
+        "margin_history_degraded",
+        default=True,
+    )))
+    history_sequence_complete = bool(_optional_bool(_value(
+        margin,
+        "margin_history_sequence_complete",
+        default=False,
+    )))
     margin_score = _weighted(
         (
-            (_scaled(balance_ratio, 0.0, 10.0), 0.30),
-            (_smooth_flow_score(net_buy, 8.0), 0.15),
-            (_smooth_flow_score(net_buy_5d, 30.0), 0.20),
-            (_smooth_flow_score(net_buy_10d, 60.0), 0.20),
-            (_smooth_flow_score(net_buy_20d, 100.0), 0.15),
+            (_scaled(percentile_120d, 0.0, 100.0), 0.30),
+            (_scaled(percentile_60d, 0.0, 100.0), 0.20),
+            (_scaled(balance_ratio, 0.0, 10.0), 0.15),
+            (_smooth_flow_score(slope_5d, 1.0), 0.15),
+            (_smooth_flow_score(slope_10d, 0.6), 0.10),
+            (_smooth_flow_score(slope_20d, 0.3), 0.10),
         )
-    ) if any(value is not None for value in (balance_ratio, net_buy, net_buy_5d, net_buy_10d, net_buy_20d)) else None
+    ) if any(value is not None for value in (
+        balance_ratio,
+        percentile_60d,
+        percentile_120d,
+        slope_5d,
+        slope_10d,
+        slope_20d,
+    )) else None
     return {
         "financing_balance": _round_optional(balance),
+        "financing_buy": _round_optional(financing_buy),
+        "financing_reference_turnover": _round_optional(financing_reference_turnover, 4),
+        "financing_turnover_as_of": financing_turnover_as_of,
         "financing_net_buy": _round_optional(net_buy),
         "financing_balance_ratio": _round_optional(balance_ratio, 3),
         "financing_net_buy_5d": _round_optional(net_buy_5d),
         "financing_net_buy_10d": _round_optional(net_buy_10d),
         "financing_net_buy_20d": _round_optional(net_buy_20d),
+        "financing_net_buy_slope_5d": _round_optional(slope_5d, 4),
+        "financing_net_buy_slope_10d": _round_optional(slope_10d, 4),
+        "financing_net_buy_slope_20d": _round_optional(slope_20d, 4),
+        "financing_balance_ratio_percentile_60d": _round_optional(percentile_60d),
+        "financing_balance_ratio_percentile_120d": _round_optional(percentile_120d),
+        "margin_history_sample_count": history_sample_count,
+        "margin_history_degraded": history_degraded,
+        "margin_history_sequence_complete": history_sequence_complete,
+        "margin_history_method": str(_value(margin, "margin_history_method", default="") or ""),
         "margin_as_of": str(_value(margin, "as_of", "trade_date", default="") or "")[:10],
         # Even if an upstream field incorrectly says true, this public disclosure
         # must never be presented by this model as an intraday signal.
         "margin_realtime": False,
         "margin_score": _round_optional(margin_score),
+    }
+
+
+def _structure_fields(current: Any, change: float | None) -> dict[str, Any]:
+    turnover_amount = _optional_float(_value(
+        current,
+        "turnover_amount",
+        "board_turnover_amount",
+        "amount",
+    ))
+    leader_change = _optional_float(_value(
+        current,
+        "leader_change_pct",
+        "leading_stock_change_pct",
+    ))
+    leader_divergence = (
+        leader_change - change
+        if leader_change is not None and change is not None
+        else None
+    )
+    up_count = _optional_int(_value(current, "up_count", "advance_count"))
+    down_count = _optional_int(_value(current, "down_count", "decline_count"))
+    flat_count = _optional_int(_value(current, "flat_count", default=0))
+    declared_stock_count = _optional_int(_value(current, "stock_count", "constituent_count"))
+    observed_count = (
+        up_count + down_count + (flat_count or 0)
+        if up_count is not None and down_count is not None
+        else None
+    )
+    stock_count = declared_stock_count or observed_count
+    advance_ratio = (
+        up_count / observed_count * 100
+        if up_count is not None and observed_count is not None and observed_count > 0
+        else None
+    )
+    new_high_count = _optional_int(_value(
+        current,
+        "new_high_count",
+        "high_20d_count",
+        "constituent_new_high_count",
+    ))
+    new_high_ratio = (
+        new_high_count / stock_count * 100
+        if new_high_count is not None and stock_count is not None and stock_count > 0
+        else None
+    )
+    promotion_rate = _optional_float(_value(
+        current,
+        "promotion_rate",
+        "limit_up_promotion_rate",
+    ))
+    break_rate = _optional_float(_value(
+        current,
+        "break_rate",
+        "limit_up_break_rate",
+        "broken_board_rate",
+    ))
+    sector_price = _optional_float(_value(current, "sector_price", "latest"))
+    sector_vwap = _optional_float(_value(current, "sector_vwap", "vwap"))
+    vwap_reliable = bool(_optional_bool(_value(current, "sector_vwap_reliable", "vwap_reliable")))
+    below_vwap = (
+        sector_price < sector_vwap
+        if vwap_reliable and sector_price is not None and sector_vwap is not None and sector_vwap > 0
+        else None
+    )
+    return {
+        "sector_turnover_amount": _round_optional(turnover_amount, 4),
+        "sector_turnover_complete": bool(_optional_bool(_value(
+            current,
+            "turnover_complete",
+            "sector_turnover_complete",
+            "session_complete",
+            default=False,
+        ))),
+        "leader_change_pct": _round_optional(leader_change),
+        "leader_divergence_pct": _round_optional(leader_divergence),
+        "advance_count": up_count,
+        "decline_count": down_count,
+        "constituent_count": stock_count,
+        "advance_ratio": _round_optional(advance_ratio),
+        "new_high_count": new_high_count,
+        "new_high_ratio": _round_optional(new_high_ratio),
+        "promotion_rate": _round_optional(promotion_rate),
+        "break_rate": _round_optional(break_rate),
+        "sector_price": _round_optional(sector_price, 4),
+        "sector_vwap": _round_optional(sector_vwap, 4),
+        "sector_vwap_reliable": vwap_reliable,
+        "sector_below_vwap": below_vwap,
+    }
+
+
+def _financing_turnover_metrics(
+    margin_fields: Mapping[str, Any],
+    structure_fields: Mapping[str, Any],
+    provider_trade_date: str,
+) -> tuple[float | None, bool, str]:
+    """Return a descriptive, same-date financing-buy/turnover ratio.
+
+    This metric is independent from intraday freshness.  A stale current board
+    quote must not erase a valid archived T+1 ratio whose numerator and
+    denominator are both from the same completed disclosure date.
+    """
+
+    financing_buy = _optional_float(margin_fields.get("financing_buy"))
+    current_turnover_amount = _optional_float(
+        structure_fields.get("sector_turnover_amount")
+    )
+    margin_as_of = str(margin_fields.get("margin_as_of") or "")[:10]
+    reference_turnover_amount = _optional_float(
+        margin_fields.get("financing_reference_turnover")
+    )
+    reference_turnover_as_of = str(
+        margin_fields.get("financing_turnover_as_of") or ""
+    )[:10]
+    if reference_turnover_amount is not None:
+        turnover_amount = reference_turnover_amount
+        turnover_as_of = reference_turnover_as_of
+    else:
+        turnover_amount = (
+            current_turnover_amount
+            if bool(structure_fields.get("sector_turnover_complete"))
+            else None
+        )
+        turnover_as_of = provider_trade_date
+    aligned = bool(
+        financing_buy is not None
+        and turnover_amount is not None
+        and turnover_amount > 0
+        and margin_as_of
+        and turnover_as_of
+        and margin_as_of == turnover_as_of
+    )
+    ratio = financing_buy / turnover_amount * 100 if aligned else None
+    return _round_optional(ratio), aligned, turnover_as_of
+
+
+def _persistence_fields(persistence: Any) -> dict[str, Any]:
+    if persistence is None:
+        return {
+            "strict_state": "",
+            "confirmed_state": "",
+            "persistence_state": "",
+            "sample_confirmation_count": 0,
+            "trading_day_confirmation_count": 0,
+            "persistence_confirmed": False,
+            "persistence_basis": [],
+            "last_sample_at": None,
+            "last_trade_date": None,
+            "recent_state_samples": [],
+            "sample_confirmation_min_interval_seconds": 300,
+            "capital_price_carrying_efficiency": None,
+            "capital_price_carrying_sample_count": 0,
+            "capital_price_carrying_span_minutes": None,
+            "capital_price_carrying_slope": None,
+            "capital_price_carrying_method": "immutable_intraday_delta_rolling",
+        }
+    basis = _value(persistence, "confirmation_basis", "persistence_basis", default=[])
+    if not isinstance(basis, list):
+        basis = []
+    sample_count = _optional_int(_value(
+        persistence,
+        "sample_confirmation_count",
+        "sample_count",
+        default=0,
+    )) or 0
+    day_count = _optional_int(_value(
+        persistence,
+        "trading_day_confirmation_count",
+        "trading_day_count",
+        default=0,
+    )) or 0
+    confirmed = bool(
+        _optional_bool(_value(persistence, "persistence_confirmed"))
+        or sample_count >= 2
+        or day_count >= 2
+    )
+    strict_state = str(_value(
+        persistence,
+        "strict_state",
+        "distribution_state",
+        "state",
+        default="",
+    ) or "")
+    recent_samples = _value(
+        persistence,
+        "samples",
+        "recent_samples",
+        "recent_state_samples",
+        default=[],
+    )
+    if not isinstance(recent_samples, list):
+        recent_samples = []
+    return {
+        "strict_state": strict_state,
+        "confirmed_state": strict_state if confirmed else "",
+        "persistence_state": strict_state,
+        "sample_confirmation_count": sample_count,
+        "trading_day_confirmation_count": day_count,
+        "persistence_confirmed": confirmed,
+        "persistence_basis": [str(item) for item in basis if str(item).strip()],
+        "last_sample_at": _value(persistence, "data_as_of", "last_sample_at"),
+        "last_trade_date": str(_value(persistence, "last_trade_date", default="") or "")[:10] or None,
+        "recent_state_samples": recent_samples[-8:],
+        "sample_confirmation_min_interval_seconds": _optional_int(_value(
+            persistence,
+            "sample_confirmation_min_interval_seconds",
+            default=300,
+        )) or 300,
+        "capital_price_carrying_efficiency": _round_optional(_optional_float(_value(
+            persistence,
+            "capital_price_carrying_efficiency",
+        ))),
+        "capital_price_carrying_sample_count": _optional_int(_value(
+            persistence,
+            "capital_price_carrying_sample_count",
+            default=0,
+        )) or 0,
+        "capital_price_carrying_span_minutes": _round_optional(_optional_float(_value(
+            persistence,
+            "capital_price_carrying_span_minutes",
+        ))),
+        "capital_price_carrying_slope": _round_optional(_optional_float(_value(
+            persistence,
+            "capital_price_carrying_slope",
+        )), 4),
+        "capital_price_carrying_method": str(_value(
+            persistence,
+            "capital_price_carrying_method",
+            default="immutable_intraday_delta_rolling",
+        ) or "immutable_intraday_delta_rolling"),
     }
 
 
@@ -259,7 +562,19 @@ def _distribution_assessment(
     speed: float | None,
     acceleration: float | None,
     turning: str,
+    flow_ratio: float | None,
+    flow_ratio_5d: float | None,
+    flow_ratio_10d: float | None,
+    structure_fields: Mapping[str, Any],
     margin_fields: Mapping[str, Any],
+    persistence_fields: Mapping[str, Any],
+    provider_trade_date: str,
+    provider_updated_at: str,
+    non_leveraged_net_inflow: float | None,
+    non_leveraged_flow_audited: bool,
+    etf_share_net_change: float | None,
+    etf_share_change_pct: float | None,
+    etf_flow_audited: bool,
     data_quality: str,
 ) -> dict[str, Any]:
     """Assess cash-flow carrying capacity versus the T+1 leverage slow variable.
@@ -274,6 +589,28 @@ def _distribution_assessment(
     flow_window_count = sum(value is not None for value in (current_net, net_5d, net_10d))
     evidence: list[str] = []
     counter_evidence: list[str] = []
+    (
+        financing_buy_turnover_ratio,
+        financing_turnover_date_aligned,
+        turnover_as_of,
+    ) = _financing_turnover_metrics(
+        margin_fields,
+        structure_fields,
+        provider_trade_date,
+    )
+    carrying_efficiency = _optional_float(
+        persistence_fields.get("capital_price_carrying_efficiency")
+    )
+    carrying_sample_count = int(
+        _optional_int(persistence_fields.get("capital_price_carrying_sample_count"))
+        or 0
+    )
+    carrying_span_minutes = _optional_float(
+        persistence_fields.get("capital_price_carrying_span_minutes")
+    )
+    carrying_slope = _optional_float(
+        persistence_fields.get("capital_price_carrying_slope")
+    )
 
     if price_window_count < 2 or flow_window_count < 2 or data_quality in {"missing", "limited", "stale"}:
         if price_window_count < 2:
@@ -284,12 +621,35 @@ def _distribution_assessment(
             counter_evidence.append("当日板块快照已过期，不生成当前派发或踩踏结论。")
         return {
             "distribution_state": "数据不足",
+            "instantaneous_distribution_state": "数据不足",
             "distribution_risk_level": "UNKNOWN",
             "distribution_risk_score": 0,
             "order_flow_exhausted": False,
             "leverage_crowding": False,
             "price_response_weak": False,
             "distribution_confirmation_count": 0,
+            "capital_price_carrying_efficiency": carrying_efficiency,
+            "capital_price_carrying_sample_count": carrying_sample_count,
+            "capital_price_carrying_span_minutes": carrying_span_minutes,
+            "capital_price_carrying_slope": carrying_slope,
+            "financing_buy_turnover_ratio": financing_buy_turnover_ratio,
+            "financing_turnover_date_aligned": financing_turnover_date_aligned,
+            "non_leveraged_net_inflow": (
+                _round_optional(non_leveraged_net_inflow)
+                if non_leveraged_flow_audited else None
+            ),
+            "non_leveraged_flow_audited": non_leveraged_flow_audited,
+            "etf_share_net_change": (
+                _round_optional(etf_share_net_change)
+                if etf_flow_audited else None
+            ),
+            "etf_share_change_pct": (
+                _round_optional(etf_share_change_pct, 4)
+                if etf_flow_audited else None
+            ),
+            "etf_flow_audited": etf_flow_audited,
+            **dict(persistence_fields),
+            "strict_state": "数据不足",
             "distribution_evidence": evidence,
             "distribution_counter_evidence": counter_evidence,
             "distribution_actions": ["补齐至少2个价格与订单流方向窗口后再判断，不据此交易。"],
@@ -389,7 +749,17 @@ def _distribution_assessment(
         flow_rollover and change is not None and change <= -0.8,
     ]
     weak_response_count = sum(bool(value) for value in weak_response_signals)
-    price_response_weak = weak_response_count > 0
+    price_response_weak = bool(
+        weak_response_count > 0
+        or (
+            carrying_efficiency is not None
+            and carrying_sample_count > 0
+            and carrying_efficiency <= 40
+        )
+    )
+
+    financing_buy = _optional_float(margin_fields.get("financing_buy"))
+    margin_as_of = str(margin_fields.get("margin_as_of") or "")[:10]
 
     financing_values = [
         _optional_float(margin_fields.get("financing_net_buy")),
@@ -401,19 +771,53 @@ def _distribution_assessment(
     positive_financing_count = sum(value > 0 for value in financing_present)
     negative_financing_count = sum(value < 0 for value in financing_present)
     financing_ratio = _optional_float(margin_fields.get("financing_balance_ratio"))
-    leverage_data_count = len(financing_present) + int(financing_ratio is not None)
+    financing_slopes = [
+        _optional_float(margin_fields.get("financing_net_buy_slope_5d")),
+        _optional_float(margin_fields.get("financing_net_buy_slope_10d")),
+        _optional_float(margin_fields.get("financing_net_buy_slope_20d")),
+    ]
+    slope_present = [value for value in financing_slopes if value is not None]
+    positive_slope_count = sum(value > 0 for value in slope_present)
+    negative_slope_count = sum(value < 0 for value in slope_present)
+    percentile_60d = _optional_float(
+        margin_fields.get("financing_balance_ratio_percentile_60d")
+    )
+    percentile_120d = _optional_float(
+        margin_fields.get("financing_balance_ratio_percentile_120d")
+    )
+    leverage_data_count = (
+        len(financing_present)
+        + len(slope_present)
+        + int(financing_ratio is not None)
+        + int(percentile_60d is not None)
+        + int(percentile_120d is not None)
+        + int(financing_buy_turnover_ratio is not None)
+    )
     leverage_crowding = bool(
         leverage_data_count >= 2
         and (
-            (financing_ratio is not None and financing_ratio >= 8.0)
+            (percentile_120d is not None and percentile_120d >= 85)
+            or (percentile_60d is not None and percentile_60d >= 90)
+            or (
+                financing_ratio is not None
+                and financing_ratio >= 8.0
+                and (positive_slope_count >= 1 or positive_financing_count >= 2)
+            )
+            or (
+                financing_buy_turnover_ratio is not None
+                and financing_buy_turnover_ratio >= 12
+                and positive_slope_count >= 1
+            )
             or positive_financing_count >= 3
         )
     )
     deleveraging = bool(
-        len(financing_present) >= 2
-        and negative_financing_count >= 2
-        and financing_values[0] is not None
+        financing_values[0] is not None
         and financing_values[0] < 0
+        and (
+            negative_slope_count >= 2
+            or (len(financing_present) >= 2 and negative_financing_count >= 2)
+        )
     )
     negative_price = bool(
         (change is not None and change <= -1.0)
@@ -430,6 +834,40 @@ def _distribution_assessment(
             or (net_10d is not None and net_10d < 0)
         )
     )
+
+    leader_divergence = _optional_float(structure_fields.get("leader_divergence_pct"))
+    advance_ratio = _optional_float(structure_fields.get("advance_ratio"))
+    new_high_ratio = _optional_float(structure_fields.get("new_high_ratio"))
+    promotion_rate = _optional_float(structure_fields.get("promotion_rate"))
+    break_rate = _optional_float(structure_fields.get("break_rate"))
+    below_vwap = _optional_bool(structure_fields.get("sector_below_vwap"))
+    structure_signals = {
+        "龙头弱于板块": leader_divergence is not None and leader_divergence <= -2.0,
+        "上涨广度收缩": advance_ratio is not None and advance_ratio <= 35,
+        "创新高家数不足": new_high_ratio is not None and new_high_ratio <= 5,
+        "涨停晋级率偏低": promotion_rate is not None and promotion_rate <= 12,
+        "炸板率偏高": break_rate is not None and break_rate >= 45,
+        "板块跌破真实VWAP": below_vwap is True,
+    }
+    weak_structure_labels = [label for label, matched in structure_signals.items() if matched]
+    structure_weak = bool(weak_structure_labels)
+
+    historically_oversold = bool(
+        (change_5d is not None and change_5d <= -5.0)
+        or (change_10d is not None and change_10d <= -8.0)
+    )
+    stabilization_families = {
+        "订单流向上改善": turning == "up" or bool(
+            speed is not None and speed > 0 and (acceleration is None or acceleration >= 0)
+        ),
+        "价格止跌": change is not None and change >= 0,
+        "板块站上真实VWAP": below_vwap is False,
+        "上涨广度恢复": advance_ratio is not None and advance_ratio >= 55,
+    }
+    stabilization_labels = [
+        label for label, matched in stabilization_families.items() if matched
+    ]
+    oversold_stabilizing = historically_oversold and len(stabilization_labels) >= 2
 
     if high_price_location:
         location_parts = []
@@ -448,7 +886,29 @@ def _distribution_assessment(
             reasons.append("历史净流入后当日转为非流入")
         evidence.append(f"订单流方向出现衰竭迹象（{'、'.join(reasons)}）。")
     if price_response_weak:
-        evidence.append(f"价格对正向订单流的响应偏弱（命中{weak_response_count}个跨窗口条件）。")
+        suffix = (
+            f"，连续型承载效率{carrying_efficiency:.1f}/100"
+            if carrying_efficiency is not None else ""
+        )
+        evidence.append(
+            f"价格对正向订单流的响应偏弱（命中{weak_response_count}个跨窗口条件{suffix}）。"
+        )
+    elif carrying_efficiency is not None:
+        evidence.append(
+            f"资金—价格连续承载效率{carrying_efficiency:.1f}/100"
+            f"（不可变盘中序列{carrying_sample_count}个有效转移"
+            f"，跨度{carrying_span_minutes:.0f}分钟"
+            f"，近端斜率{carrying_slope:+.2f}）"
+            if carrying_span_minutes is not None and carrying_slope is not None
+            else f"资金—价格连续承载效率{carrying_efficiency:.1f}/100"
+            f"（不可变盘中序列{carrying_sample_count}个有效转移）。"
+        )
+    if weak_structure_labels:
+        evidence.append(f"板块结构转弱（{'、'.join(weak_structure_labels)}）。")
+    if oversold_stabilizing:
+        evidence.append(
+            f"超跌后出现企稳组合（{'、'.join(stabilization_labels)}）。"
+        )
     if leverage_crowding:
         as_of = str(margin_fields.get("margin_as_of") or "最近披露日")
         evidence.append(
@@ -457,6 +917,23 @@ def _distribution_assessment(
             if financing_ratio is not None
             else f"融资拥挤慢变量升高（正向窗口{positive_financing_count}个）截至{as_of}。"
         )
+        if percentile_120d is not None or percentile_60d is not None:
+            percentile_parts = []
+            if percentile_60d is not None:
+                percentile_parts.append(f"60日{percentile_60d:.1f}%分位")
+            if percentile_120d is not None:
+                percentile_parts.append(f"120日{percentile_120d:.1f}%分位")
+            evidence.append(f"融资余额占比自身历史位置：{'、'.join(percentile_parts)}。")
+        if slope_present:
+            evidence.append(
+                "逐日融资净买入OLS斜率："
+                + "、".join(
+                    f"{window}日{value:+.4f}亿/交易日"
+                    for window, value in zip((5, 10, 20), financing_slopes)
+                    if value is not None
+                )
+                + "。"
+            )
     if deleveraging:
         as_of = str(margin_fields.get("margin_as_of") or "最近披露日")
         evidence.append(f"融资净买入有{negative_financing_count}个窗口为负（截至{as_of}，T+1慢变量）。")
@@ -464,64 +941,217 @@ def _distribution_assessment(
         counter_evidence.append("T+1融资数据缺失，不判断杠杆拥挤或去杠杆。")
     elif leverage_data_count < 3:
         counter_evidence.append("T+1融资窗口不足3个，杠杆结论已降级。")
+    if financing_buy_turnover_ratio is not None:
+        evidence.append(
+            f"融资买入额/同交易日板块成交额{financing_buy_turnover_ratio:.2f}%"
+            f"（成交额日{turnover_as_of}，融资披露日{margin_as_of}，T+1披露）。"
+        )
+    elif financing_buy is not None:
+        counter_evidence.append(
+            "融资买入额与板块成交额交易日未对齐或成交额缺失，比例保持空值。"
+        )
+    if non_leveraged_flow_audited and non_leveraged_net_inflow is not None:
+        evidence.append(
+            f"可审计非杠杆净增量资金{non_leveraged_net_inflow:+.2f}亿。"
+        )
+    else:
+        counter_evidence.append(
+            "公开订单流无法识别投资者是否使用融资，未把主力资金算法冒充非杠杆增量资金。"
+        )
+    if (
+        etf_flow_audited
+        and etf_share_net_change is not None
+        and etf_share_change_pct is not None
+    ):
+        evidence.append(
+            f"关联ETF真实份额净变化{etf_share_net_change:+.0f}份"
+            f"（{etf_share_change_pct:+.2f}%）。"
+        )
+    else:
+        counter_evidence.append(
+            "关联ETF真实份额申赎缺少授权审计数据，未用ETF价格或成交额替代。"
+        )
     counter_evidence.append("融资为T+1慢变量，只能作为一个确认维度，不能单独触发高危或交易动作。")
 
-    high_distribution = high_price_location and order_flow_exhausted and price_response_weak
+    distribution_family_flags = {
+        "阶段位置": high_price_location,
+        "订单流衰竭": order_flow_exhausted,
+        "资金价格承载": price_response_weak,
+        "板块结构": structure_weak,
+        "融资拥挤": leverage_crowding,
+        "可审计增量撤退": bool(
+            (non_leveraged_flow_audited and non_leveraged_net_inflow is not None and non_leveraged_net_inflow < 0)
+            or (etf_flow_audited and etf_share_change_pct is not None and etf_share_change_pct < 0)
+        ),
+    }
+    distribution_family_count = sum(distribution_family_flags.values())
+    high_distribution = bool(
+        high_price_location
+        and order_flow_exhausted
+        and distribution_family_count >= 3
+    )
     deleveraging_stampede = deleveraging and negative_price and negative_order_flow
     high_risk_data = data_quality in {"high", "good"}
+    healthy_increment_families = {
+        "价格正向": bool(change is not None and change > 0),
+        "当日订单流正向": bool(
+            current_net is not None
+            and current_net > 0
+            and current_flow_material
+        ),
+        "上涨广度扩散": bool(advance_ratio is not None and advance_ratio >= 50),
+        "可审计非杠杆增量": bool(
+            (
+                non_leveraged_flow_audited
+                and non_leveraged_net_inflow is not None
+                and non_leveraged_net_inflow > 0
+            )
+            or (
+                etf_flow_audited
+                and etf_share_change_pct is not None
+                and etf_share_change_pct > 0
+            )
+        ),
+    }
+    healthy_increment_count = sum(healthy_increment_families.values())
     if data_quality == "partial":
         counter_evidence.append("当前数据质量为partial，只允许观察级结论，不升级为HIGH。")
 
-    if high_distribution and high_risk_data:
+    if high_distribution:
+        instantaneous_state = "高位派发风险"
+        confirmations = distribution_family_count
+    elif deleveraging_stampede:
+        instantaneous_state = "去杠杆踩踏"
+        confirmations = sum((deleveraging, negative_price, negative_order_flow))
+    elif oversold_stabilizing:
+        instantaneous_state = "超跌企稳观察"
+        confirmations = len(stabilization_labels)
+    elif price_response_weak or order_flow_exhausted or (
+        negative_price and negative_order_flow
+    ):
+        instantaneous_state = "资金承载衰减"
+        confirmations = sum((
+            price_response_weak,
+            order_flow_exhausted,
+            structure_weak,
+            negative_price and negative_order_flow,
+        ))
+    elif leverage_crowding:
+        instantaneous_state = "杠杆追涨观察"
+        confirmations = 1
+    elif healthy_increment_count >= 2:
+        instantaneous_state = "健康增量"
+        confirmations = healthy_increment_count
+        evidence.append(
+            "健康增量由至少两个正向证据家族确认（"
+            + "、".join(
+                label for label, matched in healthy_increment_families.items() if matched
+            )
+            + "）。"
+        )
+    else:
+        instantaneous_state = "数据不足"
+        confirmations = healthy_increment_count
+        counter_evidence.append(
+            "未发现风险六态的联合条件，但正向增量证据不足两个独立家族，"
+            "不把中性或零值行情误标为健康增量。"
+        )
+
+    persistence_state = str(persistence_fields.get("persistence_state") or "")
+    sample_confirmation_count = int(
+        _optional_int(persistence_fields.get("sample_confirmation_count")) or 0
+    )
+    trading_day_confirmation_count = int(
+        _optional_int(persistence_fields.get("trading_day_confirmation_count")) or 0
+    )
+    # Only immutable, facts-deduplicated history may confirm persistence.  The
+    # current calculation is persisted after this builder returns, so it must
+    # not be speculatively counted from a newer provider timestamp.  The next
+    # read will include it once the minimum sample interval has been enforced.
+    persistence_confirmed = bool(
+        persistence_state == instantaneous_state
+        and (
+            sample_confirmation_count >= 2
+            or trading_day_confirmation_count >= 2
+        )
+    )
+    persistence_output = dict(persistence_fields)
+    persistence_output.update({
+        "sample_confirmation_count": sample_confirmation_count,
+        "trading_day_confirmation_count": trading_day_confirmation_count,
+        "persistence_confirmed": persistence_confirmed,
+        "confirmed_state": instantaneous_state if persistence_confirmed else "",
+    })
+    if persistence_confirmed:
+        basis = list(persistence_output.get("persistence_basis") or [])
+        if sample_confirmation_count >= 2:
+            basis.append(f"连续{sample_confirmation_count}个有效采样点同态")
+        if trading_day_confirmation_count >= 2:
+            basis.append(f"连续{trading_day_confirmation_count}个交易日同态")
+        persistence_output["persistence_basis"] = list(dict.fromkeys(basis))
+    high_state_persisted = bool(
+        persistence_confirmed and persistence_state == instantaneous_state
+    )
+    if instantaneous_state in {"高位派发风险", "去杠杆踩踏"} and not high_state_persisted:
+        counter_evidence.append(
+            f"瞬时状态为“{instantaneous_state}”，但尚未满足连续2个有效采样点或2个交易日确认，"
+            "保留原始证据并降为观察态。"
+        )
+
+    if instantaneous_state == "高位派发风险" and high_risk_data and high_state_persisted:
         state = "高位派发风险"
         level = "HIGH"
-        confirmations = sum((high_price_location, order_flow_exhausted, price_response_weak, leverage_crowding))
         actions = [
             "禁止追高；等待订单流方向止跌且价格重新响应后再评估。",
             "已有仓位只按预设结构止损或利润保护计划分批降风险，不因融资慢变量机械处理。",
         ]
-    elif high_distribution:
+    elif instantaneous_state == "高位派发风险":
         state = "资金承载衰减"
         level = "MEDIUM"
-        confirmations = sum((high_price_location, order_flow_exhausted, price_response_weak, leverage_crowding))
         actions = [
-            "快照质量不足以确认高位派发；暂停追涨，等待新鲜订单流与价格响应复核。",
+            "高位派发瞬时证据已出现但仍待持续确认；暂停追涨，等待下一有效采样复核。",
         ]
-    elif deleveraging_stampede and high_risk_data:
+    elif instantaneous_state == "去杠杆踩踏" and high_risk_data and high_state_persisted:
         state = "去杠杆踩踏"
         level = "HIGH"
-        confirmations = sum((deleveraging, negative_price, negative_order_flow))
         actions = [
             "禁止接飞刀；等待价格止跌、订单流方向拐头与承接恢复共同确认。",
             "仅在价格、现金订单流与T+1融资三类证据共振时按原风控计划降风险。",
         ]
-    elif deleveraging_stampede:
-        state = "去杠杆踩踏"
-        level = "MEDIUM"
-        confirmations = sum((deleveraging, negative_price, negative_order_flow))
-        actions = [
-            "快照质量不足以确认踩踏；禁止接飞刀并等待新鲜价格与订单流复核。",
-        ]
-    elif price_response_weak:
+    elif instantaneous_state == "去杠杆踩踏":
         state = "资金承载衰减"
         level = "MEDIUM"
-        confirmations = sum((price_response_weak, order_flow_exhausted, high_price_location))
+        actions = [
+            "去杠杆踩踏瞬时证据仍待持续确认；禁止接飞刀并等待下一有效采样复核。",
+        ]
+    elif instantaneous_state == "超跌企稳观察":
+        state = "超跌企稳观察"
+        level = "MEDIUM"
+        actions = [
+            "仅列入超跌企稳观察，不抢第一根反弹；等待回踩不破和资金承接继续改善。",
+            "超跌标签本身不构成抄底或加仓指令。",
+        ]
+    elif instantaneous_state == "资金承载衰减":
+        state = "资金承载衰减"
+        level = "MEDIUM"
         actions = [
             "暂停追涨或加仓；观察后续放量能否带来有效价格推进。",
             "若订单流方向重新拐头且价格收复关键位置，再按原计划恢复评估。",
         ]
-    elif leverage_crowding:
+    elif instantaneous_state == "杠杆追涨观察":
         state = "杠杆追涨观察"
         level = "MEDIUM"
-        confirmations = 1
         actions = [
             "降低追涨冲动并等待价格与现金订单流确认；两融单项不构成交易指令。",
         ]
-    else:
-        state = "健康"
+    elif instantaneous_state == "健康增量":
+        state = "健康增量"
         level = "LOW"
-        confirmations = 0
-        actions = ["未发现资金承载与杠杆的联合背离，继续按既定计划等待触发条件。"]
+        actions = ["未发现资金承载与杠杆的联合背离；仅在预设触发条件满足时执行。"]
+    else:
+        state = "数据不足"
+        level = "UNKNOWN"
+        actions = ["正向与风险证据均未形成联合确认；继续观察，不据此交易。"]
 
     score = (
         15 * int(high_price_location)
@@ -530,6 +1160,7 @@ def _distribution_assessment(
         + 15 * int(leverage_crowding)
         + 20 * int(deleveraging)
         + 10 * int(negative_price and negative_order_flow)
+        + 10 * int(structure_weak)
     )
     if state == "高位派发风险" and level == "HIGH":
         score = max(score, 80)
@@ -547,12 +1178,39 @@ def _distribution_assessment(
 
     return {
         "distribution_state": state,
+        "instantaneous_distribution_state": instantaneous_state,
         "distribution_risk_level": level,
         "distribution_risk_score": int(_clamp(float(score))),
         "order_flow_exhausted": order_flow_exhausted,
         "leverage_crowding": leverage_crowding,
         "price_response_weak": price_response_weak,
         "distribution_confirmation_count": int(confirmations),
+        "capital_price_carrying_efficiency": carrying_efficiency,
+        "capital_price_carrying_sample_count": carrying_sample_count,
+        "capital_price_carrying_span_minutes": carrying_span_minutes,
+        "capital_price_carrying_slope": carrying_slope,
+        "financing_buy_turnover_ratio": _round_optional(financing_buy_turnover_ratio),
+        "financing_turnover_date_aligned": financing_turnover_date_aligned,
+        "non_leveraged_net_inflow": (
+            _round_optional(non_leveraged_net_inflow)
+            if non_leveraged_flow_audited else None
+        ),
+        "non_leveraged_flow_audited": non_leveraged_flow_audited,
+        "etf_share_net_change": (
+            _round_optional(etf_share_net_change)
+            if etf_flow_audited else None
+        ),
+        "etf_share_change_pct": (
+            _round_optional(etf_share_change_pct, 4)
+            if etf_flow_audited else None
+        ),
+        "etf_flow_audited": etf_flow_audited,
+        **persistence_output,
+        # ``strict_state`` is the current six-state conclusion.  The prior
+        # persisted state remains available separately as ``persistence_state``
+        # and ``confirmed_state`` so consumers never display a stale state as
+        # today's result.
+        "strict_state": state,
         "distribution_evidence": evidence,
         "distribution_counter_evidence": counter_evidence,
         "distribution_actions": actions,
@@ -699,6 +1357,7 @@ def _build_item(
     *,
     margin: Any,
     attention: Any,
+    persistence: Any,
     board_type: str,
 ) -> dict[str, Any]:
     name = _row_name(current or five_day or ten_day)
@@ -708,6 +1367,9 @@ def _build_item(
     current_net = _net(current)
     net_5d = _net(five_day)
     net_10d = _net(ten_day)
+    flow_ratio = _optional_float(_value(current, "flow_ratio"))
+    flow_ratio_5d = _optional_float(_value(five_day, "flow_ratio"))
+    flow_ratio_10d = _optional_float(_value(ten_day, "flow_ratio"))
     speed = _optional_float(_value(current, "flow_speed", "speed"))
     acceleration = _optional_float(_value(current, "flow_acceleration", "acceleration"))
     turning_raw = _value(current, "flow_turning", "turning_point", "turning", default="")
@@ -722,6 +1384,73 @@ def _build_item(
     attention_score = _attention_score(attention)
     margin_fields = _margin_fields(margin)
     margin_score = margin_fields["margin_score"]
+    structure_fields = _structure_fields(current, change)
+    persistence_fields = _persistence_fields(persistence)
+    non_leveraged_flow_audited = bool(_optional_bool(_value(
+        current,
+        "non_leveraged_flow_audited",
+        default=False,
+    )))
+    non_leveraged_net_inflow = (
+        _optional_float(_value(
+            current,
+            "non_leveraged_net_inflow",
+            "audited_non_leveraged_net_inflow",
+        ))
+        if non_leveraged_flow_audited
+        else None
+    )
+    non_leveraged_flow_source_url = (
+        str(_value(current, "non_leveraged_flow_source_url", default="") or "")
+        if non_leveraged_flow_audited
+        else ""
+    )
+    non_leveraged_flow_published_at = (
+        str(_value(current, "non_leveraged_flow_published_at", default="") or "")
+        if non_leveraged_flow_audited
+        else ""
+    ) or None
+    non_leveraged_net_inflow_unit = (
+        str(_value(current, "non_leveraged_net_inflow_unit", default="") or "")
+        if non_leveraged_flow_audited
+        else ""
+    )
+    non_leveraged_methodology_id = (
+        str(_value(current, "non_leveraged_methodology_id", default="") or "")
+        if non_leveraged_flow_audited
+        else ""
+    )
+    etf_flow_audited = bool(_optional_bool(_value(
+        current,
+        "etf_flow_audited",
+        default=False,
+    )))
+    etf_share_net_change = (
+        _optional_float(_value(current, "etf_share_net_change"))
+        if etf_flow_audited
+        else None
+    )
+    etf_share_change_pct = (
+        _optional_float(_value(current, "etf_share_change_pct"))
+        if etf_flow_audited
+        else None
+    )
+    etf_id = str(_value(current, "etf_id", default="") or "") if etf_flow_audited else ""
+    etf_share_unit = (
+        str(_value(current, "etf_share_unit", default="") or "")
+        if etf_flow_audited
+        else ""
+    )
+    etf_share_base = (
+        _optional_float(_value(current, "etf_share_base"))
+        if etf_flow_audited
+        else None
+    )
+    etf_methodology_id = (
+        str(_value(current, "etf_methodology_id", default="") or "")
+        if etf_flow_audited
+        else ""
+    )
 
     heat_score = int(round(_weighted(
         (
@@ -839,7 +1568,19 @@ def _build_item(
         speed=speed,
         acceleration=acceleration,
         turning=turning,
+        flow_ratio=flow_ratio,
+        flow_ratio_5d=flow_ratio_5d,
+        flow_ratio_10d=flow_ratio_10d,
+        structure_fields=structure_fields,
         margin_fields=margin_fields,
+        persistence_fields=persistence_fields,
+        provider_trade_date=provider_trade_date,
+        provider_updated_at=provider_updated_at,
+        non_leveraged_net_inflow=non_leveraged_net_inflow,
+        non_leveraged_flow_audited=non_leveraged_flow_audited,
+        etf_share_net_change=etf_share_net_change,
+        etf_share_change_pct=etf_share_change_pct,
+        etf_flow_audited=etf_flow_audited,
         data_quality=data_quality,
     )
     counter_evidence.extend(distribution["distribution_counter_evidence"])
@@ -861,12 +1602,24 @@ def _build_item(
         "net_inflow": _round_optional(current_net),
         "net_inflow_5d": _round_optional(net_5d),
         "net_inflow_10d": _round_optional(net_10d),
+        "flow_ratio": _round_optional(flow_ratio, 4),
+        "flow_ratio_5d": _round_optional(flow_ratio_5d, 4),
+        "flow_ratio_10d": _round_optional(flow_ratio_10d, 4),
         "flow_speed": _round_optional(speed, 4),
         "flow_acceleration": _round_optional(acceleration, 6),
         "flow_turning": str(turning_raw or "") or None,
         "provider_trade_date": provider_trade_date or None,
         "provider_updated_at": provider_updated_at or None,
+        "non_leveraged_flow_source_url": non_leveraged_flow_source_url,
+        "non_leveraged_flow_published_at": non_leveraged_flow_published_at,
+        "non_leveraged_net_inflow_unit": non_leveraged_net_inflow_unit,
+        "non_leveraged_methodology_id": non_leveraged_methodology_id,
+        "etf_id": etf_id,
+        "etf_share_unit": etf_share_unit,
+        "etf_share_base": _round_optional(etf_share_base, 4),
+        "etf_methodology_id": etf_methodology_id,
         "limit_up_count": limit_up_count,
+        **structure_fields,
         **{key: value for key, value in margin_fields.items() if key != "margin_score"},
         **distribution,
         "evidence": evidence,
@@ -883,6 +1636,7 @@ def build_sector_temperature(
     ten_day_rows: Iterable[Any] | None,
     margin_by_name: Mapping[str, Any] | None = None,
     attention_by_name: Mapping[str, Any] | None = None,
+    persistence_by_name: Mapping[str, Any] | None = None,
     board_type: str = "行业",
     updated_at: datetime | str | None = None,
 ) -> dict[str, Any]:
@@ -917,6 +1671,7 @@ def build_sector_temperature(
             ten_day,
             margin=_mapping_lookup(margin_by_name, reference),
             attention=_mapping_lookup(attention_by_name, reference),
+            persistence=_mapping_lookup(persistence_by_name, reference),
             board_type=board_type,
         ))
 
