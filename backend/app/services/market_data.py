@@ -1,14 +1,20 @@
 import html
+import math
 import re
 import uuid
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal, InvalidOperation
 from typing import Any
 from zoneinfo import ZoneInfo
 
 from app.schemas.trading import (
     BoardFlowPanelOut,
+    BreakRepackageCriteria,
+    BreakRepackageDailyEvidence,
+    BreakRepackageItem,
+    BreakRepackageOut,
     DarkTradeItem,
     DarkTradeOut,
     HotThemeItem,
@@ -47,6 +53,7 @@ _EASTMONEY_HOSTS = (
 from app.services.cache import (
     _get_response_cache,
     _set_response_cache,
+    _set_response_cache_unless_data_status,
     _cache_good_flow,
     _get_cached_flow,
     _record_snapshot,
@@ -147,6 +154,7 @@ def _safe_int(value: Any, default: int = 0) -> int:
 
 _LIMIT_UP_CATCHER_TIMESTAMP_MIN_COVERAGE = 0.95
 _LIMIT_UP_CATCHER_SESSION_START_MINUTE = 9 * 60 + 15
+_BREAK_REPACKAGE_CLOSE_CONFIRM_MINUTE = 15 * 60 + 5
 
 
 def _limit_up_catcher_expected_trade_date(now: datetime) -> str:
@@ -168,6 +176,84 @@ def _limit_up_catcher_expected_trade_date(now: datetime) -> str:
     ):
         return current_date.isoformat()
     return previous_a_share_trading_day(current_date).isoformat()
+
+
+def _break_repackage_completed_trade_dates(
+    now: datetime,
+    sessions: int = 5,
+) -> list[str]:
+    """Return a frozen window of completed A-share sessions.
+
+    The structural screen is a close-to-close study.  During the auction and
+    continuous session today's unfinished high, low and amount must never be
+    used as if they were final daily evidence.  Five minutes after the close
+    gives the history endpoint a small publication buffer; before then the
+    preceding completed session remains the evaluation date.
+    """
+
+    count = max(1, int(sessions))
+    current_date = now.date()
+    current_minute = now.hour * 60 + now.minute
+    if (
+        is_a_share_trading_day(current_date)
+        and current_minute >= _BREAK_REPACKAGE_CLOSE_CONFIRM_MINUTE
+    ):
+        cursor = current_date
+    else:
+        cursor = previous_a_share_trading_day(current_date)
+
+    values = [cursor.isoformat()]
+    while len(values) < count:
+        cursor = previous_a_share_trading_day(cursor)
+        values.append(cursor.isoformat())
+    values.reverse()
+    return values
+
+
+def _price_decimal(value: Any) -> Decimal:
+    """Compare provider prices without adding an arbitrary float tolerance."""
+
+    try:
+        parsed = Decimal(str(value))
+        return parsed if parsed.is_finite() else Decimal("0")
+    except (InvalidOperation, TypeError, ValueError):
+        return Decimal("0")
+
+
+def _is_valid_ohlc_bar(bar: dict[str, Any]) -> bool:
+    """Validate a daily candle before it can become structural evidence."""
+
+    open_price = _price_decimal(bar.get("open"))
+    close_price = _price_decimal(bar.get("close"))
+    high_price = _price_decimal(bar.get("high"))
+    low_price = _price_decimal(bar.get("low"))
+    if min(open_price, close_price, high_price, low_price) <= 0:
+        return False
+    return (
+        low_price <= min(open_price, close_price)
+        and high_price >= max(open_price, close_price)
+        and low_price <= high_price
+    )
+
+
+def _break_repackage_pool_error_message(exc: Exception) -> str:
+    """Keep provider diagnostics actionable without leaking English to the UI."""
+
+    raw = str(exc).strip()
+    if "mismatched date" in raw:
+        returned_date = raw.rsplit(" ", 1)[-1]
+        return f"涨停池返回日期与请求日期不一致（返回 {returned_date}）"
+    if "no dated payload" in raw:
+        return "涨停池未返回带日期的数据体"
+    if "no certified total" in raw:
+        return "涨停池未返回可核验的总数"
+    if "coverage mismatch" in raw:
+        return "涨停池明细数量与供应商总数不一致"
+    if "empty direct limit-up pool" in raw:
+        return "涨停池为空且未提供零结果证明"
+    if re.search(r"[\u4e00-\u9fff]", raw):
+        return raw
+    return "涨停池数据完整性校验失败" if isinstance(exc, ValueError) else "外部涨停池请求失败"
 
 
 def _get_current_theme_radar_cache(
@@ -2385,6 +2471,495 @@ class MarketDataProvider:
         source = f"eastmoney-all-a@{host.split('//')[-1]}"
         return valid_rows, source, updated_at, len(deduplicated)
 
+    def break_repackage(self, force_refresh: bool = False) -> BreakRepackageOut:
+        """Find recent limit-up structures whose opening-cost anchor still holds.
+
+        The screen deliberately uses completed daily bars only.  A recent
+        limit-up establishes the anchor; only the sessions *after* that day are
+        tested against its unadjusted open.  The result is a candidate/evidence
+        state, never an instruction to buy.
+        """
+
+        criteria = BreakRepackageCriteria()
+        captured_at = _shanghai_now_naive()
+        trade_dates = _break_repackage_completed_trade_dates(
+            captured_at,
+            criteria.lookback_sessions,
+        )
+        evaluation_date = trade_dates[-1]
+        cache_key = (
+            f"break-repackage|{evaluation_date}|v1|{criteria.lookback_sessions}"
+        )
+        cached = _get_response_cache(cache_key, allow_stale=True)
+        if not force_refresh and isinstance(cached, BreakRepackageOut):
+            return cached
+
+        try:
+            pools: dict[str, list[dict[str, Any]]] = {}
+            # Fetch the five immutable sessions sequentially.  Each response
+            # is then independently cross-checked against its requested day's
+            # unadjusted daily bars; avoiding a burst also reduces throttling.
+            for trade_date in trade_dates:
+                pools[trade_date] = self._fetch_break_repackage_limit_up_pool(
+                    trade_date,
+                )
+        except Exception as exc:
+            reason = _break_repackage_pool_error_message(exc)
+            return BreakRepackageOut(
+                source="eastmoney-unavailable",
+                updated_at=captured_at,
+                evaluation_date=evaluation_date,
+                data_status="data_gap",
+                criteria=criteria,
+                lookback_trade_dates=trade_dates,
+                notes=[
+                    f"最近5个完成交易日的真实涨停池未全部通过校验：{reason or '未知错误'}。",
+                    "本次未生成候选，也不能解释为当前没有断板反包结构。",
+                ],
+            )
+
+        evaluation_limit_codes = {
+            str(row.get("代码") or "").zfill(6)
+            for row in pools.get(evaluation_date, [])
+            if str(row.get("代码") or "").strip()
+        }
+        anchors: dict[str, tuple[str, dict[str, Any]]] = {}
+        # Iteration is chronological, so a later non-evaluation-day limit-up
+        # replaces an older anchor for the same stock.
+        for trade_date in trade_dates[:-1]:
+            for row in pools.get(trade_date, []):
+                code = str(row.get("代码") or "").strip().zfill(6)
+                if code and code not in evaluation_limit_codes:
+                    anchors[code] = (trade_date, row)
+
+        candidate_count = len(anchors)
+        if candidate_count == 0:
+            result = BreakRepackageOut(
+                source="eastmoney-dated-limit-pools",
+                updated_at=captured_at,
+                evaluation_date=evaluation_date,
+                data_status="ok",
+                criteria=criteria,
+                lookback_trade_dates=trade_dates,
+                candidate_count=0,
+                history_checked_count=0,
+                history_gap_count=0,
+                matched_count=0,
+                notes=[
+                    "最近5个完成交易日的真实涨停池已核验；评价日仍涨停的股票已排除。",
+                    "当前没有需要继续核验日线支撑的非当日涨停标的。",
+                ],
+            )
+            _set_response_cache(cache_key, result)
+            return result
+
+        histories: dict[str, tuple[list[dict[str, Any]], str]] = {}
+        history_errors: dict[str, str] = {}
+        with ThreadPoolExecutor(max_workers=8) as executor:
+            futures = {
+                executor.submit(
+                    self._fetch_break_repackage_daily_bars,
+                    code,
+                    trade_dates[0],
+                    evaluation_date,
+                ): code
+                for code in anchors
+            }
+            for future in as_completed(futures):
+                code = futures[future]
+                try:
+                    histories[code] = future.result()
+                except Exception as exc:
+                    history_errors[code] = (
+                        str(exc).strip()
+                        if isinstance(exc, ValueError)
+                        else "日线接口请求失败"
+                    )
+
+        items: list[BreakRepackageItem] = []
+        incomplete_codes = set(history_errors)
+        history_sources: set[str] = set()
+        for code, (anchor_date, raw_anchor) in anchors.items():
+            history_entry = histories.get(code)
+            if history_entry is None:
+                continue
+            bars, history_source = history_entry
+            history_sources.add(history_source)
+            by_date = {str(bar.get("trade_date") or ""): bar for bar in bars}
+            anchor_index = trade_dates.index(anchor_date)
+            post_dates = trade_dates[anchor_index + 1:]
+            required_dates = [anchor_date, *post_dates]
+            if not post_dates or any(trade_date not in by_date for trade_date in required_dates):
+                incomplete_codes.add(code)
+                continue
+
+            anchor_bar = by_date[anchor_date]
+            anchor_open = _price_decimal(anchor_bar.get("open"))
+            anchor_close = _price_decimal(anchor_bar.get("close"))
+            pool_anchor_close = _price_decimal(raw_anchor.get("最新价"))
+            pool_anchor_change = _safe_float(
+                raw_anchor.get("涨跌幅"),
+                float("nan"),
+            )
+            anchor_change = _safe_float(
+                anchor_bar.get("change_pct"),
+                float("nan"),
+            )
+            if (
+                anchor_open <= 0
+                or anchor_close <= 0
+                or pool_anchor_close <= 0
+                or abs(anchor_close - pool_anchor_close) > Decimal("0.002")
+                or not math.isfinite(pool_anchor_change)
+                or not math.isfinite(anchor_change)
+                or abs(anchor_change - pool_anchor_change) > 0.05
+            ):
+                incomplete_codes.add(code)
+                continue
+
+            post_bars = [by_date[trade_date] for trade_date in post_dates]
+            required_bars = [anchor_bar, *post_bars]
+            if any(not _is_valid_ohlc_bar(bar) for bar in required_bars):
+                incomplete_codes.add(code)
+                continue
+            post_lows = [_price_decimal(bar.get("low")) for bar in post_bars]
+            # No tolerance is added: one valid minimum price unit below the
+            # anchor invalidates the structure.
+            if any(low < anchor_open for low in post_lows):
+                continue
+
+            latest_bar = post_bars[-1]
+            latest_close_decimal = _price_decimal(latest_bar.get("close"))
+            latest_change_pct = _safe_float(
+                latest_bar.get("change_pct"),
+                float("nan"),
+            )
+            if latest_close_decimal <= 0 or not math.isfinite(latest_change_pct):
+                incomplete_codes.add(code)
+                continue
+            support_low_decimal = min(post_lows)
+            support_margin_pct = float(
+                (support_low_decimal / anchor_open - Decimal("1")) * Decimal("100")
+            )
+
+            consolidation_bars = post_bars[:-1]
+            consolidation_highs = [
+                _price_decimal(bar.get("high")) for bar in consolidation_bars
+            ]
+            # A true repackage must at least reclaim the limit-up day's close;
+            # merely exceeding a lower consolidation high is only a rebound.
+            trigger_decimal = max([anchor_close, *consolidation_highs])
+
+            distance_to_trigger_pct: float | None = None
+            if trigger_decimal is not None and trigger_decimal > 0:
+                distance_to_trigger_pct = float(
+                    (trigger_decimal - latest_close_decimal)
+                    / trigger_decimal
+                    * Decimal("100")
+                )
+
+            latest_amount = _safe_float(latest_bar.get("amount"))
+            comparison_amounts = [
+                _safe_float(bar.get("amount")) for bar in consolidation_bars
+            ]
+            amount_ratio = None
+            if (
+                latest_amount > 0
+                and math.isfinite(latest_amount)
+                and comparison_amounts
+                and all(
+                    value > 0 and math.isfinite(value)
+                    for value in comparison_amounts
+                )
+            ):
+                average_amount = sum(comparison_amounts) / len(comparison_amounts)
+                amount_ratio = latest_amount / average_amount if average_amount > 0 else None
+
+            latest_high = _safe_float(latest_bar.get("high"))
+            latest_low = _safe_float(latest_bar.get("low"))
+            latest_close = float(latest_close_decimal)
+            close_position_pct = None
+            if (
+                math.isfinite(latest_high)
+                and math.isfinite(latest_low)
+                and latest_high > latest_low
+            ):
+                close_position_pct = (
+                    (latest_close - latest_low) / (latest_high - latest_low) * 100
+                )
+
+            state = "承接候选"
+            if trigger_decimal is not None:
+                if latest_close_decimal > trigger_decimal:
+                    state = "价格反包确认"
+                    if (
+                        amount_ratio is not None
+                        and amount_ratio >= criteria.amount_confirmation_ratio
+                        and close_position_pct is not None
+                        and close_position_pct >= criteria.strong_close_position_pct
+                    ):
+                        state = "量价反包确认"
+                elif (
+                    distance_to_trigger_pct is not None
+                    and 0 <= distance_to_trigger_pct <= criteria.near_trigger_pct
+                ):
+                    state = "临近反包"
+
+            items.append(BreakRepackageItem(
+                code=code,
+                name=str(raw_anchor.get("名称") or "").strip() or code,
+                state=state,
+                limit_up_date=anchor_date,
+                sessions_since_limit_up=len(post_dates),
+                limit_up_open=round(float(anchor_open), 3),
+                limit_up_close=round(float(anchor_close), 3),
+                support_low=round(float(support_low_decimal), 3),
+                support_margin_pct=round(support_margin_pct, 2),
+                trigger_price=(round(float(trigger_decimal), 3) if trigger_decimal else None),
+                distance_to_trigger_pct=(
+                    round(distance_to_trigger_pct, 2)
+                    if distance_to_trigger_pct is not None
+                    else None
+                ),
+                latest_close=round(latest_close, 3),
+                latest_change_pct=round(latest_change_pct, 2),
+                latest_amount_yi=(
+                    round(latest_amount / 1e8, 2)
+                    if latest_amount > 0 and math.isfinite(latest_amount)
+                    else None
+                ),
+                amount_ratio=(round(amount_ratio, 2) if amount_ratio is not None else None),
+                close_position_pct=(
+                    round(close_position_pct, 2)
+                    if close_position_pct is not None
+                    else None
+                ),
+                evaluation_date=evaluation_date,
+                daily_evidence=[
+                    BreakRepackageDailyEvidence(
+                        trade_date=trade_date,
+                        low=round(_safe_float(by_date[trade_date].get("low")), 3),
+                        close=round(_safe_float(by_date[trade_date].get("close")), 3),
+                    )
+                    for trade_date in post_dates
+                ],
+                source=f"东方财富日期涨停池+{history_source}",
+                updated_at=captured_at,
+            ))
+
+        state_priority = {
+            "量价反包确认": 4,
+            "价格反包确认": 3,
+            "临近反包": 2,
+            "承接候选": 1,
+        }
+        items.sort(key=lambda item: (
+            -state_priority.get(item.state, 0),
+            item.distance_to_trigger_pct if item.distance_to_trigger_pct is not None else 999,
+            -item.support_margin_pct,
+            item.code,
+        ))
+
+        history_gap_count = len(incomplete_codes)
+        history_checked_count = max(0, candidate_count - history_gap_count)
+        if candidate_count and history_checked_count == 0:
+            return BreakRepackageOut(
+                source="eastmoney-unavailable",
+                updated_at=captured_at,
+                evaluation_date=evaluation_date,
+                data_status="data_gap",
+                criteria=criteria,
+                lookback_trade_dates=trade_dates,
+                candidate_count=candidate_count,
+                history_checked_count=0,
+                history_gap_count=history_gap_count,
+                matched_count=0,
+                notes=[
+                    "候选股票存在，但未取得任何一只完整的未复权日线证据。",
+                    "本次未生成模拟结果，也不能解释为当前没有断板反包结构。",
+                ],
+            )
+
+        data_status = "partial" if history_gap_count else "ok"
+        source_suffix = ",".join(sorted(history_sources)) or "eastmoney-unadjusted-daily-kline"
+        notes = [
+            "涨停日仅建立开盘成本锚；支撑检验从下一交易日开始，评价日仍涨停的股票不重复展示。",
+            "反包触发线取涨停日收盘价与评价日前断板整理区最高价中的较高者；量价确认还要求成交额不弱于完整整理期均值且收盘位于日内区间上部。",
+            "候选不等于买点，仍需结合主线地位、板块订单流、市场环境和失效条件。",
+        ]
+        if history_gap_count:
+            notes.append(
+                f"另有{history_gap_count}只候选因停牌、缺日或日线接口缺口未参与结论。"
+            )
+        elif not items:
+            notes.append("真实数据核验完成，当前没有全部守住涨停日开盘锚的标的。")
+
+        result = BreakRepackageOut(
+            source=f"eastmoney-dated-limit-pools+{source_suffix}",
+            updated_at=captured_at,
+            evaluation_date=evaluation_date,
+            data_status=data_status,
+            criteria=criteria,
+            lookback_trade_dates=trade_dates,
+            items=items,
+            candidate_count=candidate_count,
+            history_checked_count=history_checked_count,
+            history_gap_count=history_gap_count,
+            matched_count=len(items),
+            notes=notes,
+        )
+        if result.data_status == "ok":
+            _set_response_cache(cache_key, result)
+        elif result.data_status == "partial":
+            _set_response_cache_unless_data_status(cache_key, result, "ok")
+        return result
+
+    def _fetch_break_repackage_limit_up_pool(
+        self,
+        trade_date: str,
+    ) -> list[dict[str, Any]]:
+        """Return a dated pool independently cross-checked against daily bars.
+
+        Eastmoney currently applies the ``date`` parameter to the pool rows but
+        reports its latest service date in ``qdate`` for historical requests.
+        Therefore a historical pool is accepted only after its count/shape is
+        complete and deterministic samples match the requested day's
+        unadjusted close and percentage change.
+        """
+
+        date_text = trade_date.replace("-", "")
+        last_error: Exception | None = None
+        for request_nonce in range(3):
+            try:
+                rows = self._fetch_direct_limit_up_pool_raw(
+                    date_text,
+                    allow_empty=True,
+                    request_nonce=request_nonce,
+                    require_query_date_match=False,
+                )
+                self._audit_break_repackage_pool_samples(trade_date, rows)
+                return rows
+            except (RuntimeError, ValueError) as exc:
+                last_error = exc
+        raise last_error or ValueError("limit-up pool returned no dated payload")
+
+    def _audit_break_repackage_pool_samples(
+        self,
+        trade_date: str,
+        rows: list[dict[str, Any]],
+    ) -> None:
+        """Reject a historical pool when its contents do not belong to the date."""
+
+        if not rows:
+            # A provider-certified zero has no row that can be cross-checked.
+            return
+        sample_indexes = sorted({0, len(rows) // 2, len(rows) - 1})
+        for index in sample_indexes:
+            row = rows[index]
+            code = str(row.get("代码") or "").strip().zfill(6)
+            pool_close = _price_decimal(row.get("最新价"))
+            pool_change = _safe_float(row.get("涨跌幅"), float("nan"))
+            if not code or pool_close <= 0 or not math.isfinite(pool_change):
+                raise ValueError("涨停池抽样行缺少可核验字段")
+            bars, _ = self._fetch_break_repackage_daily_bars(
+                code,
+                trade_date,
+                trade_date,
+            )
+            bar = next(
+                (item for item in bars if item.get("trade_date") == trade_date),
+                None,
+            )
+            if not isinstance(bar, dict):
+                raise ValueError("涨停池抽样未取得请求日期日线")
+            bar_close = _price_decimal(bar.get("close"))
+            bar_change = _safe_float(bar.get("change_pct"), float("nan"))
+            if (
+                bar_close <= 0
+                or abs(bar_close - pool_close) > Decimal("0.002")
+                or not math.isfinite(bar_change)
+                or abs(bar_change - pool_change) > 0.05
+            ):
+                raise ValueError("涨停池抽样与请求日期未复权日线不一致")
+
+    def _fetch_break_repackage_daily_bars(
+        self,
+        code: str,
+        begin_date: str,
+        end_date: str,
+    ) -> tuple[list[dict[str, Any]], str]:
+        """Fetch unadjusted daily bars so the historical opening anchor is real."""
+
+        market = "0" if code.startswith("92") else (
+            "1" if code.startswith(("5", "6", "9")) else "0"
+        )
+        params = {
+            "secid": f"{market}.{code}",
+            "klt": "101",
+            "fqt": "0",
+            "lmt": "20",
+            "beg": begin_date.replace("-", ""),
+            "end": end_date.replace("-", ""),
+            "fields1": "f1,f2,f3,f4,f5,f6",
+            "fields2": "f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61",
+        }
+        headers = {
+            "User-Agent": "Mozilla/5.0",
+            "Referer": "https://quote.eastmoney.com/",
+            "Accept": "application/json,text/plain,*/*",
+        }
+        last_error: Exception | None = None
+        for host in ("https://push2his.eastmoney.com", "https://push2delay.eastmoney.com"):
+            try:
+                response = requests.get(
+                    f"{host}/api/qt/stock/kline/get",
+                    params=params,
+                    headers=headers,
+                    timeout=8,
+                )
+                response.raise_for_status()
+                data = response.json().get("data")
+                if not isinstance(data, dict):
+                    raise ValueError(f"{code}未返回日线数据体")
+                returned_code = str(data.get("code") or "").strip()
+                if returned_code and returned_code.zfill(6) != code.zfill(6):
+                    raise ValueError(f"{code}日线代码校验不一致")
+                raw_rows = list(data.get("klines") or [])
+                bars: list[dict[str, Any]] = []
+                for raw in raw_rows:
+                    parts = str(raw).split(",")
+                    if len(parts) < 11:
+                        continue
+                    trade_date = parts[0].strip()
+                    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", trade_date):
+                        raise ValueError(f"{code}日线包含无效交易日期")
+                    if not begin_date <= trade_date <= end_date:
+                        continue
+                    bars.append({
+                        "trade_date": trade_date,
+                        "open": _safe_float(parts[1]),
+                        "close": _safe_float(parts[2]),
+                        "high": _safe_float(parts[3]),
+                        "low": _safe_float(parts[4]),
+                        "volume": _safe_float(parts[5]),
+                        "amount": _safe_float(parts[6]),
+                        "change_pct": _safe_float(parts[8]),
+                        "turnover_rate": _safe_float(parts[10]),
+                    })
+                bar_dates = [str(bar.get("trade_date") or "") for bar in bars]
+                if len(set(bar_dates)) != len(bar_dates):
+                    raise ValueError(f"{code}日线包含重复交易日期")
+                if bars and any(
+                    bar.get("trade_date") == end_date for bar in bars
+                ):
+                    return bars, f"eastmoney-unadjusted-daily-kline@{host.split('//')[-1]}"
+                raise ValueError(f"{code}在评价窗口内没有截止评价日的未复权日线")
+            except Exception as exc:
+                last_error = exc
+        if isinstance(last_error, ValueError):
+            raise last_error
+        raise RuntimeError(f"{code}日线接口暂不可用") from last_error
+
     def limit_up_ladder(self, trade_date: str | None = None, force_refresh: bool = False) -> LimitUpLadderOut:
         """Return a dated real limit-up pool.
 
@@ -2652,7 +3227,14 @@ class MarketDataProvider:
                 }
         return rows, f"eastmoney-stock-quotes@{','.join(dict.fromkeys(hosts))}"
 
-    def _fetch_direct_limit_up_pool_raw(self, date_text: str) -> list[dict[str, Any]]:
+    def _fetch_direct_limit_up_pool_raw(
+        self,
+        date_text: str,
+        *,
+        allow_empty: bool = False,
+        request_nonce: int = 0,
+        require_query_date_match: bool = True,
+    ) -> list[dict[str, Any]]:
         resp = requests.get(
             "https://push2ex.eastmoney.com/getTopicZTPool",
             params={
@@ -2662,7 +3244,7 @@ class MarketDataProvider:
                 "pagesize": 10000,
                 "sort": "fbt:asc",
                 "date": date_text,
-                "_": int(datetime.now().timestamp() * 1000),
+                "_": int(datetime.now().timestamp() * 1000) + int(request_nonce),
             },
             headers={
                 "User-Agent": "Mozilla/5.0",
@@ -2676,10 +3258,28 @@ class MarketDataProvider:
         if not isinstance(data, dict):
             raise ValueError("limit-up pool returned no dated payload")
         query_date = str(data.get("qdate") or "")
-        if query_date and query_date != date_text:
+        if not re.fullmatch(r"\d{8}", query_date):
+            raise ValueError("limit-up pool returned no dated payload")
+        if require_query_date_match and query_date != date_text:
             raise ValueError(f"limit-up pool returned mismatched date {query_date}")
-        pool = data.get("pool") or []
-        if not pool:
+        raw_pool = data.get("pool")
+        if raw_pool is None:
+            raw_pool = []
+        if not isinstance(raw_pool, list):
+            raise ValueError("limit-up pool returned malformed rows")
+        pool = raw_pool
+        if allow_empty:
+            raw_total = data.get("tc")
+            if raw_total in (None, "", "-", "--"):
+                raise ValueError("limit-up pool returned no certified total")
+            total = _safe_int(raw_total, -1)
+            if total < 0 or total != len(pool):
+                raise ValueError(
+                    f"limit-up pool coverage mismatch: {len(pool)}/{total}"
+                )
+            if total == 0 and not require_query_date_match and query_date != date_text:
+                raise ValueError("历史涨停池零结果缺少可交叉核验的明细")
+        elif not pool:
             raise ValueError("empty direct limit-up pool")
 
         def format_time(value: Any) -> str:
@@ -2691,14 +3291,27 @@ class MarketDataProvider:
         results: list[dict[str, Any]] = []
         for row in pool:
             if not isinstance(row, dict):
-                continue
+                raise ValueError("limit-up pool returned malformed rows")
+            code = str(row.get("c") or "").strip()
+            name = str(row.get("n") or "").strip()
+            if not re.fullmatch(r"\d{6}", code) or not name:
+                raise ValueError("limit-up pool returned malformed rows")
+            raw_price = _safe_float(row.get("p"), float("nan"))
+            raw_change = _safe_float(row.get("zdp"), float("nan"))
+            latest_price = raw_price / 1000
+            if (
+                not math.isfinite(latest_price)
+                or latest_price <= 0
+                or not math.isfinite(raw_change)
+            ):
+                raise ValueError("涨停池明细缺少有效价格或涨跌幅")
             zttj = row.get("zttj") if isinstance(row.get("zttj"), dict) else {}
             level = int(row.get("lbc") or zttj.get("ct") or zttj.get("days") or 1)
             results.append({
-                "代码": str(row.get("c") or ""),
-                "名称": str(row.get("n") or ""),
-                "最新价": round(float(row.get("p") or 0) / 1000, 3),
-                "涨跌幅": float(row.get("zdp") or 0),
+                "代码": code,
+                "名称": name,
+                "最新价": round(latest_price, 3),
+                "涨跌幅": raw_change,
                 "成交额": float(row.get("amount") or 0),
                 "换手率": float(row.get("hs") or 0),
                 "封板资金": float(row.get("fund") or 0),
@@ -2709,6 +3322,10 @@ class MarketDataProvider:
                 "连续涨停天数": level,
                 "所属行业": str(row.get("hybk") or ""),
             })
+        if allow_empty and len(results) != len(pool):
+            raise ValueError("limit-up pool coverage mismatch after formatting")
+        if len({item["代码"] for item in results}) != len(results):
+            raise ValueError("limit-up pool returned duplicate codes")
         return results
 
     def _build_limit_up_stock(self, raw: dict[str, Any]) -> LimitUpStockOut:

@@ -8,6 +8,8 @@ from app.core.trading_clock import shanghai_now_naive
 from app.models.trading import Holding
 from app.schemas.trading import (
     BoardFlowPanelOut,
+    BreakRepackageCriteria,
+    BreakRepackageOut,
     DarkTradeOut,
     HotThemesOut,
     SectorFlowOut,
@@ -29,6 +31,7 @@ from app.schemas.trading import (
 )
 from app.services.market_data import (
     MarketDataProvider,
+    _break_repackage_completed_trade_dates,
     _is_valid_limit_up_ladder,
     _last_trading_day,
     _limit_up_default_candidate_dates,
@@ -250,6 +253,40 @@ def refresh_limit_up_catcher(request: Request) -> LimitUpCatcherOut:
     """Explicitly collect and screen real Eastmoney full-market quotes."""
 
     return market_provider.limit_up_catcher(force_refresh=True)
+
+
+@router.get("/market/break-repackage", response_model=BreakRepackageOut)
+@limiter.limit("20/minute")
+def break_repackage(request: Request) -> BreakRepackageOut:
+    """Read the last explicitly refreshed close-confirmed structure screen."""
+
+    criteria = BreakRepackageCriteria()
+    trade_dates = _break_repackage_completed_trade_dates(
+        shanghai_now_naive(),
+        criteria.lookback_sessions,
+    )
+    evaluation_date = trade_dates[-1]
+    cache_key = (
+        f"break-repackage|{evaluation_date}|v1|{criteria.lookback_sessions}"
+    )
+    cached = _get_response_cache(cache_key, allow_stale=True)
+    return cached or BreakRepackageOut(
+        source="cache-unavailable",
+        updated_at=shanghai_now_naive(),
+        evaluation_date=evaluation_date,
+        data_status="data_gap",
+        criteria=criteria,
+        lookback_trade_dates=trade_dates,
+        notes=[_cache_miss_note("断板反包")],
+    )
+
+
+@router.post("/market/break-repackage/refresh", response_model=BreakRepackageOut)
+@limiter.limit("4/minute")
+def refresh_break_repackage(request: Request) -> BreakRepackageOut:
+    """Explicitly collect dated limit-up pools and unadjusted daily bars."""
+
+    return market_provider.break_repackage(force_refresh=True)
 
 
 @router.get("/market/limit-up-ladder", response_model=LimitUpLadderOut)

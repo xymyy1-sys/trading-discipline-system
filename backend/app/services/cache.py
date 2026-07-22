@@ -45,6 +45,29 @@ def _set_response_cache(key: str, value: Any) -> None:
     with _CACHE_LOCK:
         _response_cache[key] = (time.time() + _CACHE_TTL_SECONDS, value)
 
+
+def _set_response_cache_unless_data_status(
+    key: str,
+    value: Any,
+    protected_status: str,
+) -> bool:
+    """Atomically keep a stronger cached response from being downgraded.
+
+    A refresh may take long enough for another request to finish first.  The
+    comparison and write therefore have to share the cache lock; checking the
+    cache before doing provider work is not sufficient to prevent a slower
+    partial response from replacing a newly completed snapshot.
+    """
+
+    with _CACHE_LOCK:
+        cached = _response_cache.get(key)
+        current = cached[1] if cached else None
+        if getattr(current, "data_status", None) == protected_status:
+            return False
+        _response_cache[key] = (time.time() + _CACHE_TTL_SECONDS, value)
+        return True
+
+
 def _record_snapshot(flow_type: str, raw_items: list[dict[str, Any]]) -> None:
     global _snapshot_seq
     now = shanghai_now_naive()

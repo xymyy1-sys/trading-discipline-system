@@ -2044,6 +2044,61 @@ class LimitUpCatcherOut(BaseModel):
     notes: list[str] = Field(default_factory=list)
 
 
+class BreakRepackageCriteria(BaseModel):
+    lookback_sessions: int = 5
+    anchor_source: str = "东方财富日期涨停池"
+    anchor_price_field: str = "涨停日未复权开盘价"
+    require_all_post_anchor_lows_not_below_anchor: bool = True
+    exclude_evaluation_day_limit_up: bool = True
+    near_trigger_pct: float = 2
+    amount_confirmation_ratio: float = 1
+    strong_close_position_pct: float = 65
+
+
+class BreakRepackageDailyEvidence(BaseModel):
+    trade_date: str
+    low: float
+    close: float
+
+
+class BreakRepackageItem(BaseModel):
+    code: str
+    name: str
+    state: Literal["承接候选", "临近反包", "价格反包确认", "量价反包确认"]
+    limit_up_date: str
+    sessions_since_limit_up: int
+    limit_up_open: float
+    limit_up_close: float
+    support_low: float
+    support_margin_pct: float
+    trigger_price: float | None = None
+    distance_to_trigger_pct: float | None = None
+    latest_close: float
+    latest_change_pct: float
+    latest_amount_yi: float | None = None
+    amount_ratio: float | None = None
+    close_position_pct: float | None = None
+    evaluation_date: str
+    daily_evidence: list[BreakRepackageDailyEvidence] = Field(default_factory=list)
+    source: str
+    updated_at: datetime
+
+
+class BreakRepackageOut(BaseModel):
+    source: str
+    updated_at: datetime
+    evaluation_date: str | None = None
+    data_status: Literal["ok", "partial", "data_gap"]
+    criteria: BreakRepackageCriteria = Field(default_factory=BreakRepackageCriteria)
+    lookback_trade_dates: list[str] = Field(default_factory=list)
+    items: list[BreakRepackageItem] = Field(default_factory=list)
+    candidate_count: int = 0
+    history_checked_count: int = 0
+    history_gap_count: int = 0
+    matched_count: int = 0
+    notes: list[str] = Field(default_factory=list)
+
+
 class LimitUpAtmosphereMetrics(BaseModel):
     limit_up_count: int = 0
     limit_down_count: int | None = None

@@ -29,6 +29,7 @@ import MonthlyReview from './components/MonthlyReview'
 import ReviewCalibration from './components/ReviewCalibration'
 import CandidatePool from './components/CandidatePool'
 import LimitUpCatcher from './components/LimitUpCatcher'
+import BreakRepackage from './components/BreakRepackage'
 import StrategyTemplates from './components/StrategyTemplates'
 import HistoricalReplay from './components/HistoricalReplay'
 import {
@@ -238,6 +239,7 @@ function StockSelectionWorkspace() {
         { key: 'radar', label: '主线题材', description: '主线强度、共振方向、核心股', Component: Dashboard },
         { key: 'flow', label: '订单流证据', description: '板块订单流方向拐点、排名与强弱', Component: FlowDesk },
         { key: 'catcher', label: '抓涨停', description: '量比、涨幅、换手率与分时均价共振候选', Component: LimitUpCatcher },
+        { key: 'repackage', label: '断板反包', description: '近5日涨停开盘锚、承接强度与反包状态', Component: BreakRepackage },
         { key: 'card', label: '个股研判', description: '预期、实际、事件与失效条件', Component: DecisionCard },
       ]}
     />
