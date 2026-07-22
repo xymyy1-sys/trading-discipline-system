@@ -549,6 +549,12 @@ export interface StockDecisionCard {
   minute_chart: MinuteChartPoint[];
   entry_discipline: EntryDiscipline | null;
   effective_capital?: EffectiveCapitalEvidence | null;
+  market_data_trade_date: string;
+  market_data_as_of: string | null;
+  provider_event_at: string | null;
+  data_age_seconds: number | null;
+  is_current_session: boolean;
+  data_status_note: string;
 }
 
 export interface MinuteChartPoint {

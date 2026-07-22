@@ -9,6 +9,7 @@ from app.api.helpers.decision import (
     build_expectation_snapshot,
     build_t_eligibility,
     create_t_plan,
+    decision_market_data_status,
 )
 from app.core.trading_clock import shanghai_now_naive, shanghai_today
 from app.api.helpers.plan_calc import _default_next_day_plan, refresh_limit_expectation_stage
@@ -20,6 +21,7 @@ from app.models.trading import (
     MarketRegimeSnapshot,
     NextDayPlan,
     TTradePlan,
+    VolumePriceSnapshot,
 )
 from app.schemas.trading import TTradePlanUpdate
 from app.services.t_trading_engine import update_t_plan
@@ -601,7 +603,11 @@ def _persist_quote_snapshot(
     return row
 
 
-def test_decision_card_includes_volume_price(client, db_session):
+def test_decision_card_includes_volume_price(client, db_session, monkeypatch):
+    from app.api.helpers import decision
+
+    observed_at = datetime(2026, 7, 23, 10, 15)
+    monkeypatch.setattr(decision, "shanghai_now_naive", lambda *_args, **_kwargs: observed_at)
     quote = {
         "price": 10.5,
         "change_pct": 2.0,
@@ -613,9 +619,11 @@ def test_decision_card_includes_volume_price(client, db_session):
         "volume": 80_000_000,
         "turnover": 6.5,
         "note": "东方财富实时行情",
+        "provider_event_at": observed_at.isoformat(),
+        "received_at": observed_at.isoformat(),
     }
 
-    _persist_quote_snapshot(db_session, "600004", quote)
+    _persist_quote_snapshot(db_session, "600004", quote, captured_at=observed_at)
     before = db_session.query(DataCaptureSnapshot).count()
 
     response = client.get("/api/stocks/600004/decision-card")
@@ -629,6 +637,209 @@ def test_decision_card_includes_volume_price(client, db_session):
     assert payload["entry_discipline"]["allowed_position_ratio"] == 0
     assert payload["allowed_actions"] == ["只允许观察，不下单"]
     assert payload["forbidden_actions"][0] == payload["entry_discipline"]["label"]
+
+
+def test_decision_card_marks_previous_session_capture_stale_at_read_time(
+    client,
+    db_session,
+    monkeypatch,
+):
+    from app.api.helpers import decision
+
+    now = datetime(2026, 7, 23, 10, 15)
+    quote = _effective_flow_quote("2026-07-22")
+    stale = _persist_quote_snapshot(
+        db_session,
+        "600054",
+        quote,
+        captured_at=datetime(2026, 7, 22, 15, 0),
+    )
+    assert stale.is_stale is False
+    monkeypatch.setattr(decision, "shanghai_now_naive", lambda *_args, **_kwargs: now)
+
+    response = client.get("/api/stocks/600054/decision-card")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["market_data_trade_date"] == "2026-07-22"
+    assert payload["is_current_session"] is False
+    assert payload["data_quality"] == "stale"
+    assert payload["entry_discipline"]["decision"] == "BLOCK"
+    assert payload["entry_discipline"]["allowed_position_ratio"] == 0
+    assert payload["consensus_risk"]["actions"] == []
+    assert payload["allowed_actions"] == ["历史行情仅供复盘，不生成当日操作建议"]
+    assert "有效行情日应为2026-07-23" in payload["data_status_note"]
+
+
+def test_market_data_status_uses_provider_event_time_not_receive_time():
+    now = datetime(2026, 7, 23, 14, 0)
+    quote = {
+        "price": 10.0,
+        "provider_event_at": "2026-07-23T10:00:00",
+        "received_at": now.isoformat(),
+    }
+
+    status = decision_market_data_status(quote, None, now=now)
+
+    assert status["is_current_session"] is False
+    assert status["data_age_seconds"] == 4 * 60 * 60
+
+
+def test_market_data_status_requires_lunch_and_close_anchors():
+    lunch = datetime(2026, 7, 23, 12, 55)
+    close = datetime(2026, 7, 23, 18, 0)
+
+    assert decision_market_data_status(
+        {"price": 10.0, "provider_event_at": "2026-07-23T09:20:00"},
+        None,
+        now=lunch,
+    )["is_current_session"] is False
+    assert decision_market_data_status(
+        {"price": 10.0, "provider_event_at": "2026-07-23T11:30:00"},
+        None,
+        now=lunch,
+    )["is_current_session"] is True
+    assert decision_market_data_status(
+        {"price": 10.0, "provider_event_at": "2026-07-23T09:20:00"},
+        None,
+        now=close,
+    )["is_current_session"] is False
+    assert decision_market_data_status(
+        {"price": 10.0, "provider_event_at": "2026-07-23T14:50:00"},
+        None,
+        now=close,
+    )["is_current_session"] is False
+    assert decision_market_data_status(
+        {"price": 10.0, "provider_event_at": "2026-07-23T23:59:00"},
+        None,
+        now=close,
+    )["is_current_session"] is False
+    assert decision_market_data_status(
+        {"price": 10.0, "provider_event_at": "2026-07-23T15:00:00"},
+        None,
+        now=close,
+    )["is_current_session"] is True
+
+
+def test_market_data_status_does_not_treat_local_capture_date_as_market_date():
+    now = datetime(2026, 7, 23, 10, 15)
+    capture = SimpleNamespace(
+        trade_date="2026-07-23",
+        captured_at=now,
+        is_stale=False,
+    )
+
+    status = decision_market_data_status(
+        {"price": 10.0, "received_at": now.isoformat()},
+        capture,
+        now=now,
+    )
+
+    assert status["is_current_session"] is False
+    assert status["market_data_trade_date"] == "2026-07-23"
+    assert status["provider_event_at"] is None
+    assert status["data_age_seconds"] is None
+
+
+def test_explicit_decision_card_refresh_collects_queried_symbol_for_current_day(
+    client,
+    db_session,
+    monkeypatch,
+):
+    from app.api.helpers import decision
+    from app.services import intraday_evidence_engine
+
+    now = datetime(2026, 7, 23, 10, 15)
+    old_quote = _effective_flow_quote("2026-07-22")
+    _persist_quote_snapshot(
+        db_session,
+        "600055",
+        old_quote,
+        captured_at=datetime(2026, 7, 22, 15, 0),
+    )
+    fresh_quote = _effective_flow_quote("2026-07-23")
+    fresh_quote.update({
+        "name": "当日查询标的",
+        "price": 12.34,
+        "provider_event_at": now.isoformat(),
+        "received_at": now.isoformat(),
+    })
+    monkeypatch.setattr(decision, "shanghai_now_naive", lambda *_args, **_kwargs: now)
+    monkeypatch.setattr(intraday_evidence_engine, "shanghai_now_naive", lambda *_args, **_kwargs: now)
+    monkeypatch.setattr("app.api.routes.stocks.quote_for_code", lambda _code: fresh_quote)
+
+    response = client.post("/api/stocks/600055/decision-card/refresh")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["current_price"] == 12.34
+    assert payload["market_data_trade_date"] == "2026-07-23"
+    assert payload["is_current_session"] is True
+    latest = db_session.query(DataCaptureSnapshot).filter(
+        DataCaptureSnapshot.target_code == "600055",
+        DataCaptureSnapshot.data_type == "tracked_stock_minute",
+    ).order_by(DataCaptureSnapshot.captured_at.desc()).first()
+    assert latest is not None
+    assert latest.trade_date == "2026-07-23"
+
+
+def test_decision_card_keeps_latest_usable_quote_when_newer_collection_failed(
+    client,
+    db_session,
+    monkeypatch,
+):
+    from app.api.helpers import decision
+
+    now = datetime(2026, 7, 23, 10, 15)
+    valid_quote = _effective_flow_quote("2026-07-23")
+    _persist_quote_snapshot(db_session, "600056", valid_quote, captured_at=datetime(2026, 7, 23, 10, 10))
+    db_session.add_all([
+        VolumePriceSnapshot(
+            trade_date="2026-07-23",
+            captured_at=datetime(2026, 7, 23, 10, 10),
+            code="600056",
+            name="有效量价",
+            price=valid_quote["price"],
+            vwap=10.15,
+            minute_bar_count=10,
+            vwap_reliable=True,
+            data_quality="realtime",
+        ),
+        VolumePriceSnapshot(
+            trade_date="2026-07-23",
+            captured_at=datetime(2026, 7, 23, 10, 14),
+            code="600056",
+            name="失败量价",
+            price=0,
+            vwap=0,
+            data_quality="manual",
+        ),
+    ])
+    db_session.add(DataCaptureSnapshot(
+        trade_date="2026-07-23",
+        captured_at=datetime(2026, 7, 23, 10, 14),
+        source="provider-failure",
+        data_type="tracked_stock_minute",
+        target_code="600056",
+        target_name="采集失败不遮挡",
+        raw_value_json="{}",
+        normalized_value_json="{}",
+        quality="missing",
+        is_complete=False,
+        status="missing",
+        error_message="upstream unavailable",
+    ))
+    db_session.commit()
+    monkeypatch.setattr(decision, "shanghai_now_naive", lambda *_args, **_kwargs: now)
+
+    response = client.get("/api/stocks/600056/decision-card")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["current_price"] == valid_quote["price"]
+    assert payload["is_current_session"] is True
+    assert payload["volume_price"]["price"] == valid_quote["price"]
+    assert payload["volume_price"]["data_quality"] == "realtime"
 
 
 def _effective_flow_quote(trade_date: str, start_hour: int = 10, start_minute: int = 1):

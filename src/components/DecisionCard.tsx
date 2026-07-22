@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { RefreshCcw, Search } from 'lucide-react'
 import { API_BASE } from '../api'
 import { chineseEvidence, chineseLabel } from '../labels'
@@ -15,6 +15,19 @@ import EffectiveCapitalEvidence from './EffectiveCapitalEvidence'
 
 type DecisionCardMode = 'watchlist' | 'holding'
 type WatchlistStock = { code: string; name: string; score: number; tier: string }
+type CardLoadIntent = 'cached' | 'explicit' | 'background' | 'ensure-current'
+
+function isAshareCollectionWindow() {
+  const parts = Object.fromEntries(
+    new Intl.DateTimeFormat('en-CA', {
+      timeZone: 'Asia/Shanghai', weekday: 'short', hour: '2-digit', minute: '2-digit', hour12: false,
+    }).formatToParts(new Date()).map(part => [part.type, part.value]),
+  )
+  if (parts.weekday === 'Sat' || parts.weekday === 'Sun') return false
+  const minute = Number(parts.hour || 0) * 60 + Number(parts.minute || 0)
+  // Post-close quotes are needed to analyze stocks added by the daily rotation.
+  return minute >= 9 * 60 + 15
+}
 
 echarts.use([LineChart, BarChart, ScatterChart, GridComponent, LegendComponent, TooltipComponent, CanvasRenderer])
 
@@ -28,59 +41,153 @@ export default function DecisionCard({ mode = 'watchlist' }: { mode?: DecisionCa
   const [rules, setRules] = useState<ExpectationRule[]>([])
   const [showRules, setShowRules] = useState(false)
   const [expectationChain, setExpectationChain] = useState<ExpectationChain | null>(null)
+  const requestSequence = useRef(0)
+  const targetRequestSequence = useRef(0)
+  const selectedCodeRef = useRef('')
+  const targetCodesRef = useRef<string[]>([])
+  const explicitTargetRef = useRef('')
+  const loadCardRef = useRef<(target: string, intent?: CardLoadIntent) => void>(() => undefined)
 
-  const loadCard = (target = code) => {
+  const loadCard = useCallback((target: string, intent: CardLoadIntent = 'cached') => {
     const normalized = target.trim()
     if (!normalized) {
       setMessage('先输入股票代码或选择持仓。')
       return
     }
-    setLoading(true)
+    const requestId = ++requestSequence.current
+    const refresh = intent === 'explicit' || intent === 'ensure-current'
+    const preserveOnFailure = intent === 'background' || intent === 'ensure-current'
+    if (intent !== 'background') setLoading(true)
     setMessage('')
-    fetch(`${API_BASE}/api/stocks/${normalized}/decision-card`)
+    if (intent === 'explicit') {
+      explicitTargetRef.current = normalized
+      setCard(null)
+      setExpectationChain(null)
+      selectedCodeRef.current = ''
+    }
+    fetch(
+      `${API_BASE}/api/stocks/${normalized}/decision-card${refresh ? '/refresh' : ''}`,
+      refresh ? { method: 'POST', cache: 'no-store' } : { cache: 'no-store' },
+    )
       .then(async r => {
-        if (!r.ok) throw new Error(await r.text())
+        if (!r.ok) {
+          const payload = await r.json().catch(() => null) as { detail?: string } | null
+          throw new Error(payload?.detail || `个股决策卡读取失败（${r.status}）`)
+        }
         return r.json()
       })
       .then((data: StockDecisionCard) => {
+        if (requestId !== requestSequence.current) return
         setCard(data)
-        setCode(data.code)
+        selectedCodeRef.current = data.code
+        if (intent !== 'background') setCode(data.code)
+        if (intent === 'cached' && !data.is_current_session && isAshareCollectionWindow()) {
+          window.setTimeout(() => loadCardRef.current(data.code, 'ensure-current'), 0)
+        }
         return fetch(`${API_BASE}/api/stocks/${data.code}/expectation-chain?trade_date=${encodeURIComponent(data.expectation.trade_date)}`)
           .then(response => response.ok ? response.json() : Promise.reject())
-          .then((chain: ExpectationChain) => setExpectationChain(chain))
-          .catch(() => setExpectationChain(null))
+          .then((chain: ExpectationChain) => {
+            if (requestId === requestSequence.current) setExpectationChain(chain)
+          })
+          .catch(() => {
+            if (requestId === requestSequence.current) setExpectationChain(null)
+          })
       })
-      .catch(() => setMessage('个股决策卡读取失败'))
-      .finally(() => setLoading(false))
-  }
+      .catch(error => {
+        if (requestId !== requestSequence.current) return
+        if (!preserveOnFailure) {
+          setCard(null)
+          setExpectationChain(null)
+          selectedCodeRef.current = ''
+        }
+        const detail = error instanceof Error ? error.message : '个股决策卡读取失败'
+        setMessage(preserveOnFailure ? `${detail}；当前保留上次成功快照。` : detail)
+      })
+      .finally(() => {
+        if (intent === 'explicit' && explicitTargetRef.current === normalized) {
+          explicitTargetRef.current = ''
+        }
+        if (requestId === requestSequence.current && intent !== 'background') setLoading(false)
+      })
+  }, [])
+  loadCardRef.current = loadCard
 
   useEffect(() => {
-    const loadTargets = () => fetch(mode === 'holding' ? `${API_BASE}/api/holdings` : `${API_BASE}/api/watchlist-recommendations`)
-      .then(r => r.json())
+    const applyTargets = (
+      data: HoldingOut[] | WatchlistStock[],
+      refreshCurrent = false,
+      selectionChanged = false,
+    ) => {
+      const rows = Array.isArray(data) ? data : []
+      const previousCodes = new Set(targetCodesRef.current)
+      const currentCode = selectedCodeRef.current
+      targetCodesRef.current = rows.map(item => item.code)
+      if (mode === 'holding') setHoldings(rows as HoldingOut[])
+      else setWatchlist(rows as WatchlistStock[])
+      if (explicitTargetRef.current) return
+      const retained = rows.find(item => item.code === currentCode)
+      if (retained) {
+        if (refreshCurrent) loadCard(retained.code, 'ensure-current')
+      } else if (rows[0] && (!currentCode || previousCodes.has(currentCode) || selectionChanged)) {
+        setCode(rows[0].code)
+        loadCard(rows[0].code, refreshCurrent ? 'ensure-current' : 'cached')
+      } else {
+        if (rows[0]) return
+        requestSequence.current += 1
+        selectedCodeRef.current = ''
+        setCode('')
+        setCard(null)
+        setExpectationChain(null)
+        setLoading(false)
+      }
+    }
+    const loadTargets = () => {
+      const targetRequestId = ++targetRequestSequence.current
+      return fetch(
+        mode === 'holding' ? `${API_BASE}/api/holdings` : `${API_BASE}/api/watchlist-recommendations`,
+        { cache: 'no-store' },
+      )
+      .then(async r => {
+        if (!r.ok) throw new Error(`标的列表读取失败（${r.status}）`)
+        return r.json()
+      })
       .then((data: HoldingOut[] | WatchlistStock[]) => {
-        if (mode === 'holding') setHoldings(data as HoldingOut[])
-        else setWatchlist(data as WatchlistStock[])
-        if (data[0]) {
-          setCode(data[0].code)
-          loadCard(data[0].code)
+        if (targetRequestId === targetRequestSequence.current) applyTargets(data)
+      })
+      .catch(error => {
+        if (targetRequestId === targetRequestSequence.current) {
+          setMessage(error instanceof Error ? error.message : '标的列表读取失败')
         }
       })
-      .catch(() => {})
+    }
     loadTargets()
-    const syncWatchlist = () => { if (mode === 'watchlist') loadTargets() }
+    const syncWatchlist = (event: Event) => {
+      if (mode !== 'watchlist') return
+      const detail = (event as CustomEvent<{
+        rows?: WatchlistStock[]; refreshed?: boolean; selectionChanged?: boolean
+      }>).detail
+      if (detail && Array.isArray(detail.rows)) {
+        targetRequestSequence.current += 1
+        applyTargets(detail.rows, Boolean(detail.refreshed), Boolean(detail.selectionChanged))
+      }
+      else loadTargets()
+    }
     window.addEventListener('watchlist-updated', syncWatchlist)
     fetch(`${API_BASE}/api/expectation-rules`)
       .then(r => r.json())
       .then((data: ExpectationRule[]) => setRules(data))
       .catch(() => setRules([]))
-    return () => window.removeEventListener('watchlist-updated', syncWatchlist)
-  }, [mode])
+    return () => {
+      targetRequestSequence.current += 1
+      window.removeEventListener('watchlist-updated', syncWatchlist)
+    }
+  }, [loadCard, mode])
 
   useEffect(() => {
     if (!card?.code) return
-    const timer = window.setInterval(() => loadCard(card.code), 60_000)
+    const timer = window.setInterval(() => loadCard(card.code, 'background'), 60_000)
     return () => window.clearInterval(timer)
-  }, [card?.code])
+  }, [card?.code, loadCard])
 
   const updateRule = (id: number, patch: Partial<ExpectationRule>) => {
     setRules(current => current.map(rule => rule.id === id ? { ...rule, ...patch } : rule))
@@ -113,7 +220,7 @@ export default function DecisionCard({ mode = 'watchlist' }: { mode?: DecisionCa
         </div>
         <div className="decision-search">
           <input value={code} onChange={e => setCode(e.target.value)} placeholder="输入股票代码" />
-          <button className="grade-btn" type="button" onClick={() => loadCard()} disabled={loading}>
+          <button className="grade-btn" type="button" onClick={() => loadCard(code, 'explicit')} disabled={loading}>
             {loading ? <RefreshCcw size={16} /> : <Search size={16} />}
             查询
           </button>
@@ -147,7 +254,7 @@ export default function DecisionCard({ mode = 'watchlist' }: { mode?: DecisionCa
       {mode === 'holding' && holdings.length > 0 && (
         <div className="decision-holding-strip">
           {holdings.slice(0, 10).map(item => (
-            <button key={item.id} className={card?.code === item.code ? 'active' : ''} type="button" onClick={() => loadCard(item.code)}>
+            <button key={item.id} className={card?.code === item.code ? 'active' : ''} type="button" onClick={() => loadCard(item.code, 'cached')}>
               {item.name}<span>{item.code}</span>
             </button>
           ))}
@@ -157,7 +264,7 @@ export default function DecisionCard({ mode = 'watchlist' }: { mode?: DecisionCa
       {mode === 'watchlist' && watchlist.length > 0 && (
         <div className="decision-holding-strip">
           {watchlist.map(item => (
-            <button key={item.code} className={card?.code === item.code ? 'active' : ''} type="button" onClick={() => loadCard(item.code)}>
+            <button key={item.code} className={card?.code === item.code ? 'active' : ''} type="button" onClick={() => loadCard(item.code, 'cached')}>
               {item.name}<span>{item.code} · {item.score}分</span>
             </button>
           ))}
@@ -171,6 +278,9 @@ export default function DecisionCard({ mode = 'watchlist' }: { mode?: DecisionCa
               <div>
                 <strong>{card.name} <span className="mono">{card.code}</span></strong>
                 <span>{card.industry || '行业待确认'} · {(card.concepts || []).slice(0, 5).join('、') || '概念待确认'} · {chineseLabel(card.data_quality)}</span>
+                <span className={card.is_current_session ? 'decision-data-current' : 'decision-data-stale'}>
+                  行情日 {card.market_data_trade_date || '待核验'} · {card.data_status_note}
+                </span>
               </div>
               <div className="decision-price">
                 <strong className={card.change_pct >= 0 ? 'num-up' : 'num-down'}>{card.current_price.toFixed(2)}</strong>

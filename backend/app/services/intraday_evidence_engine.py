@@ -172,11 +172,12 @@ def collect_tracked_stock_evidence(
     base_hint: str,
     stage: str | None = None,
     now: datetime | None = None,
+    quote: dict[str, Any] | None = None,
 ) -> IntradayEvidenceEvent:
     """Persist expectation/volume/evidence for a watchlist or active limit-up plan."""
     now = shanghai_now_naive(now)
     fetch_started = time_module.perf_counter()
-    quote = quote_for_code(code)
+    quote = quote_for_code(code) if quote is None else quote
     latency_ms = int((time_module.perf_counter() - fetch_started) * 1000)
     stage = stage or current_expectation_stage(now)
     volume = build_volume_price_snapshot(db, code, name=name, stage=stage, quote=quote)

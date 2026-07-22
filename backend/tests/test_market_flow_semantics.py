@@ -442,6 +442,43 @@ def test_limit_up_failure_never_returns_simulated_stocks(monkeypatch):
     assert any("不生成模拟涨停股票" in note for note in result.notes)
 
 
+def test_limit_up_ladder_audits_historical_date_but_keeps_current_date_strict(monkeypatch):
+    provider = MarketDataProvider()
+    calls: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        "app.services.market_data._shanghai_now_naive",
+        lambda: datetime(2026, 7, 23, 15, 10),
+    )
+    monkeypatch.setattr(
+        "app.services.market_data.is_a_share_trading_day",
+        lambda _value: True,
+    )
+    monkeypatch.setattr(
+        provider,
+        "_fetch_break_repackage_limit_up_pool",
+        lambda trade_date: calls.append(("audited", trade_date)) or [],
+    )
+
+    def strict_pool(trade_date: str):
+        calls.append(("strict", trade_date))
+        if trade_date == "2026-07-22":
+            raise ValueError("historical qdate mismatch")
+        return []
+
+    monkeypatch.setattr(
+        provider,
+        "_fetch_limit_up_pool_raw",
+        strict_pool,
+    )
+
+    provider.limit_up_ladder(trade_date="2026-07-22", force_refresh=True)
+    assert calls == [("strict", "2026-07-22"), ("audited", "2026-07-22")]
+
+    calls.clear()
+    provider.limit_up_ladder(trade_date="2026-07-23", force_refresh=True)
+    assert calls == [("strict", "2026-07-23")]
+
+
 def test_information_failure_never_returns_diagnostic_news(monkeypatch):
     provider = MarketDataProvider()
     monkeypatch.setattr(provider, "_fetch_eastmoney_fast_news", lambda: (_ for _ in ()).throw(RuntimeError("offline")))

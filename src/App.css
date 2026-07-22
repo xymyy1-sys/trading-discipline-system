@@ -1360,6 +1360,22 @@ h4 {
   font-size: 12px;
 }
 
+.selected-theme-head .decision-data-current,
+.selected-theme-head .decision-data-stale {
+  display: block;
+  margin-top: 2px;
+  line-height: 1.45;
+}
+
+.selected-theme-head .decision-data-current {
+  color: #16825d;
+}
+
+.selected-theme-head .decision-data-stale {
+  color: #c2413a;
+  font-weight: 700;
+}
+
 .selected-theme-head em {
   color: var(--ink-dim);
   font-size: 11px;

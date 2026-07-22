@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { Plus, RefreshCcw, Trash2 } from 'lucide-react'
 import { API_BASE } from '../api'
 import { chineseEvidence } from '../labels'
@@ -19,21 +19,37 @@ export default function CandidatePool() {
   const [error, setError] = useState('')
   const [manual, setManual] = useState({ code: '', name: '' })
   const [notice, setNotice] = useState('')
-  const load = () => {
+  const requestSequence = useRef(0)
+  const recommendationsRef = useRef<Recommendation[]>([])
+  const snapshotDate = (rows: Recommendation[]) => {
+    const values = rows.map(item => item.updated_at || '').filter(Boolean).sort()
+    return values.length ? values[values.length - 1].slice(0, 10) : '最近一次'
+  }
+  const load = (selectionChanged = false) => {
+    const requestId = ++requestSequence.current
     setLoading(true)
     setError('')
-    fetch(`${API_BASE}/api/watchlist-recommendations`).then(r => {
+    fetch(`${API_BASE}/api/watchlist-recommendations`, { cache: 'no-store' }).then(r => {
         if (!r.ok) throw new Error(`自动观察池请求失败（${r.status}）`)
         return r.json()
       }).then(data => {
-        setRecommendations(Array.isArray(data) ? data : [])
-        window.dispatchEvent(new CustomEvent('watchlist-updated', { detail: data }))
+        if (requestId !== requestSequence.current) return
+        const rows = Array.isArray(data) ? data : []
+        recommendationsRef.current = rows
+        setRecommendations(rows)
+        window.dispatchEvent(new CustomEvent('watchlist-updated', {
+          detail: { rows, refreshed: false, selectionChanged },
+        }))
       }).catch(error => {
-        setRecommendations([])
-        setError(error instanceof Error ? error.message : '自动观察池行情源不可用')
-      }).finally(() => setLoading(false))
+        if (requestId !== requestSequence.current) return
+        const detail = error instanceof Error ? error.message : '自动观察池行情源不可用'
+        setError(`${detail}；以下保留${snapshotDate(recommendationsRef.current)}成功快照`)
+      }).finally(() => {
+        if (requestId === requestSequence.current) setLoading(false)
+      })
   }
   const refresh = () => {
+    const requestId = ++requestSequence.current
     setLoading(true)
     setError('')
     setNotice('正在获取最新收盘证据并更新观察池…')
@@ -43,42 +59,72 @@ export default function CandidatePool() {
         return response.json()
       })
       .then(data => {
+        if (requestId !== requestSequence.current) return
         const rows = Array.isArray(data) ? data : []
+        recommendationsRef.current = rows
         setRecommendations(rows)
         setNotice(`观察池已更新，共 ${rows.length} 只；手动标的继续保留。`)
-        window.dispatchEvent(new CustomEvent('watchlist-updated', { detail: rows }))
+        window.dispatchEvent(new CustomEvent('watchlist-updated', {
+          detail: { rows, refreshed: true, selectionChanged: true },
+        }))
       })
       .catch(error => {
+        if (requestId !== requestSequence.current) return
         setNotice('')
-        setError(error instanceof Error ? error.message : '自动观察池重新分析失败')
+        const detail = error instanceof Error ? error.message : '自动观察池重新分析失败'
+        setError(`${detail}；以下保留${snapshotDate(recommendationsRef.current)}成功快照`)
       })
-      .finally(() => setLoading(false))
+      .finally(() => {
+        if (requestId === requestSequence.current) setLoading(false)
+      })
   }
   useEffect(load, [])
   const addManual = () => {
     const code = manual.code.trim()
     if (!/^\d{6}$/.test(code)) { setError('请输入6位股票代码'); return }
+    const requestId = ++requestSequence.current
+    setLoading(true)
     setError(''); setNotice('正在加入…')
     fetch(`${API_BASE}/api/watchlist`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ...manual, code }) })
       .then(async r => { if (!r.ok) throw new Error((await r.json()).detail || '加入失败'); return r.json() })
-      .then(data => { setManual({ code: '', name: '' }); setNotice(`${data.name || code} 已加入观察池`); load() })
-      .catch(error => { setNotice(''); setError(error instanceof Error ? error.message : '手动加入观察池失败') })
+      .then(data => {
+        if (requestId !== requestSequence.current) return
+        setManual({ code: '', name: '' }); setNotice(`${data.name || code} 已加入观察池`); load(true)
+      })
+      .catch(error => {
+        if (requestId !== requestSequence.current) return
+        setNotice(''); setError(error instanceof Error ? error.message : '手动加入观察池失败')
+      })
+      .finally(() => {
+        if (requestId === requestSequence.current) setLoading(false)
+      })
   }
   const removeItem = (code: string) => {
     const exitReason = window.prompt('请记录剔除原因，便于复盘观察池转化率：', '用户手动剔除') || '用户手动剔除'
+    const requestId = ++requestSequence.current
+    setLoading(true)
     fetch(`${API_BASE}/api/watchlist/${code}?exit_reason=${encodeURIComponent(exitReason)}`, { method: 'DELETE' })
-      .then(r => { if (!r.ok) throw new Error('剔除失败'); setNotice('已剔除；今日不会自动递补'); load() })
-      .catch(() => setError('剔除观察标的失败'))
+      .then(r => {
+        if (!r.ok) throw new Error('剔除失败')
+        if (requestId !== requestSequence.current) return
+        setNotice('已剔除；今日不会自动递补'); load(true)
+      })
+      .catch(() => {
+        if (requestId === requestSequence.current) setError('剔除观察标的失败')
+      })
+      .finally(() => {
+        if (requestId === requestSequence.current) setLoading(false)
+      })
   }
   return <section className="candidate-pool">
     <header className="pos-header"><div><h2>自动观察池</h2><p>从主线题材核心股和涨停梯队中自动发现，不再只给已有持仓打分。</p></div><button className="refresh-btn inline" onClick={refresh} disabled={loading}><RefreshCcw size={14} />{loading ? '分析中' : '重新分析'}</button></header>
-    <div className="watchlist-editor panel"><input value={manual.code} onChange={e => setManual(value => ({ ...value, code: e.target.value.replace(/\D/g, '').slice(0, 6) }))} placeholder="6位股票代码"/><input value={manual.name} onChange={e => setManual(value => ({ ...value, name: e.target.value }))} placeholder="股票名称（可选）"/><button type="button" className="grade-btn" onClick={addManual}><Plus size={14}/>加入观察池</button><span>系统每日盘后按当日数据换届10只；剔除后当日不递补，手动加入永久保留。</span></div>
+    <div className="watchlist-editor panel"><input value={manual.code} onChange={e => setManual(value => ({ ...value, code: e.target.value.replace(/\D/g, '').slice(0, 6) }))} placeholder="6位股票代码"/><input value={manual.name} onChange={e => setManual(value => ({ ...value, name: e.target.value }))} placeholder="股票名称（可选）"/><button type="button" className="grade-btn" onClick={addManual} disabled={loading}><Plus size={14}/>加入观察池</button><span>系统每日盘后按当日数据换届10只；剔除后当日不递补，手动加入永久保留。</span></div>
     <p className="entry-discipline-banner">纪律底线：没有盘前计划、交易模式不匹配、直线冲高未回踩，任意一项成立都禁止下单。宁可错过，不做模式外交易。</p>
     {notice && <p className="refresh-note">{notice}</p>}
     {error && <p className="error-msg">{error}；这不是“暂无数据”，请检查网络或行情源。</p>}
     <div className="candidate-grid">{recommendations.map(item => <article className={`candidate-card ${item.tier === '重点观察' ? 'pool-A' : item.tier === '等待确认' ? 'pool-B' : 'pool-D'}`} key={`auto-${item.code}`}>
       <div className="candidate-head"><strong>{item.tier} · {item.name || item.code}</strong><b>{item.score}</b></div>
-      <button type="button" className="candidate-remove" onClick={() => removeItem(item.code)} title="从观察池剔除"><Trash2 size={14}/>剔除</button>
+      <button type="button" className="candidate-remove" onClick={() => removeItem(item.code)} title="从观察池剔除" disabled={loading}><Trash2 size={14}/>剔除</button>
       <AiInsightButton scope="stock" target={item.code} />
       <small>{item.code} · {item.theme || '题材待确认'} · {item.role || '角色待确认'}</small>
       <small className="candidate-lifecycle">观察第 {item.observation_days || 1} 天 · {item.entry_reason || '系统评分入选'}{item.converted ? ' · 已转为持仓' : ''}</small>

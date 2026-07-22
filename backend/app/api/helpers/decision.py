@@ -360,6 +360,135 @@ def quote_for_code(code: str) -> dict[str, Any]:
     return quotes.get(_quote_lookup_code(code, quotes), {})
 
 
+def _as_naive_datetime(value: Any) -> datetime | None:
+    if isinstance(value, datetime):
+        return value.replace(tzinfo=None) if value.tzinfo is None else shanghai_now_naive(value)
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed.replace(tzinfo=None) if parsed.tzinfo is None else shanghai_now_naive(parsed)
+
+
+def decision_market_data_status(
+    quote: dict[str, Any],
+    capture: DataCaptureSnapshot | None,
+    *,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    """Dynamically validate a stored quote against the expected market date.
+
+    ``is_stale`` is a capture-time fact.  A snapshot that was realtime
+    yesterday becomes historical today, so read paths must recalculate this
+    status instead of trusting the persisted boolean forever.
+    """
+
+    from app.services.market_data import _limit_up_catcher_expected_trade_date
+    from app.services.trading_calendar import is_a_share_trading_day
+
+    current = shanghai_now_naive(now)
+    expected_date = _limit_up_catcher_expected_trade_date(current)
+    calendar_date = current.date().isoformat()
+    current_market_day = bool(
+        is_a_share_trading_day(current.date())
+        and expected_date == calendar_date
+    )
+    minute_date = str(quote.get("minute_bar_trade_date") or "").strip()
+    provider_event_at = _as_naive_datetime(quote.get("provider_event_at"))
+    provider_date = provider_event_at.date().isoformat() if provider_event_at else ""
+    capture_date = str(capture.trade_date or "").strip() if capture is not None else ""
+    minute_bar_as_of = _as_naive_datetime(quote.get("minute_bar_as_of"))
+    minute_rows = list(quote.get("minute_bars") or [])
+    if minute_bar_as_of is None and minute_rows and minute_date:
+        last_time = str(minute_rows[-1].get("time") or "").strip()
+        try:
+            minute_bar_as_of = datetime.fromisoformat(
+                last_time if "T" in last_time else f"{minute_date}T{last_time}"
+            )
+        except ValueError:
+            minute_bar_as_of = None
+    market_evidence_date = minute_date or provider_date
+    observed_date = market_evidence_date or capture_date
+    conflicting_dates = bool(
+        (minute_date and provider_date and minute_date != provider_date)
+        or (market_evidence_date and capture_date and market_evidence_date != capture_date)
+    )
+    quote_as_of = provider_event_at or minute_bar_as_of
+    display_as_of = quote_as_of or (capture.captured_at if capture is not None else None)
+    if display_as_of is not None and display_as_of.tzinfo is not None:
+        display_as_of = shanghai_now_naive(display_as_of)
+    age_seconds = (current - quote_as_of).total_seconds() if quote_as_of is not None else None
+
+    clock = current.time()
+    in_continuous_window = (
+        time(9, 15) <= clock <= time(11, 30)
+        or time(13, 0) <= clock <= time(15, 0)
+    )
+    in_lunch_window = time(11, 30) < clock < time(13, 0)
+    after_close = clock > time(15, 0)
+
+    def anchored_for_window(value: datetime | None) -> bool:
+        if value is None or value.date().isoformat() != expected_date:
+            return False
+        value_age = (current - value).total_seconds()
+        if value_age < -60:
+            return False
+        if in_continuous_window:
+            return -60 <= value_age <= 10 * 60
+        if in_lunch_window:
+            return time(11, 29) <= value.time() <= time(11, 31)
+        if after_close:
+            return time(14, 59) <= value.time() <= time(15, 1)
+        return False
+
+    snapshot_fresh = anchored_for_window(quote_as_of)
+    minute_bar_current = bool(minute_rows and anchored_for_window(minute_bar_as_of))
+    has_quote = _safe_float(quote.get("price")) > 0
+    current_session = bool(
+        has_quote
+        and current_market_day
+        and market_evidence_date == expected_date
+        and not conflicting_dates
+        and snapshot_fresh
+        and not bool(quote.get("is_delayed_endpoint"))
+        and not bool(capture is not None and capture.is_stale)
+    )
+    if not quote:
+        note = "尚无可核验行情快照；请点击查询获取当日数据。"
+    elif conflicting_dates:
+        note = f"报价、分钟线或存储分区日期不一致（报价{provider_date or '未知'}、分钟线{minute_date or '未知'}、分区{capture_date or '未知'}），已禁止作为当日决策证据。"
+    elif bool(quote.get("is_delayed_endpoint")):
+        note = "当前仅取得延迟行情端点，已降级为历史参考并禁止生成实时操作结论。"
+    elif not market_evidence_date:
+        note = "行情缺少提供商事件时间和分钟线交易日，不能用本地入库日期冒充当日行情。"
+    elif observed_date != expected_date:
+        note = f"当前展示{observed_date or '未知日期'}历史快照；有效行情日应为{expected_date}，请点击查询刷新。"
+    elif current_market_day and not snapshot_fresh:
+        note = "提供商行情事件时间未贴近当前交易窗口、午间收盘或当日收盘，已按过期证据处理。"
+    elif current_session and not minute_bar_current:
+        note = f"已核验为{expected_date}当前报价，但分钟线尾点不新鲜，分时均价与量价结论已降级。"
+    elif current_session:
+        note = f"已核验为{expected_date}行情。"
+    elif observed_date == expected_date and not current_market_day:
+        note = f"当前尚无{calendar_date}实时交易行情，展示最近完成交易日{observed_date}数据，仅供盘前或复盘参考。"
+    else:
+        note = "行情日期或时效证据不完整，已禁止作为实时操作依据。"
+    return {
+        "expected_trade_date": expected_date,
+        "market_data_trade_date": observed_date,
+        "market_data_as_of": display_as_of,
+        "provider_event_at": provider_event_at,
+        "data_age_seconds": round(age_seconds, 1) if age_seconds is not None else None,
+        "is_current_session": current_session,
+        "minute_bar_as_of": minute_bar_as_of,
+        "minute_bar_current": minute_bar_current,
+        "data_status_note": note,
+    }
+
+
 EXPECTATION_DEFAULTS = {
     "EXTREME_STRONG": (5.0, 9.5),
     "STRONG": (2.0, 5.5),
@@ -1209,32 +1338,65 @@ def _persisted_quote_for_code(
     """Return the newest collector snapshot for a stock without provider I/O."""
 
     normalized = code.zfill(6)
-    row = (
+    rows = (
         db.query(DataCaptureSnapshot)
         .filter(
             DataCaptureSnapshot.target_code.in_([code, normalized, normalized.lstrip("0")]),
             DataCaptureSnapshot.data_type.in_(["stock_minute", "tracked_stock_minute"]),
         )
         .order_by(DataCaptureSnapshot.captured_at.desc(), DataCaptureSnapshot.id.desc())
-        .first()
+        .limit(50)
+        .all()
     )
-    if row is None:
+    if not rows:
         return {}, None
-    try:
-        value = json.loads(row.raw_value_json or "{}")
-    except (TypeError, ValueError, json.JSONDecodeError):
-        value = {}
-    return (value if isinstance(value, dict) else {}), row
+    historical_fallback: tuple[dict[str, Any], DataCaptureSnapshot] | None = None
+    for row in rows:
+        try:
+            value = json.loads(row.raw_value_json or "{}")
+        except (TypeError, ValueError, json.JSONDecodeError):
+            continue
+        if not isinstance(value, dict) or _safe_float(value.get("price")) <= 0:
+            continue
+        if decision_market_data_status(value, row)["is_current_session"]:
+            return value, row
+        if historical_fallback is None:
+            historical_fallback = (value, row)
+    if historical_fallback is not None:
+        return historical_fallback
+    # Keep the newest failed capture for diagnostics, but never let its empty
+    # payload masquerade as the stock's latest usable market evidence.
+    return {}, rows[0]
 
 
-def _persisted_volume_row(db: Session, code: str) -> VolumePriceSnapshot | None:
+def _persisted_volume_row(
+    db: Session,
+    code: str,
+    *,
+    trade_date: str = "",
+) -> VolumePriceSnapshot | None:
     normalized = code.zfill(6)
-    return (
-        db.query(VolumePriceSnapshot)
-        .filter(VolumePriceSnapshot.code.in_([code, normalized, normalized.lstrip("0")]))
-        .order_by(VolumePriceSnapshot.captured_at.desc(), VolumePriceSnapshot.id.desc())
-        .first()
+    query = db.query(VolumePriceSnapshot).filter(
+        VolumePriceSnapshot.code.in_([code, normalized, normalized.lstrip("0")])
     )
+    if trade_date:
+        query = query.filter(VolumePriceSnapshot.trade_date == trade_date)
+    rows = (
+        query
+        .order_by(VolumePriceSnapshot.captured_at.desc(), VolumePriceSnapshot.id.desc())
+        .limit(50)
+        .all()
+    )
+    for row in rows:
+        quality = str(row.data_quality or "").strip().lower()
+        if row.price > 0 and quality not in {"", "missing", "unavailable", "manual"}:
+            return row
+    # A provider failure can persist a diagnostic zero-price row after a valid
+    # snapshot.  Returning that newest failure would make the decision card
+    # look like it has rolled back to yesterday even though today's quote was
+    # already collected.  When no usable row exists the caller rebuilds a
+    # non-persistent read model from the selected usable capture instead.
+    return None
 
 
 def _persisted_expectation_row(
@@ -1281,6 +1443,8 @@ def decision_card(db: Session, code: str) -> StockDecisionCardOut:
     from app.services.consensus_risk import build_consensus_risk
     holding = _find_holding_by_code(db, code)
     quote, capture = _persisted_quote_for_code(db, code)
+    now = shanghai_now_naive()
+    market_data_status = decision_market_data_status(quote, capture, now=now)
     name = holding.name if holding else str(quote.get("name") or code)
     theme = (
         _holding_theme_profile(holding, allow_network=False)
@@ -1288,7 +1452,6 @@ def decision_card(db: Session, code: str) -> StockDecisionCardOut:
         else {"industry": "", "concepts": [], "source": "quote-only"}
     )
     base_hint = holding.position_type if holding else ""
-    now = shanghai_now_naive()
     stage = current_expectation_stage(now)
     baseline = (
         db.query(ExpectationSnapshot)
@@ -1304,7 +1467,11 @@ def decision_card(db: Session, code: str) -> StockDecisionCardOut:
     # but opening or switching to the page must never append snapshots,
     # revisions, evidence events or recommendations.  The scheduled collector
     # and explicit collection POST own persistence.
-    volume_row = _persisted_volume_row(db, code)
+    volume_row = _persisted_volume_row(
+        db,
+        code,
+        trade_date=str(market_data_status["market_data_trade_date"] or ""),
+    )
     daily_metrics = _daily_metrics_from_volume(volume_row)
     volume_price = (
         _snapshot_out(volume_row)
@@ -1314,6 +1481,21 @@ def decision_card(db: Session, code: str) -> StockDecisionCardOut:
             daily_metrics=daily_metrics, persist=False,
         )
     )
+    if not market_data_status["is_current_session"]:
+        is_prior_close = bool(
+            market_data_status["market_data_trade_date"]
+            and market_data_status["market_data_trade_date"] < now.date().isoformat()
+            and volume_price.vwap_reliable
+        )
+        volume_price = volume_price.model_copy(update={
+            "data_quality": "historical_close" if is_prior_close else "historical",
+            "vwap_reliable": bool(is_prior_close),
+        })
+    elif not market_data_status["minute_bar_current"]:
+        volume_price = volume_price.model_copy(update={
+            "data_quality": "partial",
+            "vwap_reliable": False,
+        })
     expectation_row = _persisted_expectation_row(db, code, stage)
     if expectation_row is not None:
         expectation = _expectation_out(expectation_row)
@@ -1586,6 +1768,54 @@ def decision_card(db: Session, code: str) -> StockDecisionCardOut:
         forbidden.append("卖出方向与价格下移同步，禁止接飞刀；只按预设失效位处理风险。")
     elif effective_flow.state == "LIQUIDITY_SHOCK":
         forbidden.append("流动性冲击尚未稳定，禁止追涨、抄底和即时反手。")
+    if not market_data_status["is_current_session"]:
+        allowed = ["历史行情仅供复盘，不生成当日操作建议"]
+        forbidden = [
+            market_data_status["data_status_note"],
+            "行情证据未通过当前交易日校验，禁止据此买入、加仓、减仓或清仓。",
+            *forbidden,
+        ]
+        historical_note = "历史快照仅供复盘；取得并核验当前交易日行情后才生成操作结论。"
+        expectation = expectation.model_copy(update={"suggestion": historical_note})
+        if execution is not None:
+            execution = execution.model_copy(update={
+                "recommended_position_ratio": execution.current_position_ratio,
+                "recommended_action": "历史快照：不执行",
+                "recommended_reduce_ratio": 0,
+                "t_eligible": False,
+                "t_type": "NO_T",
+                "recommendation": None,
+                "high_sell_signal": None,
+                "panic_sell_guard": None,
+                "contrarian_add_signal": None,
+                "data_quality": "historical",
+            })
+        if t_eligibility is not None:
+            t_eligibility = t_eligibility.model_copy(update={
+                "eligible": False,
+                "suggested_quantity": 0,
+                "current_action": "历史快照：不执行做T",
+                "forbidden_reasons": [
+                    historical_note,
+                    *t_eligibility.forbidden_reasons,
+                ],
+            })
+        entry_discipline = {
+            **entry_discipline,
+            "decision": "BLOCK",
+            "label": "历史行情：禁止生成买入结论",
+            "risk_level": "UNKNOWN",
+            "hard_blocked": True,
+            "allowed_position_ratio": 0,
+            "evidence": [historical_note],
+            "data_quality": "historical",
+        }
+        consensus_risk = consensus_risk.model_copy(update={"actions": []})
+        effective_capital = {
+            **effective_capital,
+            "discipline": [],
+            "warnings": [historical_note, *effective_capital["warnings"]],
+        }
     return StockDecisionCardOut(
         code=code,
         name=name,
@@ -1603,12 +1833,19 @@ def decision_card(db: Session, code: str) -> StockDecisionCardOut:
         evidence=(execution.evidence if execution else expectation.evidence),
         counter_evidence=(execution.counter_evidence if execution else expectation.counter_evidence),
         data_quality=(
-            "stale" if capture is not None and capture.is_stale
-            else str(capture.quality or "missing") if capture is not None
+            str(capture.quality or "missing")
+            if market_data_status["is_current_session"] and capture is not None
+            else "stale" if quote
             else "missing"
         ),
         consensus_risk=consensus_risk,
         minute_chart=minute_chart,
         entry_discipline=entry_discipline,
         effective_capital=effective_capital,
+        market_data_trade_date=market_data_status["market_data_trade_date"],
+        market_data_as_of=market_data_status["market_data_as_of"],
+        provider_event_at=market_data_status["provider_event_at"],
+        data_age_seconds=market_data_status["data_age_seconds"],
+        is_current_session=market_data_status["is_current_session"],
+        data_status_note=market_data_status["data_status_note"],
     )

@@ -125,11 +125,14 @@ def _latest_a_share_quotes(codes: list[str]) -> dict[str, dict[str, Any]]:
     # Holdings and decision cards normally request only a few symbols.  Prefer
     # lightweight symbol APIs so a slow full-market AkShare snapshot cannot
     # make the UI look as if holdings disappeared.
+    delayed_quotes: dict[str, dict[str, Any]] = {}
     try:
         quotes = _latest_a_share_quotes_eastmoney(codes)
         if quotes:
-            _attach_minute_bars(quotes)
-            return quotes
+            if not all(bool(item.get("is_delayed_endpoint")) for item in quotes.values()):
+                _attach_minute_bars(quotes)
+                return quotes
+            delayed_quotes = quotes
     except Exception:
         pass
     try:
@@ -139,6 +142,9 @@ def _latest_a_share_quotes(codes: list[str]) -> dict[str, dict[str, Any]]:
             return quotes
     except Exception:
         pass
+    if delayed_quotes:
+        _attach_minute_bars(delayed_quotes)
+        return delayed_quotes
     # Do not fall back to a full-market snapshot here.  That call can take
     # longer than the reverse-proxy timeout and makes existing holdings appear
     # to vanish.  The caller retains the last verified/manual price instead.
@@ -185,6 +191,7 @@ def _latest_a_share_quotes_sina(codes: list[str]) -> dict[str, dict[str, Any]]:
             parts[31] if len(parts) > 31 else None,
         )
         quotes[code] = {
+            "name": str(parts[0] or code),
             "price": price,
             "change_pct": change_pct,
             "amount": round(amount / 1e8, 2),
@@ -259,6 +266,7 @@ def _latest_a_share_quotes_eastmoney(codes: list[str]) -> dict[str, dict[str, An
             continue
         provider_event_at = _eastmoney_event_at(row.get("f124"))
         quotes[code] = {
+            "name": str(row.get("f14") or code),
             "price": price,
             "change_pct": _safe_float(row.get("f3")),
             "amount": round(_safe_float(row.get("f6")) / 1e8, 2),
@@ -316,6 +324,9 @@ def _attach_minute_bars(quotes: dict[str, dict[str, Any]]) -> None:
         quote["minute_bar_source"] = source
         quote["minute_bar_status"] = status
         quote["minute_bar_trade_date"] = bars[-1].get("trade_date") or _last_trading_day()
+        last_time = str(bars[-1].get("time") or "").strip()
+        if last_time:
+            quote["minute_bar_as_of"] = f"{quote['minute_bar_trade_date']}T{last_time}:00"
         date_note = "" if quote["minute_bar_trade_date"] == shanghai_today().isoformat() else f"({quote['minute_bar_trade_date']})"
         source_note = "东方财富1分钟成交" if status == "ok" else source
         quote["note"] = f"{quote.get('note') or '实时行情'} + {source_note}{date_note}"

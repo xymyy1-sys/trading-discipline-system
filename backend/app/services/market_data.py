@@ -3003,7 +3003,21 @@ class MarketDataProvider:
         if not _is_trading_day():
             notes.append(f"非交易日，展示最近交易日 {target_date} 的涨停池")
         try:
-            raw_items = self._fetch_limit_up_pool_raw(target_date)
+            expected_date = _limit_up_catcher_expected_trade_date(
+                _shanghai_now_naive()
+            )
+            if target_date < expected_date:
+                try:
+                    # A historically dated provider response with a matching
+                    # qdate is already strict evidence.  Eastmoney often
+                    # reports the latest service qdate instead; only that
+                    # failure path may use the separately date-audited pool.
+                    raw_items = self._fetch_limit_up_pool_raw(target_date)
+                except (RuntimeError, ValueError):
+                    raw_items = self._fetch_break_repackage_limit_up_pool(target_date)
+                    source = "东方财富历史涨停池（日线交叉核验）"
+            else:
+                raw_items = self._fetch_limit_up_pool_raw(target_date)
         except Exception as exc:
             notes.append(f"涨停池暂不可用: {exc.__class__.__name__}")
             raw_items = []
@@ -3089,7 +3103,11 @@ class MarketDataProvider:
 
     def _fetch_limit_up_pool_raw(self, trade_date: str) -> list[dict[str, Any]]:
         date_text = trade_date.replace("-", "")
-        rows = self._fetch_direct_limit_up_pool_raw(date_text)
+        # ``allow_empty`` also turns on Eastmoney's ``tc`` coverage audit; the
+        # daily rotation must never accept a truncated first page as a full
+        # closing pool.  A certified zero is kept conservative for now and
+        # does not clear yesterday's watchlist.
+        rows = self._fetch_direct_limit_up_pool_raw(date_text, allow_empty=True)
         if not rows:
             raise ValueError("empty limit-up pool")
         return rows

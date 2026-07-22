@@ -1,5 +1,5 @@
 from concurrent.futures import ThreadPoolExecutor, wait
-from datetime import datetime, time, timedelta
+from datetime import date, datetime, time, timedelta
 import hashlib
 import json
 
@@ -8,7 +8,7 @@ from sqlalchemy.orm import Session
 
 from app.api.helpers.execution import build_position_execution_state
 from app.api.helpers.holdings_calc import _find_holding_by_code
-from app.api.helpers.quotes import _normalize_code
+from app.api.helpers.quotes import _normalize_code, _safe_float
 from app.api.helpers.decision import (
     _event_in_trade_session,
     _expectation_out,
@@ -17,6 +17,7 @@ from app.api.helpers.decision import (
     build_expectation_snapshot,
     create_expectation_snapshot,
     current_expectation_stage,
+    decision_market_data_status,
     decision_card,
     quote_for_code,
     update_expectation_snapshot,
@@ -50,11 +51,78 @@ from app.schemas.trading import (
     ReflexivityAssessmentOut,
 )
 from app.services.market_regime import read_market_regime
+from app.services.trading_calendar import (
+    is_a_share_trading_day,
+    next_a_share_trading_day,
+    previous_a_share_trading_day,
+)
 
 router = APIRouter()
 
 
 _WATCHLIST_RECOMMENDATION_CAPTURE = "watchlist_recommendation"
+_WATCHLIST_GENERATION_CAPTURE = "watchlist_generation"
+_WATCHLIST_GENERATION_TARGET = "AUTO"
+
+
+def _watchlist_generation_completed(db: Session, snapshot_date: str) -> bool:
+    return db.query(DataCaptureSnapshot.id).filter(
+        DataCaptureSnapshot.trade_date == snapshot_date,
+        DataCaptureSnapshot.data_type == _WATCHLIST_GENERATION_CAPTURE,
+        DataCaptureSnapshot.target_code == _WATCHLIST_GENERATION_TARGET,
+        DataCaptureSnapshot.status == "ok",
+        DataCaptureSnapshot.is_complete.is_(True),
+    ).first() is not None
+
+
+def _persist_watchlist_generation(
+    db: Session,
+    *,
+    snapshot_date: str,
+    candidate_count: int,
+    active_codes: list[str],
+) -> None:
+    """Persist a durable batch marker, including a verified zero-member batch."""
+
+    captured_at = shanghai_now_naive()
+    payload = json.dumps(
+        {
+            "schema_version": 1,
+            "snapshot_date": snapshot_date,
+            "candidate_count": candidate_count,
+            "active_count": len(active_codes),
+            "active_codes": sorted(active_codes),
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    row = db.query(DataCaptureSnapshot).filter(
+        DataCaptureSnapshot.trade_date == snapshot_date,
+        DataCaptureSnapshot.data_type == _WATCHLIST_GENERATION_CAPTURE,
+        DataCaptureSnapshot.target_code == _WATCHLIST_GENERATION_TARGET,
+    ).order_by(DataCaptureSnapshot.id.desc()).first()
+    if row is None:
+        row = DataCaptureSnapshot(
+            trade_date=snapshot_date,
+            source="观察池盘后换届",
+            data_type=_WATCHLIST_GENERATION_CAPTURE,
+            target_code=_WATCHLIST_GENERATION_TARGET,
+            target_name="自动观察池批次",
+        )
+    row.captured_at = captured_at
+    row.raw_value_json = payload
+    row.normalized_value_json = payload
+    row.quality = "derived"
+    row.latency_ms = 0
+    row.is_stale = False
+    row.is_degraded = False
+    row.is_estimated = True
+    row.is_complete = True
+    row.status = "ok"
+    row.error_message = ""
+    row.raw_payload_hash = hashlib.sha256(payload.encode("utf-8")).hexdigest()
+    db.add(row)
 
 
 def _persist_watchlist_recommendations(
@@ -134,7 +202,7 @@ def _persist_watchlist_recommendations(
         capture.error_message = ""
         capture.raw_payload_hash = hashlib.sha256(payload_json.encode("utf-8")).hexdigest()
         db.add(capture)
-    db.commit()
+    db.flush()
 
 
 def _persisted_watchlist_recommendations(
@@ -193,14 +261,14 @@ def _completed_trading_days(count: int, now: datetime | None = None) -> list[str
     skipped by the provider calls below).
     """
     current = shanghai_now_naive(now)
-    cursor = current.date()
-    if cursor.weekday() >= 5 or current.time() < time(15, 0):
-        cursor -= timedelta(days=1)
-    result: list[str] = []
+    if is_a_share_trading_day(current.date()) and current.time() >= time(15, 0):
+        cursor = current.date()
+    else:
+        cursor = previous_a_share_trading_day(current.date())
+    result: list[str] = [cursor.isoformat()]
     while len(result) < count:
-        if cursor.weekday() < 5:
-            result.append(cursor.isoformat())
-        cursor -= timedelta(days=1)
+        cursor = previous_a_share_trading_day(cursor)
+        result.append(cursor.isoformat())
     return result
 
 
@@ -342,16 +410,29 @@ def _watchlist_recommendations(
 
     provider = MarketDataProvider()
     recent_dates = _completed_trading_days(5)
-    def load_ladder(value: str):
+    def load_theme():
         try:
-            return provider.limit_up_ladder(value)
+            return provider.theme_radar(force_refresh=True)
+        except TypeError:
+            # 兼容测试替身及尚未接受强制刷新参数的旧提供器。
+            return provider.theme_radar()
+
+    def load_ladder(value: str, *, force_refresh: bool):
+        try:
+            return provider.limit_up_ladder(value, force_refresh=force_refresh)
         except TypeError:
             # 兼容测试替身及只实现默认日期的旧数据提供器。
-            return provider.limit_up_ladder()
+            try:
+                return provider.limit_up_ladder(value)
+            except TypeError:
+                return provider.limit_up_ladder()
     executor = ThreadPoolExecutor(max_workers=8)
-    theme_future = executor.submit(provider.theme_radar)
-    ladder_future = executor.submit(load_ladder, recent_dates[0])
-    historical_futures = {value: executor.submit(load_ladder, value) for value in recent_dates[1:]}
+    theme_future = executor.submit(load_theme)
+    ladder_future = executor.submit(load_ladder, recent_dates[0], force_refresh=True)
+    historical_futures = {
+        value: executor.submit(load_ladder, value, force_refresh=False)
+        for value in recent_dates[1:]
+    }
     broken_future = executor.submit(provider.broken_limit_pool, recent_dates[0])
     all_futures = (theme_future, ladder_future, broken_future, *historical_futures.values())
     done, pending = wait(all_futures, timeout=22)
@@ -528,7 +609,9 @@ def _watchlist_recommendations(
     codes = list(rows)
     for entry in overrides.values():
         is_current_entry = entry.source == "manual" or (
-            entry.source == "auto" and entry.snapshot_date == display_snapshot_date
+            not (persist_rotation and rotation_available)
+            and entry.source == "auto"
+            and entry.snapshot_date == display_snapshot_date
         )
         if entry.status == "active" and is_current_entry and entry.code not in rows:
             is_manual = entry.source == "manual"
@@ -551,9 +634,16 @@ def _watchlist_recommendations(
     if codes:
         for item in db.query(ExpectationSnapshot).filter(ExpectationSnapshot.code.in_(codes)).order_by(ExpectationSnapshot.created_at.desc()).all():
             expectations.setdefault(item.code, item)
-        for item in db.query(VolumePriceSnapshot).filter(VolumePriceSnapshot.code.in_(codes)).order_by(VolumePriceSnapshot.captured_at.desc()).all():
+        for item in db.query(VolumePriceSnapshot).filter(
+            VolumePriceSnapshot.code.in_(codes),
+            VolumePriceSnapshot.trade_date == snapshot_date,
+        ).order_by(VolumePriceSnapshot.captured_at.desc()).all():
             volumes.setdefault(item.code, item)
-        for item in db.query(NextDayPlan).filter(NextDayPlan.code.in_(codes)).order_by(NextDayPlan.updated_at.desc()).all():
+        plan_date = next_a_share_trading_day(date.fromisoformat(snapshot_date)).isoformat()
+        for item in db.query(NextDayPlan).filter(
+            NextDayPlan.code.in_(codes),
+            NextDayPlan.plan_date == plan_date,
+        ).order_by(NextDayPlan.updated_at.desc()).all():
             plans.setdefault(item.code, item)
 
     outputs: list[WatchlistRecommendationOut] = []
@@ -639,7 +729,17 @@ def _watchlist_recommendations(
             entry_reason=(override.entry_reason if override else "") or (row["reasons"][0] if row["reasons"] else "系统评分入选"),
             observation_days=max(1, (shanghai_today() - (override.created_at.date() if override else shanghai_today())).days + 1),
             converted=bool(override and (override.converted_at or row["code"] in holding_codes)),
-            updated_at=max([value for value in (radar.updated_at if radar else None, ladder.updated_at if ladder else None) if value is not None], default=None),
+            updated_at=max(
+                [
+                    shanghai_now_naive(value)
+                    for value in (
+                        radar.updated_at if radar else None,
+                        ladder.updated_at if ladder else None,
+                    )
+                    if value is not None
+                ],
+                default=None,
+            ),
         ))
     output_by_code = {item.code: item for item in outputs}
     # Once a valid closing snapshot exists, rotate the automatic ten exactly
@@ -655,12 +755,12 @@ def _watchlist_recommendations(
             stale.status = "expired"
             stale.updated_at = shanghai_now_naive()
             db.add(stale)
-        db.commit()
     today_auto = db.query(WatchlistEntry).filter(
         WatchlistEntry.source == "auto",
         WatchlistEntry.snapshot_date == snapshot_date,
     ).all()
-    if persist_rotation and rotation_available and not today_auto:
+    generation_already_completed = _watchlist_generation_completed(db, snapshot_date)
+    if persist_rotation and rotation_available:
         ranked = [
             item for item in sorted(outputs, key=lambda item: (-item.score, item.code))
             if item.category in {"昨日涨停承接观察", "近几日涨停／炸板承接观察"}
@@ -698,6 +798,25 @@ def _watchlist_recommendations(
                 if len(selected) >= 10:
                     break
             selected = selected[:10]
+        if today_auto or generation_already_completed:
+            # Reanalysis may adopt a more complete same-close ranking, but a
+            # user deletion permanently reduces this batch's capacity.  This
+            # allows corrected names without silently filling the vacancy.
+            remaining_capacity = sum(
+                1 for item in today_auto if item.status == "active"
+            )
+            selected = selected[:remaining_capacity]
+        selected_codes = {item.code for item in selected}
+        # “重新分析”必须真正重算同一交易日的收盘池。早盘或刚收盘时
+        # 保存过的旧结果不能让当天后续刷新永久卡住；但用户手动剔除的
+        # 标的仍保留 excluded 状态，也不会为了凑数在同日递补。
+        for existing in today_auto:
+            if existing.status == "active" and existing.code not in selected_codes:
+                existing.status = "expired"
+                existing.exit_reason = "同交易日重新分析后不再入选"
+                existing.exited_at = shanghai_now_naive()
+                existing.updated_at = shanghai_now_naive()
+                db.add(existing)
         for rank, item in enumerate(selected, start=1):
             existing = overrides.get(item.code)
             if existing and existing.status == "excluded" and (
@@ -717,7 +836,12 @@ def _watchlist_recommendations(
                 existing.exited_at = None
                 existing.updated_at = shanghai_now_naive()
                 db.add(existing)
-        db.commit()
+        # The application session deliberately disables SQLAlchemy autoflush.
+        # Keep the rotation atomic, but flush the new lifecycle rows before
+        # re-reading them for the response, recommendation snapshots and batch
+        # marker.  Without this, the first generation incorrectly appears
+        # empty until the next request.
+        db.flush()
         today_auto = db.query(WatchlistEntry).filter(WatchlistEntry.source == "auto", WatchlistEntry.snapshot_date == snapshot_date).all()
 
     active_entries = db.query(WatchlistEntry).filter(WatchlistEntry.status == "active").all()
@@ -726,7 +850,6 @@ def _watchlist_recommendations(
             if entry.code in holding_codes and entry.converted_at is None:
                 entry.converted_at = shanghai_now_naive()
                 db.add(entry)
-        db.commit()
     active_codes = {
         item.code for item in active_entries
         if item.source == "manual" or item.snapshot_date == display_snapshot_date
@@ -789,6 +912,21 @@ def _watchlist_recommendations(
     )
     if persist_rotation and rotation_available:
         _persist_watchlist_recommendations(db, result, active_entries, snapshot_date)
+        automatic_codes = sorted(
+            entry.code
+            for entry in active_entries
+            if entry.source == "auto"
+            and entry.snapshot_date == snapshot_date
+            and entry.status == "active"
+        )
+        _persist_watchlist_generation(
+            db,
+            snapshot_date=snapshot_date,
+            candidate_count=len(ranked),
+            active_codes=automatic_codes,
+        )
+    if persist_rotation:
+        db.commit()
     return result
 
 
@@ -801,7 +939,11 @@ def watchlist_recommendations(db: Session = Depends(get_db)) -> list[WatchlistRe
 @router.post("/watchlist-recommendations/refresh", response_model=list[WatchlistRecommendationOut])
 def refresh_watchlist_recommendations(db: Session = Depends(get_db)) -> list[WatchlistRecommendationOut]:
     """Explicitly fetch market evidence and persist the next pool generation."""
-    return _watchlist_recommendations(db, persist_rotation=True)
+    try:
+        return _watchlist_recommendations(db, persist_rotation=True)
+    except Exception:
+        db.rollback()
+        raise
 
 
 @router.post("/watchlist", response_model=WatchlistEntryOut)
@@ -988,6 +1130,82 @@ def upsert_expectation_rule(payload: ExpectationRuleIn, db: Session = Depends(ge
 @router.get("/stocks/{code}/decision-card", response_model=StockDecisionCardOut)
 def get_stock_decision_card(code: str, db: Session = Depends(get_db)) -> StockDecisionCardOut:
     return decision_card(db, code)
+
+
+@router.post("/stocks/{code}/decision-card/refresh", response_model=StockDecisionCardOut)
+def refresh_stock_decision_card(code: str, db: Session = Depends(get_db)) -> StockDecisionCardOut:
+    """Explicitly collect one symbol, then return its current decision read model.
+
+    Page switches keep using the fast database-only GET.  This POST is reserved
+    for the user's 查询/刷新 action and refuses to persist a previous-session
+    quote under today's date.
+    """
+
+    normalized = _normalize_code(code)
+    if len(normalized) != 6 or not normalized.isdigit():
+        raise HTTPException(status_code=422, detail="请输入6位股票代码")
+    quote = quote_for_code(normalized)
+    status = decision_market_data_status(quote, None)
+    if not quote or float(quote.get("price") or 0) <= 0:
+        raise HTTPException(status_code=503, detail="实时行情源暂未返回该股票数据，已保留原历史快照")
+    if not status["is_current_session"]:
+        raise HTTPException(status_code=409, detail=status["data_status_note"])
+
+    collection_quote = dict(quote)
+    if not status["minute_bar_current"]:
+        collection_quote["minute_bars"] = []
+        collection_quote["minute_bar_status"] = "stale_tail"
+        collection_quote["minute_fetch_error"] = "分钟线尾点未贴近当前交易窗口，已禁止生成可靠VWAP"
+
+    latest_capture = (
+        db.query(DataCaptureSnapshot)
+        .filter(
+            DataCaptureSnapshot.target_code.in_([normalized, normalized.lstrip("0")]),
+            DataCaptureSnapshot.data_type == "tracked_stock_minute",
+        )
+        .order_by(DataCaptureSnapshot.captured_at.desc(), DataCaptureSnapshot.id.desc())
+        .first()
+    )
+    if latest_capture is not None:
+        try:
+            previous_quote = json.loads(latest_capture.raw_value_json or "{}")
+        except (TypeError, ValueError, json.JSONDecodeError):
+            previous_quote = {}
+        previous_status = decision_market_data_status(previous_quote, latest_capture)
+        same_market_event = bool(
+            previous_status["is_current_session"]
+            and previous_status["provider_event_at"] == status["provider_event_at"]
+            and previous_status["minute_bar_as_of"] == status["minute_bar_as_of"]
+            and _safe_float(previous_quote.get("price")) == _safe_float(quote.get("price"))
+        )
+        capture_age = (
+            shanghai_now_naive() - shanghai_now_naive(latest_capture.captured_at)
+        ).total_seconds()
+        if same_market_event and -60 <= capture_age <= 60:
+            return decision_card(db, normalized)
+
+    holding = _find_holding_by_code(db, normalized)
+    entry = db.query(WatchlistEntry).filter(WatchlistEntry.code == normalized).first()
+    name = (
+        holding.name if holding is not None
+        else entry.name if entry is not None and entry.name
+        else str(quote.get("name") or normalized)
+    )
+    base_hint = (
+        holding.position_type if holding is not None
+        else entry.category if entry is not None
+        else "手工查询"
+    )
+    from app.services.intraday_evidence_engine import collect_tracked_stock_evidence
+
+    collect_tracked_stock_evidence(
+        db,
+        normalized,
+        name,
+        base_hint or "手工查询",
+        quote=collection_quote,
+    )
+    return decision_card(db, normalized)
 
 
 @router.get("/stocks/{code}/reflexivity", response_model=ReflexivityAssessmentOut)

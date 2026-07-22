@@ -44,6 +44,7 @@ from app.services.simulation_shadow import mark_shadow_equity_after_close, run_s
 from app.services.sector_evidence_history import persist_global_evidence_snapshot
 from app.services.trading_calendar import (
     is_a_share_trading_day,
+    previous_a_share_trading_day,
     trading_calendar_diagnostic,
 )
 from app.services.unified_market_events import persist_unified_market_events
@@ -96,6 +97,16 @@ opportunity_sector_expansion_service = SectorExpansionRadarService()
 SHADOW_ACCOUNT_AUTOMATION_KEY = "system-shadow-forward-v1"
 SHADOW_ACCOUNT_NAME = "系统影子验证账户"
 SHADOW_ACCOUNT_INITIAL_CASH = 1_000_000
+
+
+def _latest_completed_close_date(now: datetime | None = None) -> str:
+    current = shanghai_now_naive(now)
+    completed = (
+        current.date()
+        if is_a_share_trading_day(current.date()) and current.time() >= time(15, 5)
+        else previous_a_share_trading_day(current.date())
+    )
+    return completed.isoformat()
 
 
 def _persist_opportunity_radar_snapshot(
@@ -1062,17 +1073,21 @@ async def _collector_iteration() -> None:
         except Exception as exc:
             _simulation_shadow_last_error = f"{exc.__class__.__name__}: {exc}"
     now = _shanghai_now_naive()
+    completed_close_date = _latest_completed_close_date(now)
     if (
         COLLECTOR_ENABLED
-        and is_a_share_trading_day(now.date())
-        and now.time() > time(15, 0)
-        and _close_expectation_date != now.date().isoformat()
+        and _close_expectation_date != completed_close_date
     ):
-        from app.services.next_day_expectations import generate_next_day_expectations
+        from app.services.next_day_expectations import rotate_watchlist_and_generate_next_day_expectations
         db = SessionLocal()
         try:
-            await asyncio.to_thread(generate_next_day_expectations, db)
-            _close_expectation_date = now.date().isoformat()
+            completed = await asyncio.to_thread(
+                rotate_watchlist_and_generate_next_day_expectations,
+                db,
+                completed_trade_date=completed_close_date,
+            )
+            if completed:
+                _close_expectation_date = completed_close_date
         except asyncio.CancelledError:
             raise
         except Exception:

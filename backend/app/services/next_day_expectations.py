@@ -19,7 +19,37 @@ def next_trading_date(value: date | None = None, *, now: datetime | None = None)
     return next_a_share_trading_day(value or shanghai_today(now)).isoformat()
 
 
-def generate_next_day_expectations(db: Session) -> int:
+def rotate_watchlist_and_generate_next_day_expectations(
+    db: Session,
+    *,
+    completed_trade_date: str,
+) -> bool:
+    """Rotate the just-closed automatic pool before building next-day baselines.
+
+    A provider may publish its final dated limit-up pool a few minutes after
+    15:00.  Returning ``False`` deliberately leaves the scheduler completion
+    marker unset so the next loop retries instead of freezing yesterday's
+    names into today's pool and tomorrow's expectation baselines.
+    """
+
+    from app.api.routes.stocks import (
+        _watchlist_generation_completed,
+        _watchlist_recommendations,
+    )
+
+    if not _watchlist_generation_completed(db, completed_trade_date):
+        _watchlist_recommendations(db, persist_rotation=True)
+    if not _watchlist_generation_completed(db, completed_trade_date):
+        return False
+    generate_next_day_expectations(db, completed_trade_date=completed_trade_date)
+    return True
+
+
+def generate_next_day_expectations(
+    db: Session,
+    *,
+    completed_trade_date: str | None = None,
+) -> int:
     """Upsert baselines for holdings, plans and every active watchlist name.
 
     The automatic portion is already capped at ten by the nightly rotation;
@@ -50,11 +80,15 @@ def generate_next_day_expectations(db: Session) -> int:
             "evidence": [f"来源：{origin}；评分{item.score}，{item.theme}，{item.limit_quality}"] + item.reasons[:2],
         }
 
+    reference_date = completed_trade_date or shanghai_today().isoformat()
     latest_volume: dict[str, VolumePriceSnapshot] = {}
     if targets:
-        for row in db.query(VolumePriceSnapshot).filter(VolumePriceSnapshot.code.in_(targets)).order_by(VolumePriceSnapshot.captured_at.desc()).all():
+        for row in db.query(VolumePriceSnapshot).filter(
+            VolumePriceSnapshot.code.in_(targets),
+            VolumePriceSnapshot.trade_date == reference_date,
+        ).order_by(VolumePriceSnapshot.captured_at.desc()).all():
             latest_volume.setdefault(row.code, row)
-    trade_date = next_trading_date()
+    trade_date = next_trading_date(date.fromisoformat(reference_date))
     if targets:
         db.query(ExpectationSnapshot).filter(
             ExpectationSnapshot.trade_date == trade_date,
@@ -82,7 +116,7 @@ def generate_next_day_expectations(db: Session) -> int:
         coverage, coverage_evidence, coverage_counter = expectation_evidence_coverage(
             quote={},
             volume=volume,
-            reference_trade_date=shanghai_today().isoformat(),
+            reference_trade_date=reference_date,
         )
         evidence.extend(coverage_evidence)
         row = db.query(ExpectationSnapshot).filter(

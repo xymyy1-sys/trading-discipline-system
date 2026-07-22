@@ -1,13 +1,13 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 import json
 from types import SimpleNamespace
 
 import pytest
 
-from app.models.trading import DataCaptureSnapshot, WatchlistEntry
-from app.schemas.trading import LimitUpGroupOut, LimitUpLadderOut, LimitUpStockOut
+from app.models.trading import DataCaptureSnapshot, VolumePriceSnapshot, WatchlistEntry
+from app.schemas.trading import LimitUpGroupOut, LimitUpLadderOut, LimitUpStockOut, ThemeRadarOut
 
 
 def _ladder(trade_date: str, *codes: str) -> LimitUpLadderOut:
@@ -79,6 +79,20 @@ def test_daily_auto_rotation_preserves_manual_and_does_not_refill_same_day(clien
     assert same_day_codes == {"600102", "600103", "600999"}
     assert "600104" not in same_day_codes  # deletion must not be back-filled
 
+    same_day_refresh = client.post("/api/watchlist-recommendations/refresh")
+    assert same_day_refresh.status_code == 200
+    assert {item["code"] for item in same_day_refresh.json()} == {
+        "600102", "600103", "600999",
+    }
+    assert "600104" not in {item["code"] for item in same_day_refresh.json()}
+
+    repeated_refresh = client.post("/api/watchlist-recommendations/refresh")
+    assert repeated_refresh.status_code == 200
+    assert {item["code"] for item in repeated_refresh.json()} == {
+        "600102", "600103", "600999",
+    }
+    assert "600104" not in {item["code"] for item in repeated_refresh.json()}
+
     state["ladder"] = _ladder("2026-07-14", "600101", "600104")
     next_day = client.post("/api/watchlist-recommendations/refresh")
     assert next_day.status_code == 200
@@ -127,6 +141,46 @@ def test_saved_pool_survives_temporary_market_source_failure(client, db_session,
     assert set(rows) == {"600201", "600299"}
     assert rows["600201"]["category"] == "昨日涨停承接观察"
     assert rows["600299"]["category"] == "手动自选"
+
+
+def test_rotation_rolls_back_lifecycle_when_snapshot_persistence_fails(
+    client,
+    db_session,
+    monkeypatch,
+):
+    from app.api.routes import stocks
+
+    state = {"ladder": _ladder("2026-07-14", "600221")}
+    _install_market_stubs(monkeypatch, state)
+    db_session.add(WatchlistEntry(
+        code="600220",
+        name="上一批次标的",
+        source="auto",
+        status="active",
+        snapshot_date="2026-07-13",
+        snapshot_rank=1,
+        category="昨日涨停承接观察",
+    ))
+    db_session.commit()
+
+    def fail_persistence(*_args, **_kwargs):
+        raise RuntimeError("snapshot write failed")
+
+    monkeypatch.setattr(stocks, "_persist_watchlist_recommendations", fail_persistence)
+
+    with pytest.raises(RuntimeError, match="snapshot write failed"):
+        client.post("/api/watchlist-recommendations/refresh")
+
+    db_session.expire_all()
+    previous = db_session.query(WatchlistEntry).filter(WatchlistEntry.code == "600220").one()
+    assert previous.status == "active"
+    assert not db_session.query(WatchlistEntry).filter(
+        WatchlistEntry.snapshot_date == "2026-07-14",
+    ).count()
+    assert not db_session.query(DataCaptureSnapshot).filter(
+        DataCaptureSnapshot.trade_date == "2026-07-14",
+        DataCaptureSnapshot.data_type == "watchlist_generation",
+    ).count()
 
 
 @pytest.mark.parametrize("source", ["unavailable", "东方财富涨停池"])
@@ -236,6 +290,52 @@ def test_completed_trading_day_switches_only_after_close():
     assert _completed_trading_days(1, datetime(2026, 7, 14, 15, 0)) == ["2026-07-14"]
 
 
+def test_scheduler_catches_up_latest_completed_close_after_restart():
+    from app.services.intraday_collector import _latest_completed_close_date
+
+    assert _latest_completed_close_date(datetime(2026, 7, 17, 15, 5)) == "2026-07-17"
+    assert _latest_completed_close_date(datetime(2026, 7, 18, 10, 0)) == "2026-07-17"
+    assert _latest_completed_close_date(datetime(2026, 7, 20, 9, 0)) == "2026-07-17"
+    assert _latest_completed_close_date(datetime(2026, 7, 20, 15, 5)) == "2026-07-20"
+
+
+def test_zero_member_generation_marker_is_a_completed_batch(db_session, monkeypatch):
+    from app.api.routes import stocks
+    from app.services import next_day_expectations
+
+    db_session.add(DataCaptureSnapshot(
+        trade_date="2026-07-17",
+        captured_at=datetime(2026, 7, 17, 15, 5),
+        source="观察池盘后换届",
+        data_type="watchlist_generation",
+        target_code="AUTO",
+        target_name="自动观察池批次",
+        raw_value_json='{"active_count":0}',
+        normalized_value_json='{"active_count":0}',
+        quality="derived",
+        is_complete=True,
+        status="ok",
+    ))
+    db_session.commit()
+    calls: list[str] = []
+    monkeypatch.setattr(
+        stocks,
+        "_watchlist_recommendations",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("must not refetch completed batch")),
+    )
+    monkeypatch.setattr(
+        next_day_expectations,
+        "generate_next_day_expectations",
+        lambda _db, *, completed_trade_date=None: calls.append(completed_trade_date) or 0,
+    )
+
+    assert next_day_expectations.rotate_watchlist_and_generate_next_day_expectations(
+        db_session,
+        completed_trade_date="2026-07-17",
+    ) is True
+    assert calls == ["2026-07-17"]
+
+
 def test_refresh_persists_complete_positive_and_negative_evidence(client, db_session, monkeypatch):
     from app.services.market_data import MarketDataProvider
 
@@ -262,6 +362,17 @@ def test_refresh_persists_complete_positive_and_negative_evidence(client, db_ses
     monkeypatch.setattr(MarketDataProvider, "theme_radar", lambda _self: (_ for _ in ()).throw(RuntimeError("unavailable")))
     monkeypatch.setattr(MarketDataProvider, "limit_up_ladder", lambda _self, *_args: ladder)
     monkeypatch.setattr(MarketDataProvider, "broken_limit_pool", lambda _self, *_args: [])
+    db_session.add(VolumePriceSnapshot(
+        trade_date="2026-07-01",
+        code="600501",
+        name="过期量价",
+        price=12.5,
+        vwap=11.0,
+        vwap_reliable=True,
+        pattern="过期强势模式",
+        data_quality="realtime",
+    ))
+    db_session.commit()
 
     refreshed = client.post("/api/watchlist-recommendations/refresh")
     assert refreshed.status_code == 200
@@ -272,6 +383,7 @@ def test_refresh_persists_complete_positive_and_negative_evidence(client, db_ses
     assert any("炸板" in value or "换手率" in value for value in refreshed_row["risks"])
     assert refreshed_row["expectation_status"] != "等待建立预期"
     assert refreshed_row["volume_price_status"]
+    assert refreshed_row["volume_price_status"] != "过期强势模式"
     assert refreshed_row["risk_reward_ratio"] is not None
 
     persisted = client.get("/api/watchlist-recommendations")
@@ -288,3 +400,54 @@ def test_refresh_persists_complete_positive_and_negative_evidence(client, db_ses
     assert payload["risks"] == refreshed_row["risks"]
     assert capture.is_complete is True
     assert capture.status == "ok"
+
+
+def test_same_day_explicit_refresh_forces_provider_and_replaces_earlier_pool(
+    client,
+    db_session,
+    monkeypatch,
+):
+    from app.services.market_data import MarketDataProvider
+
+    state = {"ladder": _ladder("2026-07-23", "600701")}
+    force_calls: list[tuple[str, bool]] = []
+
+    def theme(_self, force_refresh=False, **_kwargs):
+        force_calls.append(("theme", bool(force_refresh)))
+        return ThemeRadarOut(
+            source="题材测试",
+            updated_at=datetime(2026, 7, 23, 7, 1, tzinfo=timezone.utc),
+            market_temperature="中性",
+            strongest_theme=None,
+            resonance=[],
+            themes=[],
+            notes=[],
+        )
+
+    def ladder(_self, trade_date=None, force_refresh=False):
+        force_calls.append((str(trade_date), bool(force_refresh)))
+        return state["ladder"]
+
+    monkeypatch.setattr(MarketDataProvider, "theme_radar", theme)
+    monkeypatch.setattr(MarketDataProvider, "limit_up_ladder", ladder)
+    monkeypatch.setattr(MarketDataProvider, "broken_limit_pool", lambda _self, *_args: [])
+
+    first = client.post("/api/watchlist-recommendations/refresh")
+    assert first.status_code == 200
+    assert [row["code"] for row in first.json()] == ["600701"]
+
+    state["ladder"] = _ladder("2026-07-23", "600702")
+    second = client.post("/api/watchlist-recommendations/refresh")
+
+    assert second.status_code == 200
+    assert [row["code"] for row in second.json()] == ["600702"]
+    assert force_calls
+    assert ("theme", True) in force_calls
+    assert any(label != "theme" and forced for label, forced in force_calls)
+    # Immutable prior sessions reuse their dated, audited cache.  Only the
+    # newest completed session must bypass cache on an explicit reanalysis.
+    assert any(label != "theme" and not forced for label, forced in force_calls)
+    old = db_session.query(WatchlistEntry).filter(WatchlistEntry.code == "600701").one()
+    new = db_session.query(WatchlistEntry).filter(WatchlistEntry.code == "600702").one()
+    assert old.status == "expired"
+    assert new.status == "active"

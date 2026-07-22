@@ -714,6 +714,12 @@ class StockDecisionCardOut(BaseModel):
     minute_chart: list["MinuteChartPoint"] = Field(default_factory=list)
     entry_discipline: EntryDisciplineOut | None = None
     effective_capital: EffectiveCapitalEvidenceOut | None = None
+    market_data_trade_date: str = ""
+    market_data_as_of: datetime | None = None
+    provider_event_at: datetime | None = None
+    data_age_seconds: float | None = None
+    is_current_session: bool = False
+    data_status_note: str = ""
 
 
 class ConsensusRiskOut(BaseModel):
