@@ -16,6 +16,13 @@ describe('盘中资金与量价事件语义', () => {
       'VOLUME_DOWN_FLOW_ACCELERATION',
       'FLOW_TURN_OUT_DISTRIBUTION_WARNING',
       'SECTOR_DISTRIBUTION_RISK',
+      'PRICE_VOLUME_PATTERN_SHRINKING_RISE_SUPPORTED',
+      'PRICE_VOLUME_PATTERN_SHRINKING_RISE_FRAGILE',
+      'PRICE_VOLUME_PATTERN_SHRINKING_RISE_PENDING',
+      'PRICE_VOLUME_PATTERN_SHRINKING_PULLBACK_HOLD',
+      'PRICE_VOLUME_PATTERN_VOLUME_RISE_CONFIRMED',
+      'PRICE_VOLUME_PATTERN_VOLUME_RISE_STALLED',
+      'PRICE_VOLUME_PATTERN_VOLUME_RISE_PENDING',
     ]
     events.forEach(event => expect(chineseLabel(event)).not.toBe(event))
   })
@@ -39,6 +46,14 @@ describe('盘中资金与量价事件语义', () => {
     expect(intradayEventSemantics('SHRINKING_PULLBACK_SUPPORT_WATCH', 'warning').toneClass).toBe('opportunity-watch')
     expect(intradayEventSemantics('PANIC_SELL_GUARD', 'warning').toneClass).toBe('opportunity-watch')
     expect(isActionableIntradayEvent('SHRINKING_DECLINE_EXHAUSTION_WATCH', 'info')).toBe(true)
+    expect(intradayEventSemantics('PRICE_VOLUME_PATTERN_SHRINKING_PULLBACK_HOLD', 'info').kind).toBe('watch')
+    expect(intradayEventSemantics('PRICE_VOLUME_PATTERN_SHRINKING_RISE_SUPPORTED', 'info').kind).toBe('watch')
+  })
+
+  test('新增量价形态按确认、分歧和风险分别着色', () => {
+    expect(intradayEventSemantics('PRICE_VOLUME_PATTERN_VOLUME_RISE_CONFIRMED', 'info').kind).toBe('opportunity')
+    expect(intradayEventSemantics('PRICE_VOLUME_PATTERN_VOLUME_RISE_STALLED', 'warning').kind).toBe('risk')
+    expect(intradayEventSemantics('PRICE_VOLUME_PATTERN_VOLUME_RISE_PENDING', 'info').kind).toBe('watch')
   })
 
   test('统一板块与持仓新闻事件按验证后的业务语义着色', () => {

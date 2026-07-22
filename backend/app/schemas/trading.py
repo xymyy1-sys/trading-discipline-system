@@ -2337,6 +2337,37 @@ class AuctionPlan(BaseModel):
     stage_decision: str = ""
     action_ladder: list[str] = Field(default_factory=list)
     stage_checks: list[AuctionStageCheck] = Field(default_factory=list)
+    selected_branch: Literal[
+        "low_open_selloff",
+        "range_open_balance",
+        "high_open_rally",
+        "data_gap",
+    ] = "data_gap"
+    selected_branch_label: str = ""
+    branch_status: Literal["pending", "active"] = "pending"
+    branch_reason: str = ""
+    branch_selected_at: str = ""
+    current_advice: str = ""
+    advice_level: Literal["observe", "positive", "warning", "critical"] = "observe"
+    advice_state: Literal["active"] = "active"
+    advice_revision: int = 0
+    previous_advice: str = ""
+    advice_change: Literal[
+        "initialized",
+        "unchanged",
+        "upgraded",
+        "downgraded",
+        "withdrawn",
+        "replaced",
+    ] = "initialized"
+    advice_change_reason: str = ""
+    auto_refreshed_at: str = ""
+    advice_history: list[dict[str, Any]] = Field(default_factory=list)
+    plan_source: str = ""
+    baseline_trade_date: str = ""
+    execution_state_advice: str = ""
+    execution_state: str = ""
+    execution_state_id: int | None = None
     mainline_name: str = ""
     mainline_rank: int | None = None
     mainline_score: int | None = None

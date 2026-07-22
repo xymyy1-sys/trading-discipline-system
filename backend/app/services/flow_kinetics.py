@@ -36,6 +36,29 @@ class PriceVolumeFlowAlert:
     severity: str
     action: str
     evidence: tuple[str, ...]
+    counter_evidence: tuple[str, ...] = ()
+    invalidation: tuple[str, ...] = ()
+    recovery_conditions: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class PriceVolumePatternState:
+    """A causal, auditable interpretation of a price-volume shape.
+
+    A volume ratio never decides the state on its own.  Deterministic states
+    require a reliable VWAP plus confirmation from at least one independent
+    family such as order-flow direction, price retention or sector resonance.
+    """
+
+    state: str = "INSUFFICIENT_DATA"
+    label: str = "量价证据不足"
+    risk_level: str = "未知"
+    decisive: bool = False
+    evidence: tuple[str, ...] = ()
+    counter_evidence: tuple[str, ...] = ()
+    advice: str = "等待真实分钟量价、订单流和板块共振补齐后再判断。"
+    invalidation: tuple[str, ...] = ()
+    recovery_conditions: tuple[str, ...] = ()
 
 
 def _shanghai_now_naive() -> datetime:
@@ -213,6 +236,222 @@ def analyze_flow_kinetics(
         window_minutes=elapsed,
         reliable=True,
         evidence=evidence,
+    )
+
+
+def classify_volume_price_pattern(
+    *,
+    change_pct: float,
+    volume_ratio: float | None,
+    price_vs_vwap_pct: float | None,
+    vwap_reliable: bool,
+    high_drawdown_pct: float = 0,
+    near_recent_high: bool | None = None,
+    follow_through: bool | None = None,
+    active_buy_amount: float | None = None,
+    active_sell_amount: float | None = None,
+    active_flow_reliable: bool = False,
+    sector_resonance: bool | None = None,
+    flow: FlowKinetics | None = None,
+) -> PriceVolumePatternState:
+    """Classify the common intraday price-volume shapes without guessing intent.
+
+    ``volume_ratio`` describes participation, not direction.  A shrinking rise
+    therefore becomes "疑似诱多" only when at least two independent adverse
+    families (position/retention/order flow/sector flow) agree.  Likewise a
+    volume-backed rise is confirmed only after price acceptance above VWAP and
+    follow-through or flow confirmation are observable.
+    """
+
+    ratio = float(volume_ratio or 0)
+    if ratio <= 0 or not vwap_reliable or price_vs_vwap_pct is None:
+        missing: list[str] = []
+        if ratio <= 0:
+            missing.append("同时间进度量比缺失")
+        if not vwap_reliable or price_vs_vwap_pct is None:
+            missing.append("真实分钟VWAP缺失")
+        return PriceVolumePatternState(
+            evidence=tuple(missing),
+            counter_evidence=("成交量只代表参与和分歧，缺少价格承接证据时不能判断诱多或延续。",),
+            recovery_conditions=("补齐真实分钟成交、VWAP、价格保持和订单流/板块共振。",),
+        )
+
+    above_vwap = price_vs_vwap_pct > 0.2
+    flow_worsening = bool(flow and flow.reliable and flow.turning in {
+        "TURN_TO_OUTFLOW", "INFLOW_FADING", "OUTFLOW_ACCELERATING", "FLOW_WEAKENING",
+    })
+    flow_improving = bool(flow and flow.reliable and flow.turning in {
+        "TURN_TO_INFLOW", "OUTFLOW_NARROWING", "INFLOW_ACCELERATING", "FLOW_IMPROVING",
+    })
+
+    buy = float(active_buy_amount or 0)
+    sell = float(active_sell_amount or 0)
+    flow_total = buy + sell
+    buy_dominant = bool(active_flow_reliable and flow_total > 0 and buy / flow_total >= 0.55)
+    sell_dominant = bool(active_flow_reliable and flow_total > 0 and sell / flow_total >= 0.55)
+    sector_support = sector_resonance is True or flow_improving
+    sector_weakness = sector_resonance is False or flow_worsening
+    flow_support = buy_dominant or sector_support
+    flow_weakness = sell_dominant or sector_weakness
+    high_position = near_recent_high is True
+
+    ratio_evidence = f"同时间进度量比 {ratio:.2f}"
+    vwap_evidence = f"价格相对真实VWAP {price_vs_vwap_pct:+.2f}%"
+    order_evidence = (
+        f"供应商逐笔方向估算的主动买/卖额 {buy:.2f}/{sell:.2f} 亿（不等于账户真实资金流）"
+        if active_flow_reliable and flow_total > 0 else "主动买卖方向尚不可核验"
+    )
+    sector_evidence = (
+        "板块订单流/共振同步改善" if sector_support
+        else "板块订单流/共振转弱" if sector_weakness
+        else "板块共振证据待补"
+    )
+
+    adverse_families = {
+        "position": high_position,
+        "retention": follow_through is False or not above_vwap or high_drawdown_pct >= 1.5,
+        "order_flow": sell_dominant,
+        "sector": sector_weakness,
+    }
+    adverse_count = sum(bool(value) for value in adverse_families.values())
+
+    if change_pct >= 0.8 and ratio <= 0.8 and adverse_count >= 2:
+        high_risk = high_position and adverse_count >= 3
+        risks = []
+        if high_position:
+            risks.append("价格接近近期高位")
+        if adverse_families["retention"]:
+            risks.append(f"价格保持不足（高点回撤 {high_drawdown_pct:.2f}%）")
+        if sell_dominant:
+            risks.append(order_evidence)
+        if sector_weakness:
+            risks.append(sector_evidence)
+        return PriceVolumePatternState(
+            state="SHRINKING_RISE_FRAGILE",
+            label="缩量上涨脆弱·疑似诱多" if high_risk else "缩量上涨脆弱",
+            risk_level="高" if high_risk else "中",
+            decisive=True,
+            evidence=(ratio_evidence, vwap_evidence, *risks),
+            counter_evidence=(
+                "缩量本身也可能来自抛压较轻；当前结论来自位置、价格保持和资金/板块证据的联合，而非仅凭缩量。",
+            ),
+            advice="禁止追高；已有仓位观察冲高兑现窗口，不因单个缩量信号直接清仓。",
+            invalidation=("放量突破并连续保持在真实VWAP上方。", "主动买盘与板块订单流重新同步增强。"),
+            recovery_conditions=("首次回踩缩量且不破VWAP，随后价格再创新高。",),
+        )
+
+    if (
+        change_pct >= 0.8
+        and ratio <= 0.8
+        and above_vwap
+        and follow_through is True
+        and not flow_weakness
+        and flow_support
+    ):
+        return PriceVolumePatternState(
+            state="SHRINKING_RISE_SUPPORTED",
+            label="缩量上涨·抛压较轻",
+            risk_level="低",
+            decisive=True,
+            evidence=(ratio_evidence, vwap_evidence, "最近观察持续保持在VWAP上方", order_evidence, sector_evidence),
+            counter_evidence=("缩量上涨仍可能因参与不足而脆弱，尚不能仅凭该形态追涨。",),
+            advice="保持观察，不追直线拉升；等待首次缩量回踩不破VWAP再评估延续。",
+            invalidation=("放量跌破VWAP。", "主动卖盘占优或板块订单流拐出。"),
+            recovery_conditions=("回踩VWAP不破并重新放量创出日内新高。",),
+        )
+
+    if (
+        change_pct >= 0
+        and ratio <= 0.8
+        and 0.5 <= high_drawdown_pct <= 3.0
+        and above_vwap
+        and follow_through is True
+        and not flow_weakness
+    ):
+        return PriceVolumePatternState(
+            state="SHRINKING_PULLBACK_HOLD",
+            label="缩量回踩不破VWAP",
+            risk_level="低",
+            decisive=True,
+            evidence=(ratio_evidence, vwap_evidence, f"高点回撤 {high_drawdown_pct:.2f}% 后仍保持在VWAP上方", sector_evidence),
+            counter_evidence=("回踩尚未重新突破日内高点，承接成立不等于立即加仓。",),
+            advice="不在回踩中恐慌卖出；等待重新放量上攻，禁止提前把观察信号当成买点。",
+            invalidation=("回踩放量并连续跌破VWAP。", "板块共振和主动订单流同步转弱。"),
+            recovery_conditions=("缩量企稳后重新放量突破回踩前高点。",),
+        )
+
+    if change_pct >= 0.8 and ratio >= 1.2:
+        stalled = adverse_count >= 2
+        if stalled:
+            high_risk = high_position and adverse_count >= 3
+            risks = []
+            if high_position:
+                risks.append("价格位于近期高位")
+            if adverse_families["retention"]:
+                risks.append(f"放量后价格保持不足，高点回撤 {high_drawdown_pct:.2f}%")
+            if sell_dominant:
+                risks.append(order_evidence)
+            if sector_weakness:
+                risks.append(sector_evidence)
+            return PriceVolumePatternState(
+                state="VOLUME_RISE_STALLED",
+                label="放量滞涨·高位承载衰减" if high_risk else "放量上涨但承载效率下降",
+                risk_level="高" if high_risk else "中",
+                decisive=True,
+                evidence=(ratio_evidence, vwap_evidence, *risks),
+                counter_evidence=("放量代表分歧和换手，不等于资金必然继续推动价格。",),
+                advice="禁止追高并提高利润保护；等待价格重新站稳VWAP和放量突破，不凭成交放大继续加仓。",
+                invalidation=("价格重新放量突破日内高点并持续保持。", "主动买盘和板块共振恢复。"),
+                recovery_conditions=("回踩成交缩减、VWAP不破，随后上攻效率重新提高。",),
+            )
+        if above_vwap and follow_through is True and flow_support and not flow_weakness:
+            return PriceVolumePatternState(
+                state="VOLUME_RISE_CONFIRMED",
+                label="放量上涨确认",
+                risk_level="低",
+                decisive=True,
+                evidence=(ratio_evidence, vwap_evidence, "最近观察持续保持在VWAP上方", order_evidence, sector_evidence),
+                counter_evidence=("放量消耗增加，仍需观察首次回踩承接，不能推导为后续必涨。",),
+                advice="按计划持有或观察，不追直线拉升；首次回踩VWAP不破才确认惯性延续。",
+                invalidation=("价格跌破VWAP且主动卖盘占优。", "放量后无法创新高并出现板块转弱。"),
+                recovery_conditions=("回踩缩量、VWAP不破并再次放量创出日内新高。",),
+            )
+
+    if change_pct >= 0.8 and ratio <= 0.8:
+        return PriceVolumePatternState(
+            state="SHRINKING_RISE_PENDING",
+            label="缩量上涨待确认",
+            risk_level="未知",
+            decisive=False,
+            evidence=(ratio_evidence, vwap_evidence),
+            counter_evidence=("订单流、板块共振或后续价格保持不足，不能区分抛压轻与参与不足。",),
+            advice="不追高、不预判诱多；等待VWAP保持、订单流和首次回踩结果。",
+            invalidation=("价格跌回VWAP下方或高点回撤继续扩大。",),
+            recovery_conditions=("补齐主动订单流/板块共振并完成首次回踩确认。",),
+        )
+
+    if change_pct >= 0.8 and ratio >= 1.2:
+        return PriceVolumePatternState(
+            state="VOLUME_RISE_PENDING",
+            label="放量上涨待承接确认",
+            risk_level="未知",
+            decisive=False,
+            evidence=(ratio_evidence, vwap_evidence),
+            counter_evidence=("缺少价格保持或资金共振证据，放量不能单独证明趋势延续。",),
+            advice="等待首次回踩和VWAP承接，不因成交额放大直接追涨。",
+            invalidation=("价格放量跌破VWAP。",),
+            recovery_conditions=("价格持续位于VWAP上方且主动买盘/板块共振增强。",),
+        )
+
+    return PriceVolumePatternState(
+        state="NEUTRAL",
+        label="量价中性",
+        risk_level="未知",
+        decisive=False,
+        evidence=(ratio_evidence, vwap_evidence),
+        counter_evidence=("当前未同时满足典型形态的价格、成交和承接条件。",),
+        advice="继续观察，不生成确定性买卖建议。",
+        recovery_conditions=("等待价格、VWAP、订单流与板块共振形成一致证据。",),
     )
 
 

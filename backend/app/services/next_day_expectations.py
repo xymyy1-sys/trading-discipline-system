@@ -40,6 +40,14 @@ def rotate_watchlist_and_generate_next_day_expectations(
     if not _watchlist_generation_completed(db, completed_trade_date):
         _watchlist_recommendations(db, persist_rotation=True)
     if not _watchlist_generation_completed(db, completed_trade_date):
+        # A delayed limit-up provider must not block the user's current
+        # holdings from receiving their next-session scripts and baselines.
+        # Keep returning False so the watchlist half is retried later.
+        generate_next_day_expectations(
+            db,
+            completed_trade_date=completed_trade_date,
+            include_watchlist=False,
+        )
         return False
     generate_next_day_expectations(db, completed_trade_date=completed_trade_date)
     return True
@@ -49,6 +57,7 @@ def generate_next_day_expectations(
     db: Session,
     *,
     completed_trade_date: str | None = None,
+    include_watchlist: bool = True,
 ) -> int:
     """Upsert baselines for holdings, plans and every active watchlist name.
 
@@ -60,25 +69,26 @@ def generate_next_day_expectations(
     targets: dict[str, dict] = {}
     for holding in db.query(Holding).all():
         targets[holding.code] = {"name": holding.name, "hint": holding.position_type or "持仓股", "evidence": ["来源：当前持仓"]}
-    for plan in db.query(NextDayPlan).filter(NextDayPlan.plan_type == "limit_up_auction").all():
-        targets.setdefault(plan.code, {
-            "name": plan.name,
-            "hint": "打板预案",
-            "evidence": ["来源：有效打板预案；次日必须经集合竞价与开盘承接验证"],
-        })
-    try:
-        recommendations = watchlist_recommendations(db)
-    except Exception:
-        recommendations = []
-    holding_codes = set(targets)
-    for item in [row for row in recommendations if row.code not in holding_codes]:
-        is_manual = item.category == "手动自选"
-        origin = "手动观察池" if is_manual else "自动观察池前10"
-        targets[item.code] = {
-            "name": item.name,
-            "hint": "手动观察" if is_manual else ("强预期" if item.score >= 75 else "主线前排"),
-            "evidence": [f"来源：{origin}；评分{item.score}，{item.theme}，{item.limit_quality}"] + item.reasons[:2],
-        }
+    if include_watchlist:
+        for plan in db.query(NextDayPlan).filter(NextDayPlan.plan_type == "limit_up_auction").all():
+            targets.setdefault(plan.code, {
+                "name": plan.name,
+                "hint": "打板预案",
+                "evidence": ["来源：有效打板预案；次日必须经集合竞价与开盘承接验证"],
+            })
+        try:
+            recommendations = watchlist_recommendations(db)
+        except Exception:
+            recommendations = []
+        holding_codes = set(targets)
+        for item in [row for row in recommendations if row.code not in holding_codes]:
+            is_manual = item.category == "手动自选"
+            origin = "手动观察池" if is_manual else "自动观察池前10"
+            targets[item.code] = {
+                "name": item.name,
+                "hint": "手动观察" if is_manual else ("强预期" if item.score >= 75 else "主线前排"),
+                "evidence": [f"来源：{origin}；评分{item.score}，{item.theme}，{item.limit_quality}"] + item.reasons[:2],
+            }
 
     reference_date = completed_trade_date or shanghai_today().isoformat()
     latest_volume: dict[str, VolumePriceSnapshot] = {}
@@ -89,7 +99,7 @@ def generate_next_day_expectations(
         ).order_by(VolumePriceSnapshot.captured_at.desc()).all():
             latest_volume.setdefault(row.code, row)
     trade_date = next_trading_date(date.fromisoformat(reference_date))
-    if targets:
+    if targets and include_watchlist:
         db.query(ExpectationSnapshot).filter(
             ExpectationSnapshot.trade_date == trade_date,
             ExpectationSnapshot.stage == "次日盘前预期",
@@ -149,5 +159,15 @@ def generate_next_day_expectations(
         db.flush()
         _persist_expectation_revision(db, row, trigger="close_baseline")
         count += 1
+    # Build the ordinary holding plan in the same transaction as its close
+    # baseline.  A scheduler retry can therefore never expose an expectation
+    # without the matching three-branch execution script (or vice versa).
+    from app.api.helpers.plan_calc import upsert_holding_next_day_plans
+
+    upsert_holding_next_day_plans(
+        db,
+        completed_trade_date=reference_date,
+        commit=False,
+    )
     db.commit()
     return count

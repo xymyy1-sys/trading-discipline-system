@@ -1,8 +1,8 @@
 import json
-from datetime import timedelta
+from datetime import date, datetime, time
 from typing import Any
 from sqlalchemy.orm import Session
-from app.models.trading import Holding, NextDayPlan
+from app.models.trading import ExpectationSnapshot, Holding, NextDayPlan, VolumePriceSnapshot
 from app.schemas.trading import ClassificationBasis, NextDayPlanOut, NextDayPlanCreate, LimitUpPlanCreate, AuctionPlan
 from app.services.market_data import _get_current_theme_radar_cache, _last_trading_day
 from app.services.cache import _get_response_cache
@@ -20,6 +20,7 @@ from app.api.helpers.quotes import (
 )
 from app.api.helpers.holdings_calc import _account_total_asset, _refresh_holding_prices
 from app.core.trading_clock import shanghai_now_naive, shanghai_today
+from app.services.trading_calendar import is_a_share_trading_day, next_a_share_trading_day
 from app.api.helpers.seesaw import (
     _cached_holding_theme_flow_profile,
     _holding_theme_profile,
@@ -72,11 +73,23 @@ def _estimated_vwap(quote: dict[str, Any]) -> float:
     samples = [item for item in (open_price, high, low, price) if item]
     return round(sum(samples) / len(samples), 2) if samples else 0.0
 
-def _next_trade_date() -> str:
-    d = shanghai_today() + timedelta(days=1)
-    while d.weekday() >= 5:
-        d += timedelta(days=1)
-    return d.strftime("%Y-%m-%d")
+def _next_trade_date(value: date | None = None) -> str:
+    """Return the next real A-share session, including exchange holidays."""
+
+    return next_a_share_trading_day(value or shanghai_today()).isoformat()
+
+
+def resolve_default_plan_date(db: Session, now: datetime | None = None) -> str:
+    """Resolve the plan currently being executed rather than always tomorrow."""
+
+    current = shanghai_now_naive(now)
+    today = current.date().isoformat()
+    before_close_roll = (current.hour, current.minute) < (15, 5)
+    if is_a_share_trading_day(current.date()) and before_close_roll:
+        exists = db.query(NextDayPlan.id).filter(NextDayPlan.plan_date == today).first()
+        if exists is not None:
+            return today
+    return _next_trade_date(current.date())
 
 def _default_next_day_plan(
     holding: Holding,
@@ -84,9 +97,11 @@ def _default_next_day_plan(
     account_total_asset: float | None = None,
     quote: dict[str, Any] | None = None,
 ) -> NextDayPlan:
+    quote = quote or {}
+    reference_price = _safe_float(quote.get("price")) or holding.current_price
     total_asset = account_total_asset if account_total_asset is not None else holding.total_asset
     position_ratio = (
-        holding.quantity * holding.current_price / total_asset
+        holding.quantity * reference_price / total_asset
         if total_asset
         else 0.0
     )
@@ -106,8 +121,8 @@ def _default_next_day_plan(
             ]
             if item
         ),
-        support=str(round(holding.current_price * 0.97, 2)),
-        pressure=str(round(holding.current_price * 1.04, 2)),
+        support=str(round(reference_price * 0.97, 2)),
+        pressure=str(round(reference_price * 1.04, 2)),
         weaker_than_sector=bool(evidence.get("weaker_than_sector")),
     )
     dynamic_plan = _dynamic_holding_auction_plan(holding, category, evidence, quote)
@@ -120,7 +135,7 @@ def _default_next_day_plan(
         name=holding.name,
         quantity=holding.quantity,
         cost_price=holding.cost_price,
-        current_price=holding.current_price,
+        current_price=reference_price,
         position_ratio=round(position_ratio, 4),
         holding_category=category,
         classification_basis=basis.model_dump_json(),
@@ -130,22 +145,22 @@ def _default_next_day_plan(
         expected_action=_expected_action(category),
         underperform_condition=_underperform_condition(category),
         underperform_action=_underperform_action(category),
-        confirm_price=round(max(holding.current_price, holding.cost_price), 2),
-        trim_price=round(max(holding.current_price * 1.03, holding.cost_price * 1.04), 2),
+        confirm_price=round(max(reference_price, holding.cost_price), 2),
+        trim_price=round(max(reference_price * 1.03, holding.cost_price * 1.04), 2),
         trim_condition=(
             "到达计划兑现位/早盘有效高点后，只有放量滞涨或跌破VWAP、板块订单流方向走弱、"
             "高点回撤、利润保护中的至少两类证据共振，才分批兑现25%-50%；重新站稳VWAP并突破高点则取消。"
         ),
         trim_quantity=trim_quantity,
         allow_buyback=category in {"符合预期", "弱转强"},
-        buyback_price=round(holding.current_price * 0.97, 2),
+        buyback_price=round(reference_price * 0.97, 2),
         buyback_condition=(
             "禁止把不恐慌卖出等同于抄底。仅当全市场扩仓闸门开放、板块订单流方向转强、"
             "个股V形/低点抬高并站回真实VWAP、到兑现位风险收益比不低于1.5时，才允许评估小仓试错。"
         ),
         max_buyback_quantity=trim_quantity if category in {"符合预期", "弱转强"} else 0,
-        reduce_price=round(holding.cost_price * 0.98, 2),
-        final_risk_price=round(holding.cost_price * 0.96, 2),
+        reduce_price=round(max(reference_price * 0.97, holding.cost_price * 0.98), 2),
+        final_risk_price=round(max(reference_price * 0.94, holding.cost_price * 0.96), 2),
         stop_loss_4pct=round(holding.cost_price * 0.96, 2),
         auction_plan=json.dumps(dynamic_plan, ensure_ascii=False),
         forbidden_actions=json.dumps(list(dict.fromkeys([
@@ -196,21 +211,160 @@ def _sync_holding_plan(existing: NextDayPlan, fresh: NextDayPlan) -> None:
     _refresh_plan_risk(existing)
 
 
-def _current_stage_label() -> str:
-    now = shanghai_now_naive().time()
-    if now.hour < 9 or (now.hour == 9 and now.minute < 25):
+def upsert_holding_next_day_plans(
+    db: Session,
+    *,
+    completed_trade_date: str,
+    commit: bool = True,
+) -> int:
+    """Create the next-session holding scripts from the completed close.
+
+    This is the server-side counterpart of the old manual ``generate`` button.
+    It deliberately uses the already persisted close snapshot instead of doing
+    provider I/O after the close, so the plan and its expectation baseline are
+    derived from the same auditable market-data cut.
+    """
+
+    reference_date = date.fromisoformat(completed_trade_date)
+    plan_date = _next_trade_date(reference_date)
+    holdings = db.query(Holding).order_by(Holding.updated_at.desc()).all()
+    holding_codes = {str(row.code) for row in holdings}
+    if holding_codes:
+        db.query(NextDayPlan).filter(
+            NextDayPlan.plan_date == plan_date,
+            NextDayPlan.plan_type == "holding",
+            ~NextDayPlan.code.in_(holding_codes),
+        ).delete(synchronize_session=False)
+    else:
+        db.query(NextDayPlan).filter(
+            NextDayPlan.plan_date == plan_date,
+            NextDayPlan.plan_type == "holding",
+        ).delete(synchronize_session=False)
+
+    latest_volume: dict[str, VolumePriceSnapshot] = {}
+    if holding_codes:
+        rows = (
+            db.query(VolumePriceSnapshot)
+            .filter(
+                VolumePriceSnapshot.trade_date == completed_trade_date,
+                VolumePriceSnapshot.code.in_(holding_codes),
+            )
+            .order_by(VolumePriceSnapshot.captured_at.desc(), VolumePriceSnapshot.id.desc())
+            .all()
+        )
+        for row in rows:
+            latest_volume.setdefault(str(row.code), row)
+
+    account_total_asset = _account_total_asset(db)
+    count = 0
+    for holding in holdings:
+        volume = latest_volume.get(str(holding.code))
+        quote: dict[str, Any] = {}
+        if volume is not None:
+            quote = {
+                "price": volume.price,
+                "change_pct": volume.change_pct,
+                "open": volume.open_price,
+                "prev_close": volume.prev_close,
+                "high": volume.high_price,
+                "low": volume.low_price,
+                "volume": volume.volume,
+                "amount": volume.amount,
+                "turnover": volume.turnover,
+                "volume_ratio": volume.volume_ratio,
+                "vwap": volume.vwap if volume.vwap_reliable else 0,
+                "note": f"{completed_trade_date} 收盘量价快照",
+            }
+        fresh = _default_next_day_plan(
+            holding,
+            plan_date,
+            account_total_asset,
+            quote,
+        )
+        auction = _json_obj(fresh.auction_plan)
+        auction.update(
+            {
+                "plan_source": "after_close_auto",
+                "baseline_trade_date": completed_trade_date,
+                "selected_branch": "data_gap",
+                "selected_branch_label": "等待竞价数据",
+                "branch_status": "pending",
+                "branch_reason": "盘后剧本已生成，等待下一交易日集合竞价选择互斥分支。",
+                "branch_selected_at": "",
+                "current_advice": "等待集合竞价，不把盘后预期当作买卖指令。",
+                "advice_level": "observe",
+                "advice_state": "active",
+                "advice_revision": 1,
+                "previous_advice": "",
+                "advice_change": "initialized",
+                "advice_change_reason": "盘后自动生成三套条件剧本。",
+                "auto_refreshed_at": shanghai_now_naive().strftime("%Y-%m-%d %H:%M:%S"),
+                "advice_history": [
+                    {
+                        "revision": 1,
+                        "advice": "等待集合竞价，不把盘后预期当作买卖指令。",
+                        "level": "observe",
+                        "state": "active",
+                        "stage": "盘后预期",
+                        "branch": "data_gap",
+                        "reason": "盘后自动生成三套条件剧本。",
+                        "created_at": shanghai_now_naive().strftime("%Y-%m-%d %H:%M:%S"),
+                    }
+                ],
+            }
+        )
+        fresh.auction_plan = json.dumps(auction, ensure_ascii=False)
+        existing_rows = (
+            db.query(NextDayPlan)
+            .filter(
+                NextDayPlan.plan_date == plan_date,
+                NextDayPlan.code == holding.code,
+                NextDayPlan.plan_type == "holding",
+            )
+            .order_by(NextDayPlan.updated_at.desc(), NextDayPlan.id.desc())
+            .all()
+        )
+        if existing_rows:
+            existing = existing_rows[0]
+            existing_auction_raw = existing.auction_plan
+            existing_auction = _json_obj(existing_auction_raw)
+            same_baseline = (
+                str(existing_auction.get("baseline_trade_date") or "")
+                == completed_trade_date
+            )
+            for duplicate in existing_rows[1:]:
+                db.delete(duplicate)
+            _sync_holding_plan(existing, fresh)
+            if same_baseline:
+                # A morning restart replays the latest completed close.  Keep
+                # the already-selected branch, advice audit trail, stage
+                # checks, and any user-authored JSON instead of rewinding the
+                # live plan to its post-close initial state.
+                existing.auction_plan = existing_auction_raw
+        else:
+            db.add(fresh)
+        count += 1
+    db.flush()
+    if commit:
+        db.commit()
+    return count
+
+
+def _current_stage_label(now: datetime | None = None) -> str:
+    current = shanghai_now_naive(now).time()
+    if current.hour < 9 or (current.hour == 9 and current.minute < 25):
         return "盘后/盘前预期"
-    if now.hour == 9 and now.minute < 30:
+    if current.hour == 9 and current.minute < 30:
         return "竞价确认"
-    if now.hour == 9 and now.minute < 35:
+    if current.hour == 9 and current.minute < 35:
         return "开盘确认"
-    if now.hour < 10:
+    if current.hour < 10:
         return "五分钟确认"
-    if now.hour < 11 or (now.hour == 11 and now.minute <= 30):
+    if current.hour < 11 or (current.hour == 11 and current.minute <= 30):
         return "第一阶段确认"
-    if now.hour < 14 or (now.hour == 14 and now.minute < 30):
+    if current.hour < 14 or (current.hour == 14 and current.minute < 30):
         return "午盘/午后确认"
-    if now.hour < 15:
+    if current.hour < 15:
         return "尾盘确认"
     return "盘后校准"
 
@@ -225,14 +379,230 @@ def _stage_status_from_expectation(result: str) -> tuple[str, str]:
     return "待确认", "预期数据不足，不能给确定动作。"
 
 
-def _stage_status_from_volume(pattern: str) -> tuple[str, str]:
-    if "VWAP上方强势" in pattern or "放量上涨" in pattern:
+def _volume_confirmation_reliable(volume_price: Any | None) -> bool:
+    if volume_price is None:
+        return False
+    quality = str(getattr(volume_price, "data_quality", "") or "").lower()
+    return bool(
+        getattr(volume_price, "vwap_reliable", False)
+        and int(getattr(volume_price, "minute_bar_count", 0) or 0) >= 5
+        and quality in {"realtime", "reliable", "complete", "ok"}
+    )
+
+
+def _stage_status_from_volume(pattern: str, volume_price: Any | None = None) -> tuple[str, str]:
+    if not _volume_confirmation_reliable(volume_price):
+        return "观察", "真实分钟VWAP或分钟样本不足，本阶段只保留观察，不升级买卖建议。"
+    if any(token in pattern for token in (
+        "放量上涨但承载效率下降",
+        "放量滞涨",
+        "高位承载衰减",
+        "缩量上涨脆弱",
+        "缩量诱多",
+    )):
+        return "失败", "量价承载效率下降，禁止追高；冲高后按计划保护利润。"
+    if "VWAP上方强势" in pattern or "放量上涨确认" in pattern:
         return "通过", "量价承接有效，可按计划持有确认。"
+    if "放量上涨待承接确认" in pattern or "缩量上涨待确认" in pattern:
+        return "观察", "上涨尚未得到承接确认，等待回踩、VWAP和订单流方向验证。"
     if "冲高回落跌破VWAP" in pattern or "跌破VWAP" in pattern or "量价转弱" in pattern:
         return "失败", "量价承接失效，反抽优先降风险。"
     if "冲高回落" in pattern:
         return "观察", "冲高回落但未完全证伪，等重新站回VWAP。"
     return "观察", "量价暂未给出强确认。"
+
+
+_ADVICE_LEVEL_RANK = {"positive": 0, "observe": 1, "warning": 2, "critical": 3}
+
+
+def _opening_branch(
+    plan: NextDayPlan,
+    expectation: Any,
+    quote: dict[str, Any],
+    volume_price: Any,
+) -> tuple[str, str, str, str]:
+    """Select exactly one open branch from verified opening data."""
+
+    open_price = _safe_float(quote.get("open")) or _safe_float(getattr(volume_price, "open_price", 0))
+    prev_close = _safe_float(quote.get("prev_close")) or _safe_float(getattr(volume_price, "prev_close", 0))
+    if open_price <= 0 or prev_close <= 0:
+        return (
+            "data_gap",
+            "等待竞价数据",
+            "pending",
+            "竞价/开盘价或昨收价缺失，保留盘后剧本，不生成新的买卖动作。",
+        )
+    open_pct = (open_price - prev_close) / prev_close * 100
+    low = _safe_float(getattr(expectation, "expected_open_low", 0))
+    high = _safe_float(getattr(expectation, "expected_open_high", 0))
+    if low > high:
+        low, high = high, low
+    if open_pct < low:
+        return (
+            "low_open_selloff",
+            "低开下杀",
+            "active",
+            f"竞价/开盘 {open_pct:+.2f}% 低于合理区间下沿 {low:+.2f}%。",
+        )
+    if open_pct > high:
+        return (
+            "high_open_rally",
+            "高开冲高",
+            "active",
+            f"竞价/开盘 {open_pct:+.2f}% 高于合理区间上沿 {high:+.2f}%。",
+        )
+    return (
+        "range_open_balance",
+        "区间内平开震荡",
+        "active",
+        f"竞价/开盘 {open_pct:+.2f}% 位于合理区间 {low:+.2f}%～{high:+.2f}% 内。",
+    )
+
+
+def _derive_plan_advice(
+    plan: NextDayPlan,
+    *,
+    branch: str,
+    expectation: Any,
+    volume_price: Any,
+) -> tuple[str, str, str]:
+    result = str(getattr(expectation, "expectation_result", "") or "UNKNOWN")
+    transition = str(getattr(expectation, "state_transition", "") or "")
+    pattern = str(getattr(volume_price, "pattern", "") or "")
+    volume_status, _ = _stage_status_from_volume(pattern, volume_price)
+    reversal = (
+        "REVERSAL" in transition
+        or any(token in pattern for token in ("V形", "站回VWAP", "回踩不破", "支撑确认"))
+    )
+    weak_expectation = result in {"WEAKER", "SLIGHTLY_WEAKER", "INVALID"}
+    strong_expectation = result in {"STRONGER", "SLIGHTLY_STRONGER"}
+
+    if branch == "data_gap":
+        return "等待竞价/开盘数据，不使用旧行情产生新动作。", "observe", "开盘证据缺口。"
+    if branch == "low_open_selloff":
+        if reversal:
+            return (
+                "低开分支出现修复证据，撤销低点立即卖出；等待站稳VWAP和抬高后的次低点确认，失败再恢复降风险。",
+                "observe",
+                f"低开后新增反转证据：{pattern or transition}。",
+            )
+        if weak_expectation and volume_status == "失败":
+            return (
+                plan.underperform_action or "预期证伪且量价承接失败，反抽分批降风险，禁止补仓。",
+                "critical",
+                f"低开、预期{result}与量价{pattern or '转弱'}三项共振。",
+            )
+        return (
+            "低开先观察首个5分钟窗口，不在瞬时恐慌低点追卖；若反抽不过VWAP且再创新低，再按弱于预期剧本降风险。",
+            "warning",
+            "低开分支已激活，但尚未获得量价承接失败的双重确认。",
+        )
+    if branch == "high_open_rally":
+        if volume_status == "失败":
+            return (
+                plan.trim_condition or "高开冲高未获量价承接，达到计划兑现区后分批保护利润。",
+                "warning",
+                f"高开后量价转弱：{pattern or '未站稳VWAP'}。",
+            )
+        if strong_expectation or volume_status == "通过":
+            return (
+                plan.outperform_action or "高开分支获得量价确认，保留核心仓，不追最高点。",
+                "positive",
+                "高开与预期/量价至少一项强确认共振。",
+            )
+        return (
+            "高开只按冲高剧本观察；未确认站稳VWAP和首个回踩前，不扩大仓位。",
+            "observe",
+            "高开分支已激活，量价尚未确认。",
+        )
+    if weak_expectation and volume_status == "失败":
+        return (
+            plan.underperform_action or "区间开盘后量价转弱，反抽分批降风险。",
+            "warning",
+            f"区间开盘后预期{result}且量价{pattern or '转弱'}。",
+        )
+    if reversal or strong_expectation or volume_status == "通过":
+        return (
+            plan.expected_action or "区间开盘后承接改善，按计划持有观察，不追高。",
+            "positive",
+            f"区间开盘后新增正向证据：{pattern or transition or result}。",
+        )
+    return (
+        plan.expected_action or "区间内震荡，按计划持有观察，不新增风险。",
+        "observe",
+        "区间分支内尚无足够证据升级或证伪。",
+    )
+
+
+def _persist_advice_revision(
+    auction: dict[str, Any],
+    *,
+    advice: str,
+    level: str,
+    reason: str,
+    stage: str,
+    branch: str,
+    now: datetime,
+) -> None:
+    history = [dict(item) for item in auction.get("advice_history", []) if isinstance(item, dict)]
+    previous = str(auction.get("current_advice") or auction.get("operation_advice") or "")
+    previous_level = str(auction.get("advice_level") or "observe")
+    if previous == advice and previous_level == level:
+        auction.update(
+            {
+                "advice_change": "unchanged",
+                "advice_change_reason": reason,
+                "auto_refreshed_at": now.strftime("%Y-%m-%d %H:%M:%S"),
+            }
+        )
+        return
+
+    if previous:
+        for item in reversed(history):
+            if item.get("state") == "active":
+                item["state"] = "withdrawn"
+                item["withdrawn_at"] = now.strftime("%Y-%m-%d %H:%M:%S")
+                item["withdraw_reason"] = reason
+                break
+    previous_rank = _ADVICE_LEVEL_RANK.get(previous_level, 1)
+    next_rank = _ADVICE_LEVEL_RANK.get(level, 1)
+    if previous and previous_rank >= 2 and next_rank <= 1:
+        change = "withdrawn"
+    elif next_rank > previous_rank:
+        change = "upgraded"
+    elif next_rank < previous_rank:
+        change = "downgraded"
+    elif previous:
+        change = "replaced"
+    else:
+        change = "initialized"
+    revision = int(auction.get("advice_revision") or 0) + 1
+    history.append(
+        {
+            "revision": revision,
+            "advice": advice,
+            "level": level,
+            "state": "active",
+            "stage": stage,
+            "branch": branch,
+            "reason": reason,
+            "created_at": now.strftime("%Y-%m-%d %H:%M:%S"),
+        }
+    )
+    auction.update(
+        {
+            "previous_advice": previous,
+            "current_advice": advice,
+            "operation_advice": advice,
+            "advice_level": level,
+            "advice_state": "active",
+            "advice_revision": revision,
+            "advice_change": change,
+            "advice_change_reason": reason,
+            "auto_refreshed_at": now.strftime("%Y-%m-%d %H:%M:%S"),
+            "advice_history": history[-60:],
+        }
+    )
 
 
 def _build_stage_checks(
@@ -243,7 +613,10 @@ def _build_stage_checks(
 ) -> list[dict[str, Any]]:
     auction = _json_obj(plan.auction_plan)
     expected_status, expected_action = _stage_status_from_expectation(str(getattr(expectation, "expectation_result", "") or ""))
-    volume_status, volume_action = _stage_status_from_volume(str(getattr(volume_price, "pattern", "") or ""))
+    volume_status, volume_action = _stage_status_from_volume(
+        str(getattr(volume_price, "pattern", "") or ""),
+        volume_price,
+    )
     price = _safe_float(quote.get("price")) or plan.current_price
     high = _safe_float(quote.get("high"))
     prev_close = _safe_float(quote.get("prev_close"))
@@ -309,6 +682,130 @@ def _build_stage_checks(
     ]
 
 
+def refresh_plan_stage_from_evidence(
+    plan: NextDayPlan,
+    db: Session,
+    *,
+    expectation: Any,
+    volume_price: Any,
+    quote: dict[str, Any],
+    now: datetime | None = None,
+) -> NextDayPlanOut:
+    """Persist automatic branch selection and every advice transition."""
+
+    evaluated_at = shanghai_now_naive(now)
+    stage = _current_stage_label(evaluated_at)
+    auction = _json_obj(plan.auction_plan)
+    baseline = (
+        db.query(ExpectationSnapshot)
+        .filter(
+            ExpectationSnapshot.trade_date == plan.plan_date,
+            ExpectationSnapshot.code.in_([plan.code, plan.code.zfill(6), plan.code.lstrip("0")]),
+            ExpectationSnapshot.stage == "次日盘前预期",
+        )
+        .order_by(
+            ExpectationSnapshot.created_at.desc(),
+            ExpectationSnapshot.id.desc(),
+        )
+        .first()
+    )
+    branch_source = baseline or expectation
+    auction_not_finished = evaluated_at.time() < time(9, 25)
+    if auction_not_finished:
+        # Some quote vendors keep the previous session's ``open`` field before
+        # the call auction has finished.  Never let that stale value select a
+        # live branch before 09:25.
+        branch, branch_label, branch_status, branch_reason = (
+            "data_gap",
+            "等待竞价数据",
+            "pending",
+            "集合竞价尚未结束，继续保留盘后剧本，不提前选择开盘分支。",
+        )
+    else:
+        branch, branch_label, branch_status, branch_reason = _opening_branch(
+            plan,
+            branch_source,
+            quote,
+            volume_price,
+        )
+    previous_branch = str(auction.get("selected_branch") or "")
+    if branch == "data_gap" and previous_branch and previous_branch != "data_gap":
+        branch = previous_branch
+        branch_label = str(auction.get("selected_branch_label") or "已选分支")
+        branch_status = str(auction.get("branch_status") or "active")
+        branch_reason = "本轮开盘字段暂时缺失，保留此前已由真实竞价选中的分支，不生成新动作。"
+    branch_selected_at = str(auction.get("branch_selected_at") or "")
+    if branch != "data_gap" and branch != previous_branch:
+        branch_selected_at = evaluated_at.strftime("%Y-%m-%d %H:%M:%S")
+
+    checks = _build_stage_checks(plan, expectation, volume_price, quote)
+    failed = [item for item in checks if item["status"] == "失败"]
+    passed = [item for item in checks if item["status"] == "通过"]
+    if failed:
+        decision = f"{failed[-1]['stage']}失败：{failed[-1]['required_action']}"
+    elif len(passed) >= 3:
+        decision = "关键阶段通过，继续按计划确认，不追最高点。"
+    else:
+        decision = "仍处观察阶段，等待竞价/开盘/量价进一步确认。"
+    if auction_not_finished:
+        advice = str(
+            auction.get("current_advice")
+            or "等待集合竞价结束，不使用盘前波动产生新的买卖动作。"
+        )
+        advice_level = str(auction.get("advice_level") or "observe")
+        advice_reason = branch_reason
+    else:
+        advice, advice_level, advice_reason = _derive_plan_advice(
+            plan,
+            branch=branch,
+            expectation=expectation,
+            volume_price=volume_price,
+        )
+    if branch_reason:
+        advice_reason = f"{branch_reason} {advice_reason}".strip()
+    auction.update(
+        {
+            "current_stage": stage,
+            "stage_decision": decision,
+            "stage_checks": checks,
+            "selected_branch": branch,
+            "selected_branch_label": branch_label,
+            "branch_status": branch_status,
+            "branch_reason": branch_reason,
+            "branch_selected_at": branch_selected_at,
+            "action_ladder": [
+                "高开冲高：确认站稳VWAP与首个回踩后再持有，放量滞涨则分批保护利润。",
+                "区间内平开震荡：按计划持有观察，不新增风险。",
+                "低开下杀：不在瞬时恐慌低点追卖，反抽不过VWAP且再创新低才降风险。",
+                "新增V形修复/站回VWAP证据：撤销低点时的旧卖出结论；修复失败可再次升级。",
+            ],
+            "expectation_match": str(getattr(expectation, "expectation_result", "") or auction.get("expectation_match") or ""),
+            "volume_price_status": str(getattr(volume_price, "pattern", "") or auction.get("volume_price_status") or ""),
+            "refreshed_at": evaluated_at.strftime("%Y-%m-%d %H:%M:%S"),
+        }
+    )
+    _persist_advice_revision(
+        auction,
+        advice=advice,
+        level=advice_level,
+        reason=advice_reason,
+        stage=stage,
+        branch=branch,
+        now=evaluated_at,
+    )
+    plan.auction_plan = json.dumps(auction, ensure_ascii=False)
+    if advice_level == "critical":
+        plan.holding_category = "弱于预期"
+    elif advice_level == "warning" and plan.holding_category not in {"弱于预期", "分歧转弱"}:
+        plan.holding_category = "分歧转弱"
+    elif auction.get("advice_change") == "withdrawn" and plan.holding_category in {"弱于预期", "分歧转弱"}:
+        plan.holding_category = "弱转强" if "反转" in advice_reason or "V形" in advice_reason else "符合预期"
+    _refresh_plan_risk(plan)
+    db.commit()
+    db.refresh(plan)
+    return _next_day_plan_out(plan, price_note=str(quote.get("note") or ""))
+
+
 def refresh_limit_expectation_stage(plan: NextDayPlan, db: Session) -> NextDayPlanOut:
     from app.api.helpers.decision import build_expectation_snapshot, quote_for_code
     from app.api.helpers.volume_price import build_volume_price_snapshot
@@ -329,40 +826,13 @@ def refresh_limit_expectation_stage(plan: NextDayPlan, db: Session) -> NextDayPl
         stage=_current_stage_label(),
         quote=quote,
     )
-    auction = _json_obj(plan.auction_plan)
-    checks = _build_stage_checks(plan, expectation, volume_price, quote)
-    failed = [item for item in checks if item["status"] == "失败"]
-    passed = [item for item in checks if item["status"] == "通过"]
-    if failed:
-        decision = f"{failed[-1]['stage']}失败：{failed[-1]['required_action']}"
-    elif len(passed) >= 3:
-        decision = "关键阶段通过，继续按计划确认，不追最高点。"
-    else:
-        decision = "仍处观察阶段，等待竞价/开盘/量价进一步确认。"
-    auction.update(
-        {
-            "current_stage": _current_stage_label(),
-            "stage_decision": decision,
-            "stage_checks": checks,
-            "action_ladder": [
-                "强预期：只在竞价、开盘、量价三项同步确认时执行。",
-                "符合预期：持有观察，不新增风险。",
-                "弱于预期：跌破确认位或VWAP失败，先降风险。",
-                "炸板/冲高回落：无强回封和板块助攻时，不补仓、不幻想。",
-            ],
-            "expectation_match": str(getattr(expectation, "expectation_result", "") or auction.get("expectation_match") or ""),
-            "volume_price_status": str(getattr(volume_price, "pattern", "") or auction.get("volume_price_status") or ""),
-            "operation_advice": decision,
-            "refreshed_at": shanghai_now_naive().strftime("%Y-%m-%d %H:%M:%S"),
-        }
+    return refresh_plan_stage_from_evidence(
+        plan,
+        db,
+        expectation=expectation,
+        volume_price=volume_price,
+        quote=quote,
     )
-    plan.auction_plan = json.dumps(auction, ensure_ascii=False)
-    if failed and plan.holding_category not in {"弱于预期", "分歧转弱"}:
-        plan.holding_category = "分歧转弱"
-    _refresh_plan_risk(plan)
-    db.commit()
-    db.refresh(plan)
-    return _next_day_plan_out(plan, price_note=str(quote.get("note") or ""))
 
 def _limit_up_next_day_plan(
     payload: LimitUpPlanCreate,

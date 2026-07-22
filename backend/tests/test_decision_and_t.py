@@ -573,6 +573,47 @@ def test_volume_price_snapshot_calculates_minute_flow_metrics(db_session):
     assert any("上攻段成交额" in item for item in snapshot.evidence)
 
 
+def test_volume_price_snapshot_surfaces_auditable_shrinking_rise_state(db_session):
+    prices = [10.0, 10.3, 10.35, 10.4]
+    snapshot = build_volume_price_snapshot(
+        db_session,
+        "600117",
+        name="缩量上涨验证",
+        quote={
+            "price": prices[-1],
+            "change_pct": 4.0,
+            "open": prices[0],
+            "prev_close": 10.0,
+            "high": 10.42,
+            "low": 9.98,
+            "amount": 2.0,
+            "volume": 20_000_000,
+            "volume_ratio": 0.7,
+            "note": "东方财富实时行情",
+            "minute_bars": [
+                {
+                    "time": f"10:0{index}",
+                    "price": price,
+                    "low": price,
+                    "high": price,
+                    "volume": 5_000_000,
+                    "amount": price * 5_000_000,
+                    "active_buy_amount": 38_000_000,
+                    "active_sell_amount": 12_000_000,
+                }
+                for index, price in enumerate(prices)
+            ],
+        },
+        daily_metrics={"recent_high": 11.0},
+    )
+
+    assert snapshot.pattern == "缩量上涨·抛压较轻"
+    assert any("风险等级：低" in item for item in snapshot.evidence)
+    assert any("纪律建议：" in item and "不追直线拉升" in item for item in snapshot.evidence)
+    assert any(item.startswith("失效条件：") for item in snapshot.counter_evidence)
+    assert any(item.startswith("恢复条件：") for item in snapshot.counter_evidence)
+
+
 def _persist_quote_snapshot(
     db_session,
     code: str,

@@ -6594,6 +6594,75 @@ h3 {
   .cockpit-timeline span { grid-column: 2; }
 }
 
+/* One plan loop owns the full scenario state. Other screens only reuse its compact current state. */
+.plan-loop-card {
+  display: grid;
+  gap: 12px;
+  margin: 16px 0;
+  padding: 16px;
+  border: 1px solid var(--line);
+  border-left: 5px solid var(--line);
+  border-radius: 12px;
+  background: var(--panel);
+}
+.plan-loop-card.level-warning { border-left-color: #d97706; background: color-mix(in srgb, #d97706 5%, var(--panel)); }
+.plan-loop-card.level-critical { border-left-color: #dc2626; background: color-mix(in srgb, #dc2626 6%, var(--panel)); }
+.plan-loop-card.level-positive { border-left-color: #059669; background: color-mix(in srgb, #059669 4%, var(--panel)); }
+.plan-loop-card > header { display: flex; align-items: flex-start; justify-content: space-between; gap: 14px; }
+.plan-loop-card > header h3, .plan-loop-card > header h4 { margin: 2px 0 0; padding: 0; border: 0; }
+.plan-loop-eyebrow { color: var(--ink-muted); font-size: 11px; letter-spacing: .04em; }
+.plan-loop-badges { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 7px; }
+.plan-loop-badges span, .plan-loop-badges strong {
+  padding: 5px 8px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--panel);
+  color: var(--ink-muted);
+  font-size: 12px;
+}
+.level-warning .plan-loop-badges strong { color: #b45309; border-color: #fcd34d; }
+.level-critical .plan-loop-badges strong { color: #b91c1c; border-color: #fca5a5; }
+.level-positive .plan-loop-badges strong { color: #047857; border-color: #86efac; }
+.plan-loop-current { display: grid; grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr); align-items: center; gap: 14px; }
+.plan-loop-current > div { display: grid; gap: 5px; min-width: 0; padding: 12px; border: 1px solid var(--line); border-radius: 9px; background: color-mix(in srgb, var(--surface) 72%, var(--panel)); }
+.plan-loop-current span, .plan-loop-current p { color: var(--ink-muted); }
+.plan-loop-current p { margin: 0; line-height: 1.55; }
+.plan-loop-change { display: flex; flex-wrap: wrap; align-items: center; gap: 7px; margin: 0; padding: 9px 11px; border-radius: 8px; background: var(--surface); color: var(--ink-muted); }
+.plan-loop-change b { color: var(--ink); }
+.plan-loop-change time { display: inline-flex; align-items: center; gap: 4px; margin-left: auto; }
+.plan-loop-stages { display: grid; grid-template-columns: repeat(auto-fit, minmax(175px, 1fr)); gap: 8px; }
+.plan-loop-stages article { display: grid; align-content: start; gap: 6px; min-width: 0; padding: 10px; border: 1px solid var(--line); border-top: 3px solid var(--line); border-radius: 8px; background: var(--panel); }
+.plan-loop-stages article.stage-passed { border-top-color: #059669; }
+.plan-loop-stages article.stage-risk { border-top-color: #dc2626; background: color-mix(in srgb, #dc2626 4%, var(--panel)); }
+.plan-loop-stages article.stage-watch { border-top-color: #d97706; }
+.plan-loop-stages article > div { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 6px; }
+.plan-loop-stages article > div > span { display: grid; place-items: center; width: 20px; height: 20px; border-radius: 50%; background: var(--surface); color: var(--ink-muted); font-size: 11px; }
+.plan-loop-stages article strong, .plan-loop-stages article small, .plan-loop-stages article p { color: var(--ink-muted); font-size: 12px; }
+.plan-loop-stages article p { margin: 0; line-height: 1.45; }
+.plan-loop-history { padding-top: 4px; border-top: 1px dashed var(--line); }
+.plan-loop-history summary { cursor: pointer; color: var(--accent-strong); font-weight: 650; }
+.plan-loop-history > div { display: grid; grid-template-columns: 110px 110px minmax(0, 1fr); gap: 6px 10px; padding: 9px 4px; border-bottom: 1px dashed var(--line); }
+.plan-loop-history > div.history-withdrawn { opacity: .65; }
+.plan-loop-history time, .plan-loop-history small { color: var(--ink-muted); }
+.plan-loop-history small { grid-column: 3; }
+.plan-loop-card.compact { grid-column: 1 / -1; margin: 0; padding: 13px 15px; }
+.plan-loop-card.compact > header { align-items: center; }
+.plan-loop-card.compact > header > div { display: flex; align-items: baseline; gap: 9px; }
+.plan-loop-card.compact > header span, .plan-loop-card.compact > small { color: var(--ink-muted); }
+.plan-loop-card.compact > header strong { font-size: 12px; }
+.plan-loop-card.compact > p { margin: 0; line-height: 1.55; }
+.plan-loop-card.compact .plan-loop-change { background: transparent; padding: 0; font-size: 12px; }
+
+@media (max-width: 680px) {
+  .plan-loop-card > header, .plan-loop-card.compact > header { flex-direction: column; }
+  .plan-loop-badges { justify-content: flex-start; }
+  .plan-loop-current { grid-template-columns: minmax(0, 1fr); }
+  .plan-loop-current > svg { transform: rotate(90deg); justify-self: center; }
+  .plan-loop-history > div { grid-template-columns: 90px minmax(0, 1fr); }
+  .plan-loop-history > div span, .plan-loop-history > div small { grid-column: 1 / -1; }
+  .plan-loop-card.compact > header > div { display: grid; }
+}
+
 /* Recommendation outcome ledger: objective forward prices, never execution success claims. */
 .outcome-ledger-layout { display: grid; gap: 14px; }
 .outcome-ledger-hero { align-items: center; }

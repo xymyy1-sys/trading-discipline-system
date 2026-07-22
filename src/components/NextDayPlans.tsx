@@ -3,6 +3,7 @@ import { RefreshCcw, Save, Trash2 } from 'lucide-react'
 import { API_BASE } from '../api'
 import { usePrivacyMode } from '../privacy-context'
 import { SensitiveValue } from '../privacy'
+import PlanLoopStatus from './PlanLoopStatus'
 
 import type {
   ClassificationBasis as Basis,
@@ -46,7 +47,14 @@ export default function NextDayPlans({ mode = 'holding' }: { mode?: 'holding' | 
           setDraft(structuredClone(scoped[0]))
         } else if (currentSelectedId) {
           const refreshed = scoped.find(item => item.id === currentSelectedId)
-          if (refreshed) setDraft(refreshed)
+          if (refreshed) {
+            setDraft(refreshed)
+          } else {
+            const next = scoped[0] ?? null
+            selectedIdRef.current = next?.id ?? null
+            setSelectedId(next?.id ?? null)
+            setDraft(next ? structuredClone(next) : null)
+          }
         }
       })
       .catch(() => setStatusText(refresh ? '刷新失败，继续保留原计划' : '计划读取失败，请稍后重试'))
@@ -63,6 +71,15 @@ export default function NextDayPlans({ mode = 'holding' }: { mode?: 'holding' | 
     }
     loadSeesaw()
   }, [loadPlans, mode])
+
+  useEffect(() => {
+    const refreshVisiblePlan = () => {
+      if (document.visibilityState !== 'visible' || !isPlanValidationSession()) return
+      loadPlans()
+    }
+    const timer = window.setInterval(refreshVisiblePlan, 60_000)
+    return () => window.clearInterval(timer)
+  }, [loadPlans])
 
   const selected = useMemo(() => plans.find(p => p.id === selectedId) ?? null, [plans, selectedId])
   const selectedSeesaw = useMemo(
@@ -297,6 +314,8 @@ export default function NextDayPlans({ mode = 'holding' }: { mode?: 'holding' | 
                 </div>
               )}
 
+              <PlanLoopStatus plan={draft.auction_plan} planDate={draft.plan_date} />
+
               <div className="auction-evidence-grid">
                 <div>
                   <b>实时行情与现状</b>
@@ -309,10 +328,6 @@ export default function NextDayPlans({ mode = 'holding' }: { mode?: 'holding' | 
                 <div>
                   <b>预期校验</b>
                   <p>{draft.auction_plan.expectation_match || draft.auction_plan.expectation_level || draft.holding_category}；原预期：{draft.auction_plan.expected_state || draft.expected_condition}</p>
-                </div>
-                <div>
-                  <b>操作建议</b>
-                  <p>{draft.auction_plan.operation_advice || '按三套剧本和关键价执行。'}</p>
                 </div>
                 <div>
                   <b>订单流跷跷板监控</b>
@@ -590,6 +605,13 @@ export default function NextDayPlans({ mode = 'holding' }: { mode?: 'holding' | 
 
 function num(value: number) {
   return Number.isFinite(value) && value > 0 ? value.toFixed(2) : '--'
+}
+
+function isPlanValidationSession(now = new Date()) {
+  const day = now.getDay()
+  if (day === 0 || day === 6) return false
+  const minutes = now.getHours() * 60 + now.getMinutes()
+  return minutes >= 9 * 60 + 15 && minutes <= 15 * 60 + 5
 }
 
 function SensitiveNumberInput({

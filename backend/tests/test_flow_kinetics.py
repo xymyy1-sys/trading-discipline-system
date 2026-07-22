@@ -3,6 +3,7 @@ from datetime import datetime
 from app.services.flow_kinetics import (
     analyze_flow_kinetics,
     classify_price_volume_flow_alerts,
+    classify_volume_price_pattern,
 )
 
 
@@ -206,3 +207,130 @@ def test_volume_rebound_requires_vwap_and_improving_flow():
 
     assert any(item.event_type == "VOLUME_REBOUND_CONFIRMED" for item in alerts)
     assert any("停止沿用低点卖出结论" in item.action for item in alerts)
+
+
+def test_volume_shape_refuses_a_conclusion_when_vwap_or_ratio_is_missing():
+    result = classify_volume_price_pattern(
+        change_pct=2.0,
+        volume_ratio=0,
+        price_vs_vwap_pct=None,
+        vwap_reliable=False,
+    )
+
+    assert result.state == "INSUFFICIENT_DATA"
+    assert result.decisive is False
+    assert result.risk_level == "未知"
+    assert "不能判断诱多或延续" in result.counter_evidence[0]
+
+
+def test_shrinking_rise_distinguishes_light_supply_from_multi_evidence_fragility():
+    supported = classify_volume_price_pattern(
+        change_pct=2.2,
+        volume_ratio=0.68,
+        price_vs_vwap_pct=1.1,
+        vwap_reliable=True,
+        high_drawdown_pct=0.4,
+        near_recent_high=False,
+        follow_through=True,
+        active_buy_amount=6.5,
+        active_sell_amount=2.5,
+        active_flow_reliable=True,
+    )
+    fragile = classify_volume_price_pattern(
+        change_pct=2.2,
+        volume_ratio=0.68,
+        price_vs_vwap_pct=-0.3,
+        vwap_reliable=True,
+        high_drawdown_pct=2.4,
+        near_recent_high=True,
+        follow_through=False,
+        active_buy_amount=2.0,
+        active_sell_amount=8.0,
+        active_flow_reliable=True,
+        sector_resonance=False,
+    )
+
+    assert supported.state == "SHRINKING_RISE_SUPPORTED"
+    assert supported.label == "缩量上涨·抛压较轻"
+    assert supported.risk_level == "低"
+    assert "不追直线拉升" in supported.advice
+    assert fragile.state == "SHRINKING_RISE_FRAGILE"
+    assert fragile.label == "缩量上涨脆弱·疑似诱多"
+    assert fragile.risk_level == "高"
+    assert len(fragile.evidence) >= 4
+    assert fragile.invalidation and fragile.recovery_conditions
+
+
+def test_estimated_minute_direction_cannot_confirm_a_shrinking_rise():
+    result = classify_volume_price_pattern(
+        change_pct=2.0,
+        volume_ratio=0.7,
+        price_vs_vwap_pct=1.0,
+        vwap_reliable=True,
+        high_drawdown_pct=0.3,
+        near_recent_high=False,
+        follow_through=True,
+        active_buy_amount=9.0,
+        active_sell_amount=1.0,
+        active_flow_reliable=False,
+    )
+
+    assert result.state == "SHRINKING_RISE_PENDING"
+    assert result.decisive is False
+    assert "订单流" in result.counter_evidence[0]
+
+
+def test_volume_rise_distinguishes_confirmation_from_high_level_absorption_decay():
+    confirmed = classify_volume_price_pattern(
+        change_pct=3.1,
+        volume_ratio=1.55,
+        price_vs_vwap_pct=1.4,
+        vwap_reliable=True,
+        high_drawdown_pct=0.3,
+        near_recent_high=False,
+        follow_through=True,
+        active_buy_amount=9.0,
+        active_sell_amount=3.0,
+        active_flow_reliable=True,
+        sector_resonance=True,
+    )
+    stalled = classify_volume_price_pattern(
+        change_pct=1.4,
+        volume_ratio=1.8,
+        price_vs_vwap_pct=-0.4,
+        vwap_reliable=True,
+        high_drawdown_pct=3.2,
+        near_recent_high=True,
+        follow_through=False,
+        active_buy_amount=3.0,
+        active_sell_amount=9.0,
+        active_flow_reliable=True,
+        sector_resonance=False,
+    )
+
+    assert confirmed.state == "VOLUME_RISE_CONFIRMED"
+    assert confirmed.label == "放量上涨确认"
+    assert "不能推导为后续必涨" in confirmed.counter_evidence[0]
+    assert stalled.state == "VOLUME_RISE_STALLED"
+    assert stalled.label == "放量滞涨·高位承载衰减"
+    assert stalled.risk_level == "高"
+    assert "禁止追高" in stalled.advice
+
+
+def test_shrinking_pullback_requires_vwap_hold_and_no_adverse_flow():
+    held = classify_volume_price_pattern(
+        change_pct=1.0,
+        volume_ratio=0.7,
+        price_vs_vwap_pct=0.6,
+        vwap_reliable=True,
+        high_drawdown_pct=1.2,
+        near_recent_high=False,
+        follow_through=True,
+        active_buy_amount=5.4,
+        active_sell_amount=4.6,
+        active_flow_reliable=True,
+    )
+
+    assert held.state == "SHRINKING_PULLBACK_HOLD"
+    assert held.label == "缩量回踩不破VWAP"
+    assert "不在回踩中恐慌卖出" in held.advice

@@ -48,7 +48,11 @@ from app.schemas.trading import (
     ProfitProtectionSnapshotOut,
     VolumePriceSnapshotOut,
 )
-from app.services.flow_kinetics import FlowKinetics, classify_price_volume_flow_alerts
+from app.services.flow_kinetics import (
+    FlowKinetics,
+    classify_price_volume_flow_alerts,
+    classify_volume_price_pattern,
+)
 from app.services.global_market import global_market_service
 from app.services.sector_evidence_history import (
     global_evidence_recency_key,
@@ -809,15 +813,110 @@ def _volume_price_state(pattern: str, current: float, vwap: float, high_drawdown
         return "REVERSAL_PENDING"
     if "冲高回落跌破VWAP" in pattern:
         return "VOLUME_PRICE_WEAKENING"
+    if "放量滞涨·高位承载衰减" in pattern:
+        return "VOLUME_PRICE_WEAKENING"
+    if "缩量上涨脆弱·疑似诱多" in pattern:
+        return "VOLUME_PRICE_WEAKENING" if vwap and current < vwap else "HIGH_DRAWDOWN"
+    if "放量上涨但承载效率下降" in pattern or "缩量上涨脆弱" in pattern:
+        return "HIGH_DRAWDOWN"
     if "跌破VWAP" in pattern or (vwap and current < vwap):
         return "VWAP_BREAKDOWN"
     if "冲高回落" in pattern or high_drawdown_pct >= 4:
         return "HIGH_DRAWDOWN"
-    if "VWAP上方强势" in pattern:
+    if any(label in pattern for label in ("VWAP上方强势", "放量上涨确认", "缩量上涨·抛压较轻", "缩量回踩不破VWAP")):
         return "REPAIR_CONFIRMED"
     if vwap and current >= vwap:
         return "VWAP_STRONG"
     return "VOLUME_PRICE_NEUTRAL"
+
+
+def _sector_flow_state(seesaw: Any) -> FlowKinetics | None:
+    if seesaw is None or not bool(getattr(seesaw, "sector_flow_kinetics_reliable", False)):
+        return None
+    direction = str(getattr(seesaw, "sector_flow_direction", "") or "")
+    if not direction:
+        sector_net = _safe_float(getattr(seesaw, "sector_net_inflow", 0))
+        direction = "NET_INFLOW" if sector_net > 0 else "NET_OUTFLOW" if sector_net < 0 else "NEUTRAL"
+    return FlowKinetics(
+        direction=direction,
+        speed=(
+            float(getattr(seesaw, "sector_flow_speed"))
+            if getattr(seesaw, "sector_flow_speed", None) is not None else None
+        ),
+        acceleration=(
+            float(getattr(seesaw, "sector_flow_acceleration"))
+            if getattr(seesaw, "sector_flow_acceleration", None) is not None else None
+        ),
+        turning=str(getattr(seesaw, "sector_flow_turning", "") or "") or None,
+        signal=str(getattr(seesaw, "sector_flow_signal", "") or "") or None,
+        as_of=str(getattr(seesaw, "sector_flow_as_of", "") or "") or None,
+        window_minutes=getattr(seesaw, "sector_flow_window_minutes", None),
+        reliable=True,
+    )
+
+
+def _combined_volume_shape(
+    volume_price: VolumePriceSnapshot | VolumePriceSnapshotOut | None,
+    seesaw: Any,
+    *,
+    vwap_reliable: bool,
+    high_drawdown_pct: float,
+) -> Any:
+    if volume_price is None:
+        return classify_volume_price_pattern(
+            change_pct=0,
+            volume_ratio=0,
+            price_vs_vwap_pct=None,
+            vwap_reliable=False,
+        )
+    flow_state = _sector_flow_state(seesaw)
+    stored_pattern = str(getattr(volume_price, "pattern", "") or "")
+    follow_through: bool | None = None
+    if any(label in stored_pattern for label in ("缩量上涨·抛压较轻", "缩量回踩不破VWAP", "放量上涨确认")):
+        follow_through = True
+    elif any(label in stored_pattern for label in ("缩量上涨脆弱", "放量滞涨", "承载效率下降")):
+        follow_through = False
+    elif (
+        int(getattr(volume_price, "minute_bar_count", 0) or 0) >= 5
+        and vwap_reliable
+        and _safe_float(getattr(volume_price, "price_vs_vwap", 0)) > 0.2
+        and high_drawdown_pct < 1.5
+    ):
+        # A base snapshot may remain pending only because sector/order-flow
+        # confirmation was missing.  Five real minute bars, acceptance above
+        # VWAP and controlled drawdown supply the independent price-retention
+        # family; reliable sector flow can then complete the state later.
+        follow_through = True
+    daily_context_available = any(
+        abs(_safe_float(getattr(volume_price, field, 0))) > 1e-9
+        for field in ("ma5", "ma10", "ma20", "return_5d", "return_10d", "distance_recent_high_pct")
+    )
+    turning = str(getattr(flow_state, "turning", "") or "")
+    flow_improving = turning in {"TURN_TO_INFLOW", "OUTFLOW_NARROWING", "INFLOW_ACCELERATING", "FLOW_IMPROVING"}
+    flow_worsening = turning in {"TURN_TO_OUTFLOW", "INFLOW_FADING", "OUTFLOW_ACCELERATING", "FLOW_WEAKENING"}
+    return classify_volume_price_pattern(
+        change_pct=float(getattr(volume_price, "change_pct", 0) or 0),
+        volume_ratio=float(getattr(volume_price, "volume_ratio", 0) or 0),
+        price_vs_vwap_pct=(
+            float(getattr(volume_price, "price_vs_vwap", 0) or 0)
+            if vwap_reliable else None
+        ),
+        vwap_reliable=vwap_reliable,
+        high_drawdown_pct=high_drawdown_pct,
+        near_recent_high=(
+            _safe_float(getattr(volume_price, "distance_recent_high_pct", 0)) >= -3
+            if daily_context_available else None
+        ),
+        follow_through=follow_through,
+        active_buy_amount=_safe_float(getattr(volume_price, "active_buy_amount", 0)),
+        active_sell_amount=_safe_float(getattr(volume_price, "active_sell_amount", 0)),
+        active_flow_reliable=bool(
+            getattr(volume_price, "active_flow_source", "") == "provider_tick_direction"
+            and not bool(getattr(volume_price, "active_flow_estimated", True))
+        ),
+        sector_resonance=True if flow_improving else False if flow_worsening else None,
+        flow=flow_state,
+    )
 
 
 def _position_quantities(db: Session, holding: Holding, trade_date: str) -> tuple[int, int, int]:
@@ -1631,29 +1730,7 @@ def _build_events(
             })
         flow_reliable = bool(getattr(seesaw, "sector_flow_kinetics_reliable", False))
         if flow_reliable and flow_captured_at is not None and volume_price is not None:
-            direction = str(getattr(seesaw, "sector_flow_direction", "") or "")
-            if not direction:
-                sector_net = float(getattr(seesaw, "sector_net_inflow", 0) or 0)
-                direction = "NET_INFLOW" if sector_net > 0 else "NET_OUTFLOW" if sector_net < 0 else "NEUTRAL"
-            flow_state = FlowKinetics(
-                direction=direction,
-                speed=(
-                    float(getattr(seesaw, "sector_flow_speed"))
-                    if getattr(seesaw, "sector_flow_speed", None) is not None else None
-                ),
-                acceleration=(
-                    float(getattr(seesaw, "sector_flow_acceleration"))
-                    if getattr(seesaw, "sector_flow_acceleration", None) is not None else None
-                ),
-                turning=flow_turning or None,
-                signal=flow_signal or None,
-                severity="warning" if flow_turning in {
-                    "TURN_TO_OUTFLOW", "INFLOW_FADING", "OUTFLOW_ACCELERATING", "FLOW_WEAKENING",
-                } else "info",
-                as_of=flow_as_of or None,
-                window_minutes=getattr(seesaw, "sector_flow_window_minutes", None),
-                reliable=True,
-            )
+            flow_state = _sector_flow_state(seesaw) or FlowKinetics()
             snapshot_low = float(getattr(volume_price, "low_price", 0) or 0)
             low_rebound_pct = (
                 (current - snapshot_low) / snapshot_low * 100
@@ -1690,6 +1767,33 @@ def _build_events(
                     "priority": 88 if alert.severity == "critical" else 72 if alert.severity == "warning" else 42,
                     "group_key": f"stock:price-volume-flow:{alert.event_type.lower()}",
                     "evidence": [*alert.evidence, alert.action],
+                })
+            shape = _combined_volume_shape(
+                volume_price,
+                seesaw,
+                vwap_reliable=vwap_reliable,
+                high_drawdown_pct=high_drawdown_pct,
+            )
+            if shape.state not in {"INSUFFICIENT_DATA", "NEUTRAL"}:
+                events.append({
+                    "captured_at": flow_captured_at,
+                    "scope": "stock",
+                    "target_code": holding.code,
+                    "target_name": holding.name,
+                    "event_type": f"PRICE_VOLUME_PATTERN_{shape.state}",
+                    "severity": "critical" if shape.risk_level == "高" else "warning" if shape.risk_level == "中" else "info",
+                    "value": round(current, 2),
+                    "previous_value": round(vwap, 2),
+                    "priority": 90 if shape.risk_level == "高" else 74 if shape.risk_level == "中" else 45,
+                    "group_key": f"stock:price-volume-pattern:{shape.state.lower()}",
+                    "evidence": [
+                        f"{shape.label}；风险等级：{shape.risk_level}。",
+                        *shape.evidence,
+                        *(f"反证：{item}" for item in shape.counter_evidence),
+                        f"纪律建议：{shape.advice}",
+                        *(f"失效条件：{item}" for item in shape.invalidation),
+                        *(f"恢复条件：{item}" for item in shape.recovery_conditions),
+                    ],
                 })
     migration_confirmed, migration_confidence, migration_evidence, migration_value, migration_previous = _sector_migration_signal(seesaw)
     if migration_confirmed:
@@ -2157,6 +2261,23 @@ def build_position_execution_state(
         high_drawdown_pct = max(high_drawdown_pct, _safe_float(getattr(volume_price, "high_drawdown", 0)))
         vwap = _safe_float(getattr(volume_price, "vwap", 0)) or vwap
     volume_state = _volume_price_state(volume_pattern, current, vwap if vwap_reliable else 0, high_drawdown_pct)
+    volume_shape = _combined_volume_shape(
+        volume_price,
+        seesaw,
+        vwap_reliable=vwap_reliable,
+        high_drawdown_pct=high_drawdown_pct,
+    )
+    if volume_shape.state in {"VOLUME_RISE_STALLED", "SHRINKING_RISE_FRAGILE"}:
+        volume_state = "VOLUME_PRICE_WEAKENING" if volume_shape.risk_level == "高" else "HIGH_DRAWDOWN"
+    elif volume_shape.state in {"VOLUME_RISE_CONFIRMED", "SHRINKING_RISE_SUPPORTED", "SHRINKING_PULLBACK_HOLD"}:
+        volume_state = "REPAIR_CONFIRMED"
+    if volume_shape.state not in {"INSUFFICIENT_DATA", "NEUTRAL"}:
+        evidence.append(f"量价联合状态：{volume_shape.label}；风险等级：{volume_shape.risk_level}。")
+        evidence.extend(volume_shape.evidence)
+        evidence.append(f"量价纪律建议：{volume_shape.advice}")
+        counter_evidence.extend(f"量价反证：{item}" for item in volume_shape.counter_evidence)
+        invalid_conditions.extend(f"量价失效条件：{item}" for item in volume_shape.invalidation)
+        recovery_conditions.extend(f"量价恢复条件：{item}" for item in volume_shape.recovery_conditions)
     time_stop_reasons = _time_stop_reasons(db, holding, current, vwap, vwap_reliable, quote, volume_state, expectation_result, now)
 
     if protection_level != "NONE":

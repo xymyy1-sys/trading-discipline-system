@@ -12,6 +12,8 @@ describe('今日决策信息架构', () => {
     expect(source).toContain('仅标记已读')
     expect(source).toContain('去持仓执行反馈')
     expect(source).toContain('/api/intraday-collector/run')
+    expect(source).toContain('/api/next-day-plans')
+    expect(source).toContain('<PlanLoopStatus plan={selectedPlan?.auction_plan} planDate={selectedPlan?.plan_date} compact />')
     expect(source).not.toContain('?force_refresh=true')
   })
 

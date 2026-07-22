@@ -19,6 +19,25 @@ export interface AuctionStageCheck {
   evidence: string[];
 }
 
+export type PlanBranch = 'low_open_selloff' | 'range_open_balance' | 'high_open_rally' | 'data_gap';
+export type PlanBranchStatus = 'pending' | 'active';
+export type PlanAdviceLevel = 'observe' | 'positive' | 'warning' | 'critical';
+export type PlanAdviceState = 'active' | 'withdrawn';
+export type PlanAdviceChange = 'initialized' | 'unchanged' | 'upgraded' | 'downgraded' | 'withdrawn' | 'replaced';
+
+export interface PlanAdviceHistoryItem {
+  revision: number;
+  advice: string;
+  level: PlanAdviceLevel;
+  state: PlanAdviceState;
+  stage: string;
+  branch: PlanBranch | string;
+  reason: string;
+  created_at: string;
+  withdrawn_at?: string;
+  withdraw_reason?: string;
+}
+
 export interface AuctionPlan {
   board_level: string;
   industry: string;
@@ -64,6 +83,20 @@ export interface AuctionPlan {
   identity_action: string;
   position_rule: string;
   theme_evidence: string[];
+  selected_branch?: PlanBranch;
+  selected_branch_label?: string;
+  branch_status?: PlanBranchStatus;
+  branch_reason?: string;
+  branch_selected_at?: string;
+  current_advice?: string;
+  advice_level?: PlanAdviceLevel;
+  advice_state?: PlanAdviceState;
+  advice_revision?: number;
+  previous_advice?: string;
+  advice_change?: PlanAdviceChange;
+  advice_change_reason?: string;
+  auto_refreshed_at?: string;
+  advice_history?: PlanAdviceHistoryItem[];
 }
 
 export interface NextDayPlan {

@@ -1073,6 +1073,159 @@ def test_stronger_expectation_and_vwap_strength_stays_hold(db_session):
     assert any("暂未构成预期证伪" in item for item in state.counter_evidence)
 
 
+def test_multi_evidence_shrinking_rise_fragility_upgrades_execution_risk(db_session):
+    holding = Holding(
+        code="600907",
+        name="缩量诱多联合验证",
+        quantity=1000,
+        cost_price=10,
+        current_price=10.2,
+        total_asset=100000,
+        position_type="普通持仓",
+        next_discipline="禁止追高并按量价承接复核",
+    )
+    db_session.add(holding)
+    db_session.commit()
+    db_session.refresh(holding)
+    volume = VolumePriceSnapshot(
+        trade_date=datetime.now().date().isoformat(),
+        code=holding.code,
+        name=holding.name,
+        stage="盘中确认",
+        price=10.2,
+        change_pct=2.0,
+        open_price=10.0,
+        high_price=10.5,
+        low_price=9.9,
+        prev_close=10.0,
+        amount=5,
+        volume_ratio=0.65,
+        vwap=10.05,
+        vwap_source="minute",
+        minute_bar_count=8,
+        vwap_reliable=True,
+        price_vs_vwap=1.49,
+        high_drawdown=2.86,
+        distance_recent_high_pct=-1.0,
+        active_buy_amount=2.0,
+        active_sell_amount=8.0,
+        active_flow_source="provider_tick_direction",
+        active_flow_estimated=False,
+        pattern="缩量上涨脆弱·疑似诱多",
+        data_quality="realtime",
+        data_source="测试实时行情",
+        evidence_json="[]",
+        counter_evidence_json="[]",
+    )
+    seesaw = SimpleNamespace(
+        risk_level="观察",
+        signal="板块订单流边际转弱",
+        sector_ebb_trigger=[],
+        stock_weakening_trigger=[],
+        profit_drawdown_trigger=[],
+        holding_theme="半导体",
+        sector_flow_kinetics_reliable=True,
+        sector_flow_direction="NET_OUTFLOW",
+        sector_flow_speed=-0.8,
+        sector_flow_acceleration=-0.1,
+        sector_flow_turning="OUTFLOW_ACCELERATING",
+        sector_flow_signal="板块订单流流出加速",
+        sector_flow_as_of=datetime.now().replace(microsecond=0).isoformat(),
+        sector_flow_window_minutes=5,
+        sector_net_inflow=-6.0,
+    )
+
+    state = build_position_execution_state(
+        db_session,
+        holding,
+        quote={"price": 10.2, "high": 10.5, "low": 9.9, "open": 10.0, "note": "东方财富实时行情"},
+        volume_price=volume,
+        seesaw=seesaw,
+        persist=False,
+    )
+
+    assert state.volume_price_state == "VOLUME_PRICE_WEAKENING"
+    assert state.recommended_reduce_ratio >= 0.25
+    assert any("缩量上涨脆弱·疑似诱多" in item for item in state.evidence)
+    assert any("量价恢复条件" in item for item in state.recovery_conditions)
+    assert any(event.event_type == "PRICE_VOLUME_PATTERN_SHRINKING_RISE_FRAGILE" for event in state.events)
+
+
+def test_pending_volume_rise_is_upgraded_after_reliable_sector_flow_arrives(db_session):
+    holding = Holding(
+        code="600908",
+        name="跨层放量确认",
+        quantity=1000,
+        cost_price=10,
+        current_price=10.4,
+        total_asset=100000,
+        position_type="普通持仓",
+        next_discipline="等待板块共振完成确认",
+    )
+    db_session.add(holding)
+    db_session.commit()
+    db_session.refresh(holding)
+    volume = VolumePriceSnapshot(
+        trade_date=datetime.now().date().isoformat(),
+        code=holding.code,
+        name=holding.name,
+        stage="盘中确认",
+        price=10.4,
+        change_pct=4.0,
+        open_price=10.0,
+        high_price=10.45,
+        low_price=9.95,
+        prev_close=10.0,
+        amount=8,
+        volume_ratio=1.45,
+        vwap=10.2,
+        vwap_source="minute",
+        minute_bar_count=8,
+        vwap_reliable=True,
+        price_vs_vwap=1.96,
+        high_drawdown=0.48,
+        ma5=10.0,
+        distance_recent_high_pct=-5.0,
+        active_flow_source="unavailable",
+        active_flow_estimated=False,
+        pattern="放量上涨待承接确认",
+        data_quality="realtime",
+        data_source="测试实时行情",
+        evidence_json="[]",
+        counter_evidence_json="[]",
+    )
+    seesaw = SimpleNamespace(
+        risk_level="低",
+        signal="板块订单流边际改善",
+        sector_ebb_trigger=[],
+        stock_weakening_trigger=[],
+        profit_drawdown_trigger=[],
+        holding_theme="半导体",
+        sector_flow_kinetics_reliable=True,
+        sector_flow_direction="NET_INFLOW",
+        sector_flow_speed=0.8,
+        sector_flow_acceleration=0.1,
+        sector_flow_turning="INFLOW_ACCELERATING",
+        sector_flow_signal="板块订单流流入加速",
+        sector_flow_as_of=datetime.now().replace(microsecond=0).isoformat(),
+        sector_flow_window_minutes=5,
+        sector_net_inflow=8.0,
+    )
+
+    state = build_position_execution_state(
+        db_session,
+        holding,
+        quote={"price": 10.4, "high": 10.45, "low": 9.95, "open": 10.0, "note": "东方财富实时行情"},
+        volume_price=volume,
+        seesaw=seesaw,
+        persist=False,
+    )
+
+    assert state.volume_price_state == "REPAIR_CONFIRMED"
+    assert any("放量上涨确认" in item for item in state.evidence)
+    assert any(event.event_type == "PRICE_VOLUME_PATTERN_VOLUME_RISE_CONFIRMED" for event in state.events)
+
+
 def test_degraded_vwap_does_not_emit_deterministic_reduce(db_session):
     holding = Holding(
         code="600010",

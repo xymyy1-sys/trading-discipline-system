@@ -10,6 +10,7 @@ from app.api.helpers.quotes import _estimated_vwap, _is_realtime_note, _quote_lo
 from app.core.trading_clock import shanghai_now_naive, shanghai_today
 from app.models.trading import VolumePriceSnapshot
 from app.schemas.trading import VolumePriceSnapshotOut
+from app.services.flow_kinetics import classify_volume_price_pattern
 
 
 def _today() -> str:
@@ -79,6 +80,31 @@ def _minute_vwap(quote: dict[str, Any]) -> tuple[float, int]:
             total_volume += volume
             count += 1
     return (round(total_amount / total_volume, 4), count) if total_amount > 0 and total_volume > 0 else (0.0, count)
+
+
+def _minute_vwap_follow_through(quote: dict[str, Any], session_vwap: float) -> bool | None:
+    """Return whether price acceptance above VWAP persisted for three bars.
+
+    ``None`` deliberately means that the minute tape is too short or VWAP is
+    unavailable.  It must not be treated as a failed hold because doing so
+    would turn missing data into a false risk signal.
+    """
+
+    if session_vwap <= 0:
+        return None
+    prices = [
+        _safe_float(row.get("price") or row.get("close"))
+        for row in _minute_rows(quote)
+    ]
+    prices = [price for price in prices if price > 0]
+    if len(prices) < 3:
+        return None
+    latest = prices[-3:]
+    if all(price >= session_vwap * 0.998 for price in latest):
+        return True
+    if sum(price < session_vwap * 0.998 for price in latest) >= 2:
+        return False
+    return None
 
 
 def _minute_reversal_signals(quote: dict[str, Any], session_vwap: float) -> tuple[str, list[str]]:
@@ -449,6 +475,20 @@ def build_volume_price_snapshot(
     if quote and not vwap_reliable:
         data_quality = "degraded_vwap"
     data_source = note or ("实时行情" if quote else "无行情")
+    follow_through = _minute_vwap_follow_through(quote, vwap if vwap_reliable else 0)
+    near_recent_high = (distance_recent_high_pct >= -3.0) if recent_high > 0 else None
+    volume_shape = classify_volume_price_pattern(
+        change_pct=change_pct,
+        volume_ratio=_safe_float(quote.get("volume_ratio")),
+        price_vs_vwap_pct=price_vs_vwap if vwap_reliable else None,
+        vwap_reliable=bool(vwap_reliable and data_quality == "realtime"),
+        high_drawdown_pct=high_drawdown,
+        near_recent_high=near_recent_high,
+        follow_through=follow_through,
+        active_buy_amount=active_buy_amount,
+        active_sell_amount=active_sell_amount,
+        active_flow_reliable=bool(has_explicit_active_flow and not active_flow_estimated),
+    )
     pattern, evidence, counter = _classify_pattern(
         price=price,
         change_pct=change_pct,
@@ -464,6 +504,18 @@ def build_volume_price_snapshot(
         # in the append-only minute/event history.
         pattern = reversal_pattern
         evidence = reversal_evidence + evidence
+    elif volume_shape.state not in {"INSUFFICIENT_DATA", "NEUTRAL"}:
+        pattern = volume_shape.label
+    if volume_shape.state not in {"INSUFFICIENT_DATA", "NEUTRAL"}:
+        evidence.append(
+            f"典型量价形态：{volume_shape.label}；风险等级：{volume_shape.risk_level}"
+            f"（{'已形成联合证据' if volume_shape.decisive else '仍待补充证据'}）。"
+        )
+        evidence.extend(volume_shape.evidence)
+        evidence.append(f"纪律建议：{volume_shape.advice}")
+        counter.extend(f"反证：{item}" for item in volume_shape.counter_evidence)
+        counter.extend(f"失效条件：{item}" for item in volume_shape.invalidation)
+        counter.extend(f"恢复条件：{item}" for item in volume_shape.recovery_conditions)
     if amount > 0:
         evidence.append(f"当前成交额 {amount:.2f} 亿，按交易进度估算全天 {estimated_full_day_amount:.2f} 亿。")
     if turnover > 0:

@@ -17,6 +17,7 @@ from app.api.helpers.quotes import _latest_quote_for_holding, _json_obj
 from app.api.helpers.holdings_calc import _account_total_asset, _refresh_holding_prices
 from app.api.helpers.plan_calc import (
     _next_trade_date,
+    resolve_default_plan_date,
     _refresh_existing_holding_plans,
     _next_day_plan_out,
     _plan_from_payload,
@@ -86,7 +87,7 @@ def list_next_day_plans(
     plan_date: str | None = None,
     db: Session = Depends(get_db),
 ) -> list[NextDayPlanOut]:
-    plan_date = plan_date or _next_trade_date()
+    plan_date = plan_date or resolve_default_plan_date(db)
     query = db.query(NextDayPlan)
     query = query.filter(NextDayPlan.plan_date == plan_date)
     plans = query.order_by(NextDayPlan.risk_priority.asc(), NextDayPlan.updated_at.desc()).all()
@@ -104,7 +105,7 @@ def refresh_next_day_plans(
     snapshot read while retaining the user's manual "refresh current state"
     action.
     """
-    plan_date = plan_date or _next_trade_date()
+    plan_date = plan_date or resolve_default_plan_date(db)
     plans = (
         db.query(NextDayPlan)
         .filter(NextDayPlan.plan_date == plan_date)
@@ -127,7 +128,7 @@ def create_next_day_plan(
 
 @router.post("/next-day-plans/generate", response_model=list[NextDayPlanOut])
 def generate_next_day_plans(db: Session = Depends(get_db)) -> list[NextDayPlanOut]:
-    plan_date = _next_trade_date()
+    plan_date = resolve_default_plan_date(db)
     holdings = db.query(Holding).order_by(Holding.updated_at.desc()).all()
     account_total_asset = _account_total_asset(db)
     price_notes = _refresh_holding_prices(holdings, db)

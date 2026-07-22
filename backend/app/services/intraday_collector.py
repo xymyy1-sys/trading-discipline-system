@@ -19,6 +19,7 @@ from app.core.database import SessionLocal
 from app.core.trading_clock import shanghai_now_naive
 from app.models.trading import (
     DataCaptureSnapshot,
+    ExpectationSnapshot,
     Holding,
     IntradayCollectionRun,
     IntradayEvidenceEvent,
@@ -107,6 +108,109 @@ def _latest_completed_close_date(now: datetime | None = None) -> str:
         else previous_a_share_trading_day(current.date())
     )
     return completed.isoformat()
+
+
+def _refresh_collected_holding_plan(
+    db,
+    holding: Holding,
+    volume,
+    state,
+    *,
+    now: datetime,
+) -> bool:
+    """Advance today's persisted plan from the collector's verified evidence."""
+
+    from app.api.helpers.plan_calc import _json_obj, refresh_plan_stage_from_evidence
+
+    plan = (
+        db.query(NextDayPlan)
+        .filter(
+            NextDayPlan.plan_date == now.date().isoformat(),
+            NextDayPlan.plan_type == "holding",
+            NextDayPlan.code.in_([holding.code, holding.code.zfill(6), holding.code.lstrip("0")]),
+        )
+        .order_by(NextDayPlan.updated_at.desc(), NextDayPlan.id.desc())
+        .first()
+    )
+    if plan is None:
+        return False
+    expectation = (
+        db.query(ExpectationSnapshot)
+        .filter(
+            ExpectationSnapshot.trade_date == now.date().isoformat(),
+            ExpectationSnapshot.code.in_([holding.code, holding.code.zfill(6), holding.code.lstrip("0")]),
+            ExpectationSnapshot.stage != "次日盘前预期",
+        )
+        .order_by(ExpectationSnapshot.created_at.desc(), ExpectationSnapshot.id.desc())
+        .first()
+    )
+    if expectation is None:
+        return False
+    quote = {
+        "price": float(getattr(volume, "price", 0) or 0),
+        "change_pct": float(getattr(volume, "change_pct", 0) or 0),
+        "open": float(getattr(volume, "open_price", 0) or 0),
+        "prev_close": float(getattr(volume, "prev_close", 0) or 0),
+        "high": float(getattr(volume, "high_price", 0) or 0),
+        "low": float(getattr(volume, "low_price", 0) or 0),
+        "volume": float(getattr(volume, "volume", 0) or 0),
+        "amount": float(getattr(volume, "amount", 0) or 0),
+        "turnover": float(getattr(volume, "turnover", 0) or 0),
+        "vwap": float(getattr(volume, "vwap", 0) or 0),
+        "note": str(getattr(volume, "data_source", "") or "后台盘中采集"),
+    }
+    before = _json_obj(plan.auction_plan)
+    before_revision = int(before.get("advice_revision") or 0)
+    refresh_plan_stage_from_evidence(
+        plan,
+        db,
+        expectation=expectation,
+        volume_price=volume,
+        quote=quote,
+        now=now,
+    )
+    auction = _json_obj(plan.auction_plan)
+    auction["execution_state_advice"] = state.recommended_action
+    auction["execution_state"] = state.state
+    auction["execution_state_id"] = state.id
+    plan.auction_plan = json.dumps(auction, ensure_ascii=False)
+    db.add(plan)
+    db.commit()
+    revision = int(auction.get("advice_revision") or 0)
+    if revision <= before_revision:
+        return True
+    level = str(auction.get("advice_level") or "observe")
+    event_type = {
+        "upgraded": "PLAN_ADVICE_UPGRADED",
+        "withdrawn": "PLAN_ADVICE_WITHDRAWN",
+        "downgraded": "PLAN_ADVICE_DOWNGRADED",
+    }.get(str(auction.get("advice_change") or ""), "PLAN_ADVICE_UPDATED")
+    db.add(IntradayEvidenceEvent(
+        trade_date=now.date().isoformat(),
+        captured_at=now,
+        scope="stock",
+        target_code=holding.code,
+        target_name=holding.name,
+        event_type=event_type,
+        severity="critical" if level == "critical" else "warning" if level == "warning" else "info",
+        value=float(getattr(volume, "price", 0) or 0),
+        previous_value=float(getattr(volume, "vwap", 0) or 0),
+        priority=90 if level == "critical" else 60 if level == "warning" else 25,
+        group_key=f"stock:plan-advice:{revision}",
+        first_seen_at=now,
+        last_seen_at=now,
+        occurrence_count=1,
+        confirmed=True,
+        evidence_json=_json_dumps([
+            str(auction.get("selected_branch_label") or "分支待确认"),
+            str(auction.get("advice_change_reason") or "盘中证据更新"),
+            f"计划建议：{auction.get('current_advice') or ''}",
+            f"持仓执行：{state.recommended_action}",
+        ]),
+        recommendation_id=state.recommendation.id if state.recommendation else None,
+    ))
+    db.commit()
+    return True
 
 
 def _persist_opportunity_radar_snapshot(
@@ -958,6 +1062,20 @@ def _run_intraday_collection_once_locked(trigger: str = "manual") -> IntradayCol
             _volume, state, _sample = result
             snapshot_count += 1
             notes.append(f"{holding.code} {holding.name} 已采集 {stage}。")
+            plan_refreshed = _run_with_resilience(
+                f"计划闭环:{holding.code}",
+                lambda holding=holding, volume=_volume, state=state: _refresh_collected_holding_plan(
+                    db,
+                    holding,
+                    volume,
+                    state,
+                    now=started,
+                ),
+                notes,
+                on_error=db.rollback,
+            )
+            if plan_refreshed:
+                notes.append(f"{holding.code} {holding.name} 次日计划已自动选择/验证分支。")
             recommendation = state.recommendation
             notification_key = (
                 f"revision:{int(recommendation.revision_id)}"

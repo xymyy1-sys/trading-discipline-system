@@ -25,6 +25,7 @@ import type {
   IntradayReview,
   MarketRegime,
   MarketSeesaw,
+  NextDayPlanOut,
   OpportunityRadar,
   PositionExecutionState,
   ReflexivityAssessment,
@@ -34,6 +35,7 @@ import type {
 import FlowKineticsEvidence from '../FlowKineticsEvidence'
 import PositionAiAssistant from '../PositionAiAssistant'
 import DecisionBasisView from '../DecisionBasisView'
+import PlanLoopStatus from '../PlanLoopStatus'
 import { holdingFlowKineticsFields } from '../../flowKinetics'
 
 type WorkspaceModule = {
@@ -164,6 +166,7 @@ export function TodayDecisionSummary() {
   const [realtimeEvents, setRealtimeEvents] = useState<IntradayEvidenceEvent[]>([])
   const [intradayReviews, setIntradayReviews] = useState<Record<string, IntradayReview>>({})
   const [decisionCards, setDecisionCards] = useState<Record<string, StockDecisionCard>>({})
+  const [nextDayPlans, setNextDayPlans] = useState<NextDayPlanOut[]>([])
   const [selectedCode, setSelectedCode] = useState('')
   const [activeAlerts, setActiveAlerts] = useState<ActionRecommendation[]>([])
   const [streamState, setStreamState] = useState('连接中')
@@ -209,8 +212,9 @@ export function TodayDecisionSummary() {
       fetchJsonWithTimeout(`${API_BASE}/api/market/theme-radar`, 12000),
       fetchJsonWithTimeout(`${API_BASE}/api/alerts/active`),
       fetchJsonWithTimeout(`${API_BASE}/api/intel/daily`, 15000),
+      fetchJsonWithTimeout(`${API_BASE}/api/next-day-plans`, 12000),
     ]).then(results => {
-      const [holdingRes, executionRes, seesawRes, themeRes, alertRes, intelRes] = results
+      const [holdingRes, executionRes, seesawRes, themeRes, alertRes, intelRes, planRes] = results
       if (holdingRes.status === 'fulfilled' && Array.isArray(holdingRes.value)) {
         setHoldings(holdingRes.value)
         holdingCodesRef.current = new Set(holdingRes.value.map((item: HoldingOut) => item.code))
@@ -227,6 +231,9 @@ export function TodayDecisionSummary() {
       if (themeRes.status === 'fulfilled') setTheme(themeRes.value)
       if (alertRes.status === 'fulfilled' && Array.isArray(alertRes.value)) setActiveAlerts(alertRes.value)
       if (intelRes.status === 'fulfilled' && Array.isArray(intelRes.value?.items)) setHoldingNews(intelRes.value.items.filter((item: InformationItem) => item.related_holdings?.length).slice(0, 6))
+      if (planRes.status === 'fulfilled' && Array.isArray(planRes.value)) {
+        setNextDayPlans((planRes.value as NextDayPlanOut[]).filter(item => item.plan_type === 'holding'))
+      }
       const holdingRiskEvents = executionRes.status === 'fulfilled' && Array.isArray(executionRes.value)
         ? (executionRes.value as PositionExecutionState[]).flatMap(item => item.events ?? []).filter(isRiskEvent)
         : []
@@ -471,6 +478,7 @@ export function TodayDecisionSummary() {
   const selectedExecution = executionStates.find(item => item.code === selectedHolding?.code) ?? null
   const selectedCard = selectedHolding ? decisionCards[selectedHolding.code] ?? null : null
   const selectedReview = selectedHolding ? intradayReviews[selectedHolding.code] ?? null : null
+  const selectedPlan = selectedHolding ? nextDayPlans.find(item => item.code === selectedHolding.code) ?? null : null
   const marketCycle = marketRegime?.regime_name ?? inferMarketCycle(theme?.market_temperature, seesaw?.market_mode)
   const earningEffect = marketRegime ? marketEffectLabel(marketRegime.opportunity_score) : inferEarningEffect(theme, seesaw)
   const marketRiskActive = Boolean(marketRegime && ['极高', '高', '中高'].includes(marketRegime.risk_level))
@@ -948,6 +956,7 @@ export function TodayDecisionSummary() {
                 <small className="sensitive-evidence">{selectedExecution.invalid_conditions[0] || '等待失效条件确认'}</small>
               </> : <p>暂无持仓执行状态。</p>}
             </article>
+            <PlanLoopStatus plan={selectedPlan?.auction_plan} planDate={selectedPlan?.plan_date} compact />
             {selectedExecution && [
               selectedExecution.high_sell_signal,
               selectedExecution.panic_sell_guard,
@@ -1091,6 +1100,11 @@ export function TodayDecisionSummary() {
     fetchJsonWithTimeout(`${API_BASE}/api/holdings/execution-states`, 12000)
       .then(value => {
         if (Array.isArray(value)) setExecutionStates(value as PositionExecutionState[])
+      })
+      .catch(() => undefined)
+    fetchJsonWithTimeout(`${API_BASE}/api/next-day-plans`, 12000)
+      .then(value => {
+        if (Array.isArray(value)) setNextDayPlans((value as NextDayPlanOut[]).filter(item => item.plan_type === 'holding'))
       })
       .catch(() => undefined)
   }
