@@ -3,7 +3,18 @@ from datetime import datetime
 
 import pandas as pd
 
-from app.api.helpers.quotes import _attach_minute_bars, _daily_history_metrics, _eastmoney_minute_bars, _eastmoney_secid, _eastmoney_tick_flow, _sina_minute_bars
+from app.api.helpers.quotes import (
+    _attach_minute_bars,
+    _daily_history_metrics,
+    _eastmoney_minute_bars,
+    _eastmoney_secid,
+    _eastmoney_tick_flow,
+    _latest_a_share_quotes,
+    _latest_a_share_quotes_tencent,
+    _minute_target_trade_date,
+    _sina_minute_bars,
+    _tencent_minute_bars,
+)
 from app.services.effective_flow import INSUFFICIENT_DATA, analyze_effective_flow
 
 
@@ -31,7 +42,7 @@ def test_eastmoney_minute_bars_maps_kline_fields(monkeypatch):
     monkeypatch.setattr("app.api.helpers.quotes.datetime", type("FixedDateTime", (), {
         "now": staticmethod(lambda: type("Now", (), {"date": lambda self: __import__("datetime").date(2026, 7, 12)})()),
     }))
-    monkeypatch.setattr("app.api.helpers.quotes._last_trading_day", lambda: "2026-07-12")
+    monkeypatch.setattr("app.api.helpers.quotes._minute_target_trade_date", lambda: "2026-07-12")
     monkeypatch.setattr("app.api.helpers.quotes.requests.get", lambda *_args, **_kwargs: FakeResponse())
 
     bars = _eastmoney_minute_bars("600584")
@@ -49,7 +60,7 @@ def test_attach_minute_bars_marks_quote_reliable_source(monkeypatch):
     monkeypatch.setattr("app.api.helpers.quotes.datetime", type("FixedDateTime", (), {
         "now": staticmethod(lambda: type("Now", (), {"date": lambda self: __import__("datetime").date(2026, 7, 12)})()),
     }))
-    monkeypatch.setattr("app.api.helpers.quotes._last_trading_day", lambda: "2026-07-10")
+    monkeypatch.setattr("app.api.helpers.quotes._minute_target_trade_date", lambda: "2026-07-10")
     monkeypatch.setattr(
         "app.api.helpers.quotes._eastmoney_minute_bars",
         lambda code: [{"trade_date": "2026-07-10", "time": "09:31", "price": 10.2, "volume": 1000, "amount": 10200}],
@@ -82,7 +93,7 @@ def test_sina_minute_bars_maps_ohlcv_and_estimated_amount(monkeypatch):
         "day": "2026-07-10 09:31:00", "open": "10.00", "high": "10.30",
         "low": "9.95", "close": "10.20", "volume": "1000",
     }])
-    monkeypatch.setattr("app.api.helpers.quotes._last_trading_day", lambda: "2026-07-10")
+    monkeypatch.setattr("app.api.helpers.quotes._minute_target_trade_date", lambda: "2026-07-10")
     monkeypatch.setattr("akshare.stock_zh_a_minute", lambda **kwargs: frame)
     bars = _sina_minute_bars("600584")
     assert bars[0]["time"] == "09:31"
@@ -102,6 +113,92 @@ def test_attach_minute_bars_falls_back_to_sina_and_marks_degraded(monkeypatch):
     assert quotes["600584"]["minute_amount_estimated"] is True
     assert "新浪1分钟" in quotes["600584"]["minute_bar_source"]
     assert "primary down" in quotes["600584"]["minute_fetch_error"]
+
+
+def test_tencent_quote_maps_exchange_date_and_quote_fields(monkeypatch):
+    fields = [""] * 39
+    fields[0:7] = ["1", "金牛化工", "600722", "9.91", "9.01", "8.77", "1384875"]
+    fields[30:39] = [
+        "20260722150000", "0.90", "9.99", "9.91", "8.72", "x",
+        "1384875", "132986", "20.36",
+    ]
+    payload = f'v_sh600722="{"~".join(fields)}";'
+
+    class FakeResponse:
+        content = payload.encode("gb18030")
+
+        def raise_for_status(self):
+            return None
+
+    monkeypatch.setattr("app.api.helpers.quotes.requests.get", lambda *_args, **_kwargs: FakeResponse())
+    quotes = _latest_a_share_quotes_tencent(["600722"])
+
+    assert quotes["600722"]["price"] == 9.91
+    assert quotes["600722"]["provider_event_at"] == datetime(2026, 7, 22, 15, 0)
+    assert quotes["600722"]["amount"] == 13.3
+    assert quotes["600722"]["volume"] == 138_487_500
+    assert quotes["600722"]["is_delayed_endpoint"] is False
+
+
+def test_tencent_minute_rows_are_differenced_and_post_close_rows_rejected(monkeypatch):
+    class FakeResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {
+                "data": {
+                    "sh600722": {
+                        "data": {
+                            "date": "20260722",
+                            "data": [
+                                "0930 8.77 100 87700.00",
+                                "0931 8.80 150 131700.00",
+                                "1300 8.80 150 131700.00",
+                                "1301 8.90 180 158400.00",
+                                "1506 8.95 200 176300.00",
+                            ],
+                        }
+                    }
+                }
+            }
+
+    monkeypatch.setattr("app.api.helpers.quotes.requests.get", lambda *_args, **_kwargs: FakeResponse())
+    bars = _tencent_minute_bars("600722")
+
+    assert [item["time"] for item in bars] == ["09:30", "09:31", "13:01"]
+    assert bars[0]["trade_date"] == "2026-07-22"
+    assert bars[1]["volume"] == 5_000
+    assert bars[1]["amount"] == 44_000
+    assert bars[2]["volume"] == 3_000
+
+
+def test_quote_fallback_prefers_tencent_over_two_session_delayed_edge(monkeypatch):
+    delayed = {
+        "600722": {
+            "price": 8.95,
+            "provider_event_at": datetime(2026, 7, 21, 15, 0),
+            "provider": "eastmoney-push2delay",
+            "is_delayed_endpoint": True,
+        }
+    }
+    current = {
+        "600722": {
+            "price": 9.91,
+            "provider_event_at": datetime(2026, 7, 22, 15, 0),
+            "provider": "tencent-qt",
+            "is_delayed_endpoint": False,
+        }
+    }
+    monkeypatch.setattr("app.api.helpers.quotes._latest_a_share_quotes_eastmoney", lambda _codes: delayed)
+    monkeypatch.setattr("app.api.helpers.quotes._latest_a_share_quotes_tencent", lambda _codes: current)
+    monkeypatch.setattr("app.api.helpers.quotes._latest_a_share_quotes_sina", lambda _codes: {})
+    monkeypatch.setattr("app.api.helpers.quotes._attach_minute_bars", lambda _quotes: None)
+
+    quotes = _latest_a_share_quotes(["600722"])
+
+    assert quotes["600722"]["price"] == 9.91
+    assert quotes["600722"]["provider"] == "tencent-qt"
 
 
 def test_daily_history_metrics_include_ma_returns_and_estimated_chip_distribution(monkeypatch):
@@ -169,7 +266,7 @@ def test_eastmoney_tick_truncation_metadata_reaches_effective_flow_guard(monkeyp
     def fake_get(url, *_args, **_kwargs):
         return FakeTickResponse() if "/stock/details/" in url else FakeKlineResponse()
 
-    monkeypatch.setattr("app.api.helpers.quotes._last_trading_day", lambda: trade_date)
+    monkeypatch.setattr("app.api.helpers.quotes._minute_target_trade_date", lambda: trade_date)
     monkeypatch.setattr("app.api.helpers.quotes.requests.get", fake_get)
 
     bars = _eastmoney_minute_bars("600584")

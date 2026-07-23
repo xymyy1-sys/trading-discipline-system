@@ -554,6 +554,7 @@ export interface StockDecisionCard {
   provider_event_at: string | null;
   data_age_seconds: number | null;
   is_current_session: boolean;
+  is_latest_available: boolean;
   data_status_note: string;
 }
 

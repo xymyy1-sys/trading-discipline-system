@@ -19,6 +19,7 @@ from app.api.helpers.decision import (
     current_expectation_stage,
     decision_market_data_status,
     decision_card,
+    _persisted_quote_for_code,
     quote_for_code,
     update_expectation_snapshot,
     ensure_expectation_rules,
@@ -1148,11 +1149,11 @@ def refresh_stock_decision_card(code: str, db: Session = Depends(get_db)) -> Sto
     status = decision_market_data_status(quote, None)
     if not quote or float(quote.get("price") or 0) <= 0:
         raise HTTPException(status_code=503, detail="实时行情源暂未返回该股票数据，已保留原历史快照")
-    if not status["is_current_session"]:
+    if not status["is_latest_available"]:
         raise HTTPException(status_code=409, detail=status["data_status_note"])
 
     collection_quote = dict(quote)
-    if not status["minute_bar_current"]:
+    if status["is_current_session"] and not status["minute_bar_current"]:
         collection_quote["minute_bars"] = []
         collection_quote["minute_bar_status"] = "stale_tail"
         collection_quote["minute_fetch_error"] = "分钟线尾点未贴近当前交易窗口，已禁止生成可靠VWAP"
@@ -1173,7 +1174,7 @@ def refresh_stock_decision_card(code: str, db: Session = Depends(get_db)) -> Sto
             previous_quote = {}
         previous_status = decision_market_data_status(previous_quote, latest_capture)
         same_market_event = bool(
-            previous_status["is_current_session"]
+            previous_status["is_latest_available"]
             and previous_status["provider_event_at"] == status["provider_event_at"]
             and previous_status["minute_bar_as_of"] == status["minute_bar_as_of"]
             and _safe_float(previous_quote.get("price")) == _safe_float(quote.get("price"))
@@ -1196,6 +1197,48 @@ def refresh_stock_decision_card(code: str, db: Session = Depends(get_db)) -> Sto
         else entry.category if entry is not None
         else "手工查询"
     )
+    if not status["is_current_session"]:
+        # Before the auction (or on a closed day) the expected provider date is
+        # the latest completed session. Store that reference under its real
+        # evidence date only; never generate today's expectation, action advice
+        # or evidence event from a previous-session close.
+        raw_json = json.dumps(collection_quote, ensure_ascii=False, sort_keys=True, default=str)
+        normalized_json = json.dumps(
+            {
+                "price": _safe_float(collection_quote.get("price")),
+                "market_data_trade_date": status["market_data_trade_date"],
+                "reference_only": True,
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+        db.add(DataCaptureSnapshot(
+            trade_date=str(status["market_data_trade_date"] or status["expected_trade_date"]),
+            captured_at=shanghai_now_naive(),
+            source=str(
+                collection_quote.get("minute_bar_source")
+                or collection_quote.get("note")
+                or collection_quote.get("provider")
+                or "latest-completed-session"
+            ),
+            data_type="tracked_stock_minute",
+            target_code=normalized,
+            target_name=name,
+            raw_value_json=raw_json,
+            normalized_value_json=normalized_json,
+            quality="historical_close",
+            latency_ms=0,
+            is_stale=False,
+            is_degraded=not bool(collection_quote.get("minute_bars")),
+            is_estimated=bool(collection_quote.get("minute_amount_estimated")),
+            is_complete=True,
+            status="reference_close",
+            error_message=str(collection_quote.get("minute_fetch_error") or ""),
+            raw_payload_hash=hashlib.sha256(raw_json.encode("utf-8")).hexdigest(),
+        ))
+        db.commit()
+        return decision_card(db, normalized)
+
     from app.services.intraday_evidence_engine import collect_tracked_stock_evidence
 
     collect_tracked_stock_evidence(
@@ -1414,18 +1457,10 @@ def get_stock_intraday_review(code: str, db: Session = Depends(get_db)) -> Intra
         .order_by(PositionExecutionState.updated_at.desc(), PositionExecutionState.id.desc())
         .first()
     )
-    capture = (
-        db.query(DataCaptureSnapshot)
-        .filter(DataCaptureSnapshot.target_code.in_([code, code.lstrip("0")]), DataCaptureSnapshot.data_type == "stock_minute")
-        .order_by(DataCaptureSnapshot.captured_at.desc(), DataCaptureSnapshot.id.desc())
-        .first()
-    )
-    quote: dict = {}
-    if capture:
-        try:
-            quote = json.loads(capture.raw_value_json or "{}")
-        except Exception:
-            quote = {}
+    # Keep the review and decision card on the same market-event snapshot.
+    # Ordering only by collection time can select a newly-polled two-day-old
+    # delayed quote over a valid previous-session close.
+    quote, _capture = _persisted_quote_for_code(db, code)
     timeline = minute_evidence_timeline(code, holding.name if holding else (latest_state.name if latest_state else code), quote)
     if not timeline:
         timeline = get_stock_timeline(code, db)

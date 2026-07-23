@@ -10,6 +10,7 @@ import {
   RefreshCcw,
 } from 'lucide-react'
 import { API_BASE } from '../../api'
+import { fetchStockDecisionCard } from '../../decisionCardClient'
 import { chineseEvidence, chineseLabel } from '../../labels'
 import { intradayEventSemantics, isActionableIntradayEvent } from '../../eventSemantics'
 import { buildConsensusHighOpenFadeView } from '../../consensusHighOpenFade'
@@ -478,6 +479,10 @@ export function TodayDecisionSummary() {
   const selectedExecution = executionStates.find(item => item.code === selectedHolding?.code) ?? null
   const selectedCard = selectedHolding ? decisionCards[selectedHolding.code] ?? null : null
   const selectedReview = selectedHolding ? intradayReviews[selectedHolding.code] ?? null : null
+  const selectedTimeline = useMemo(
+    () => chooseFreshTimeline(selectedReview, selectedCard),
+    [selectedReview, selectedCard],
+  )
   const selectedPlan = selectedHolding ? nextDayPlans.find(item => item.code === selectedHolding.code) ?? null : null
   const marketCycle = marketRegime?.regime_name ?? inferMarketCycle(theme?.market_temperature, seesaw?.market_mode)
   const earningEffect = marketRegime ? marketEffectLabel(marketRegime.opportunity_score) : inferEarningEffect(theme, seesaw)
@@ -1011,11 +1016,11 @@ export function TodayDecisionSummary() {
             <article className="cockpit-timeline-card">
               <h4>盘中事件时间线</h4>
               <div className="cockpit-timeline">
-                {(selectedReview?.timeline ?? selectedCard?.timeline ?? []).slice(0, 8).map(event => (
+                {selectedTimeline.slice(0, 8).map(event => (
                   <div className={intradayEventSemantics(event.event_type, event.severity).toneClass} key={`${event.id}-${event.captured_at}`}><time>{formatEventTime(event.captured_at)}</time><b>{chineseLabel(event.event_type)}</b><span className="sensitive-evidence">{chineseEvidence(event.evidence?.[0] || chineseLabel(event.severity))}</span></div>
                 ))}
               </div>
-              {!(selectedReview?.timeline ?? selectedCard?.timeline ?? []).length && <p>暂无盘中采样事件。</p>}
+              {!selectedTimeline.length && <p>暂无盘中采样事件。</p>}
             </article>
           </div>
         )}
@@ -1060,7 +1065,8 @@ export function TodayDecisionSummary() {
 
   function loadDecisionCards(nextHoldings: HoldingOut[]) {
     Promise.allSettled(nextHoldings.map(item =>
-      fetchJsonWithTimeout(`${API_BASE}/api/stocks/${item.code}/decision-card`, 8000).then(card => [item.code, card] as const),
+      fetchStockDecisionCard(item.code, { refreshIfStale: true, timeoutMs: 12_000 })
+        .then(card => [item.code, card] as const),
     )).then(results => {
       const activeCodes = new Set(nextHoldings.map(item => item.code))
       setDecisionCards(previous => {
@@ -1094,7 +1100,7 @@ export function TodayDecisionSummary() {
     holdingDecisionRefreshedAt.current[code] = now
     loadSingleIntradayReview(code)
     loadStockReflexivity(code)
-    fetchJsonWithTimeout(`${API_BASE}/api/stocks/${code}/decision-card`, 12000)
+    fetchStockDecisionCard(code, { forceRefresh: true, timeoutMs: 12_000 })
       .then(value => setDecisionCards(previous => ({ ...previous, [code]: value as StockDecisionCard })))
       .catch(() => undefined)
     fetchJsonWithTimeout(`${API_BASE}/api/holdings/execution-states`, 12000)
@@ -1113,7 +1119,10 @@ export function TodayDecisionSummary() {
 function fetchJsonWithTimeout(url: string, timeoutMs = 5000) {
   const controller = new AbortController()
   const timeout = window.setTimeout(() => controller.abort(), timeoutMs)
-  return fetch(url, { signal: controller.signal })
+  return fetch(url, {
+    signal: controller.signal,
+    cache: 'no-store',
+  })
     .then(async response => {
       if (!response.ok) {
         throw new Error(`请求失败：HTTP ${response.status}`)
@@ -1121,6 +1130,28 @@ function fetchJsonWithTimeout(url: string, timeoutMs = 5000) {
       return response.json()
     })
     .finally(() => window.clearTimeout(timeout))
+}
+
+export function chooseFreshTimeline(
+  review: IntradayReview | null,
+  card: StockDecisionCard | null,
+): IntradayEvidenceEvent[] {
+  const reviewTimeline = review?.timeline ?? []
+  const cardTimeline = card?.timeline ?? []
+  if (!reviewTimeline.length) return cardTimeline
+  if (!card?.market_data_trade_date) return reviewTimeline
+
+  const reviewDates = reviewTimeline.map(event => event.captured_at)
+    .filter((value): value is string => Boolean(value))
+    .map(value => value.slice(0, 10))
+    .filter(value => /^\d{4}-\d{2}-\d{2}$/.test(value))
+  const latestReviewDate = reviewDates.sort().at(-1) ?? ''
+
+  // An old review must not win merely because it contains an empty/non-empty
+  // timeline. The refreshed decision card is authoritative for its quote day.
+  return latestReviewDate && latestReviewDate >= card.market_data_trade_date
+    ? reviewTimeline
+    : cardTimeline
 }
 
 function formatEventTime(value: string) {

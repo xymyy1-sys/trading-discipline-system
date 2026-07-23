@@ -5,11 +5,22 @@ from decimal import Decimal, ROUND_HALF_UP
 from typing import Any
 import requests
 from app.core.trading_clock import shanghai_now_naive, shanghai_today
-from app.services.market_data import _last_trading_day
+from app.services.market_data import _limit_up_catcher_expected_trade_date
 from app.models.trading import Holding
 
 _QUOTE_META_CACHE: dict[str, dict[str, Any]] = {}
 _SHANGHAI_TZ = timezone(timedelta(hours=8))
+
+
+def _minute_target_trade_date(now: datetime | None = None) -> str:
+    """Return the only session whose minute tape is valid for this screen.
+
+    Before 09:15, on weekends and on exchange holidays, the current calendar
+    date has no minute tape.  The latest completed session must be requested
+    instead of using an inclusive ``previous trading day`` lookup.
+    """
+
+    return _limit_up_catcher_expected_trade_date(shanghai_now_naive(now))
 
 
 def _provider_event_metadata(
@@ -57,6 +68,20 @@ def _sina_event_at(raw_date: Any, raw_time: Any) -> datetime | None:
         return datetime.fromisoformat(f"{date_text}T{time_text}")
     except ValueError:
         return None
+
+
+def _tencent_event_at(raw: Any) -> datetime | None:
+    """Parse the exchange timestamp carried by Tencent's lightweight quote API."""
+
+    text = str(raw or "").strip()
+    if not text:
+        return None
+    for pattern in ("%Y%m%d%H%M%S", "%Y%m%d%H%M"):
+        try:
+            return datetime.strptime(text, pattern)
+        except ValueError:
+            continue
+    return None
 
 def _safe_float(value: Any) -> float:
     try:
@@ -136,6 +161,13 @@ def _latest_a_share_quotes(codes: list[str]) -> dict[str, dict[str, Any]]:
     except Exception:
         pass
     try:
+        quotes = _latest_a_share_quotes_tencent(codes)
+        if quotes:
+            _attach_minute_bars(quotes)
+            return quotes
+    except Exception:
+        pass
+    try:
         quotes = _latest_a_share_quotes_sina(codes)
         if quotes:
             _attach_minute_bars(quotes)
@@ -149,6 +181,69 @@ def _latest_a_share_quotes(codes: list[str]) -> dict[str, dict[str, Any]]:
     # longer than the reverse-proxy timeout and makes existing holdings appear
     # to vanish.  The caller retains the last verified/manual price instead.
     return {}
+
+
+def _latest_a_share_quotes_tencent(codes: list[str]) -> dict[str, dict[str, Any]]:
+    """Fetch timestamped symbol quotes before accepting a delayed EM edge.
+
+    On some cloud networks only Eastmoney's delayed endpoint is reachable and
+    that endpoint may lag one or two sessions.  Tencent provides an independent
+    small-symbol fallback.  Its exchange timestamp is retained so downstream
+    freshness validation still fails closed instead of trusting receipt time.
+    """
+
+    symbols: list[str] = []
+    code_by_symbol: dict[str, str] = {}
+    for code in codes:
+        for candidate in _quote_code_candidates(code):
+            prefix = "sh" if candidate.startswith(("5", "6", "9")) else "sz"
+            symbol = f"{prefix}{candidate}"
+            symbols.append(symbol)
+            code_by_symbol[symbol] = candidate
+    if not symbols:
+        return {}
+
+    response = requests.get(
+        "https://qt.gtimg.cn/q=" + ",".join(dict.fromkeys(symbols)),
+        headers={"User-Agent": "Mozilla/5.0", "Referer": "https://gu.qq.com/"},
+        timeout=8,
+    )
+    response.raise_for_status()
+    text = response.content.decode("gb18030", errors="ignore")
+    received_at = shanghai_now_naive()
+    quotes: dict[str, dict[str, Any]] = {}
+    for symbol, payload in re.findall(r'v_(s[hz]\d{6})="([^"]*)"', text):
+        parts = payload.split("~")
+        if len(parts) < 39:
+            continue
+        code = code_by_symbol.get(symbol, str(parts[2] or symbol[-6:]).zfill(6))
+        price = _safe_float(parts[3])
+        if price <= 0:
+            continue
+        provider_event_at = _tencent_event_at(parts[30])
+        turnover = _safe_turnover(parts[38])
+        quotes[code] = {
+            "name": str(parts[1] or code),
+            "price": price,
+            "change_pct": _safe_float(parts[32]),
+            # Tencent reports amount in ten-thousand yuan and volume in lots.
+            "amount": round(_safe_float(parts[37]) / 10_000, 2),
+            "turnover": turnover or 0.0,
+            "turnover_source": "tencent_f38_free_float",
+            "turnover_reliable": turnover is not None,
+            "open": _safe_float(parts[5]),
+            "prev_close": _safe_float(parts[4]),
+            "high": _safe_float(parts[33]),
+            "low": _safe_float(parts[34]),
+            "volume": _safe_float(parts[36]) * 100,
+            "provider": "tencent-qt",
+            "provider_endpoint": "qt.gtimg.cn",
+            "is_delayed_endpoint": False,
+            **_provider_event_metadata(provider_event_at, received_at=received_at),
+            "note": "腾讯实时行情",
+        }
+    return quotes
+
 
 def _latest_a_share_quotes_sina(codes: list[str]) -> dict[str, dict[str, Any]]:
     symbols = []
@@ -295,14 +390,25 @@ def _eastmoney_secid(code: str) -> str:
 def _attach_minute_bars(quotes: dict[str, dict[str, Any]]) -> None:
     for code, quote in quotes.items():
         primary_error = ""
-        try:
-            bars = _eastmoney_minute_bars(code)
-        except Exception as exc:
-            bars = []
-            primary_error = str(exc)
+        quote_provider = str(quote.get("provider") or "")
+        if quote_provider == "tencent-qt":
+            try:
+                bars = _tencent_minute_bars(code)
+            except Exception as exc:
+                bars = []
+                primary_error = str(exc)
+        else:
+            try:
+                bars = _eastmoney_minute_bars(code)
+            except Exception as exc:
+                bars = []
+                primary_error = str(exc)
         if bars:
             source = "东方财富1分钟分时K线"
             status = "ok"
+            if quote_provider == "tencent-qt":
+                source = "腾讯1分钟分时成交"
+                status = "fallback_ok"
         else:
             try:
                 bars = _sina_minute_bars(code)
@@ -323,7 +429,7 @@ def _attach_minute_bars(quotes: dict[str, dict[str, Any]]) -> None:
         quote["minute_bars"] = bars
         quote["minute_bar_source"] = source
         quote["minute_bar_status"] = status
-        quote["minute_bar_trade_date"] = bars[-1].get("trade_date") or _last_trading_day()
+        quote["minute_bar_trade_date"] = bars[-1].get("trade_date") or _minute_target_trade_date()
         last_time = str(bars[-1].get("time") or "").strip()
         if last_time:
             quote["minute_bar_as_of"] = f"{quote['minute_bar_trade_date']}T{last_time}:00"
@@ -332,12 +438,67 @@ def _attach_minute_bars(quotes: dict[str, dict[str, Any]]) -> None:
         quote["note"] = f"{quote.get('note') or '实时行情'} + {source_note}{date_note}"
 
 
+def _tencent_minute_bars(code: str) -> list[dict[str, Any]]:
+    """Map Tencent cumulative minute rows to per-minute price/volume bars."""
+
+    normalized = _quote_code_candidates(code)[0] if _quote_code_candidates(code) else _normalize_code(code)
+    symbol = ("sh" if normalized.startswith(("5", "6", "9")) else "sz") + normalized
+    response = requests.get(
+        "https://web.ifzq.gtimg.cn/appstock/app/minute/query",
+        params={"code": symbol},
+        headers={"User-Agent": "Mozilla/5.0", "Referer": "https://gu.qq.com/"},
+        timeout=8,
+    )
+    response.raise_for_status()
+    root = ((response.json().get("data") or {}).get(symbol) or {}).get("data") or {}
+    date_text = str(root.get("date") or "").strip()
+    try:
+        trade_date = datetime.strptime(date_text, "%Y%m%d").date().isoformat()
+    except ValueError:
+        return []
+
+    bars: list[dict[str, Any]] = []
+    previous_cumulative_lots = 0.0
+    previous_cumulative_amount = 0.0
+    for raw in list(root.get("data") or []):
+        parts = str(raw).split()
+        if len(parts) < 4:
+            continue
+        raw_time = parts[0]
+        if len(raw_time) != 4 or not raw_time.isdigit():
+            continue
+        minute = int(raw_time[:2]) * 60 + int(raw_time[2:])
+        if not (9 * 60 + 30 <= minute <= 11 * 60 + 30 or 13 * 60 <= minute <= 15 * 60):
+            continue
+        price = _safe_float(parts[1])
+        cumulative_lots = _safe_float(parts[2])
+        cumulative_amount = _safe_float(parts[3])
+        lots = cumulative_lots - previous_cumulative_lots
+        amount = cumulative_amount - previous_cumulative_amount
+        previous_cumulative_lots = cumulative_lots
+        previous_cumulative_amount = cumulative_amount
+        if price <= 0 or lots <= 0 or amount <= 0:
+            continue
+        bars.append({
+            "trade_date": trade_date,
+            "time": f"{raw_time[:2]}:{raw_time[2:]}",
+            "open": price,
+            "price": price,
+            "close": price,
+            "high": price,
+            "low": price,
+            "volume": lots * 100,
+            "amount": amount,
+        })
+    return bars
+
+
 def _sina_minute_bars(code: str) -> list[dict[str, Any]]:
     import akshare as ak
 
     normalized = _quote_code_candidates(code)[0] if _quote_code_candidates(code) else _normalize_code(code)
     symbol = ("sh" if normalized.startswith(("5", "6", "9")) else "sz") + normalized
-    trade_date = _last_trading_day()
+    trade_date = _minute_target_trade_date()
     frame = ak.stock_zh_a_minute(symbol=symbol, period="1", adjust="")
     if frame is None or frame.empty:
         return []
@@ -360,7 +521,7 @@ def _sina_minute_bars(code: str) -> list[dict[str, Any]]:
 def _eastmoney_minute_bars(code: str) -> list[dict[str, Any]]:
     normalized = _quote_code_candidates(code)[0] if _quote_code_candidates(code) else _normalize_code(code)
     secid = _eastmoney_secid(normalized)
-    trade_date = _last_trading_day()
+    trade_date = _minute_target_trade_date()
     params = {
         "secid": secid,
         "klt": "1",

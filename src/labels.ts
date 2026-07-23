@@ -6,7 +6,7 @@ const LABELS: Record<string, string> = {
   NORMAL_HOLD: '正常持有', PROFIT_EXPANSION: '利润扩张',
   PROFIT_PROTECTION: '利润保护', DIVERGENCE_HOLD: '分歧持有',
   DEGRADED_DATA_OBSERVATION: '数据降级观察',
-  manual: '手动数据', missing: '数据缺失', realtime: '实时数据',
+  manual: '手动数据', missing: '数据缺失', realtime: '实时数据', historical_close: '最新收盘参考',
   degraded: '数据降级', degraded_vwap: '均价线降级',
   planned: '已计划', completed: '已完成', done: '已完成',
   LOW: '低', MEDIUM: '中', HIGH: '高',

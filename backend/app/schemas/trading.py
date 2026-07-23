@@ -719,6 +719,7 @@ class StockDecisionCardOut(BaseModel):
     provider_event_at: datetime | None = None
     data_age_seconds: float | None = None
     is_current_session: bool = False
+    is_latest_available: bool = False
     data_status_note: str = ""
 
 

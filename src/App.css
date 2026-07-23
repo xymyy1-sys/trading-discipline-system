@@ -1361,6 +1361,7 @@ h4 {
 }
 
 .selected-theme-head .decision-data-current,
+.selected-theme-head .decision-data-reference,
 .selected-theme-head .decision-data-stale {
   display: block;
   margin-top: 2px;
@@ -1369,6 +1370,11 @@ h4 {
 
 .selected-theme-head .decision-data-current {
   color: #16825d;
+}
+
+.selected-theme-head .decision-data-reference {
+  color: #9a6700;
+  font-weight: 600;
 }
 
 .selected-theme-head .decision-data-stale {

@@ -12,22 +12,11 @@ import type { ExpectationChain, ExpectationRule, HoldingOut, StockDecisionCard }
 import AiInsightButton from './AiInsightButton'
 import PositionAiAssistant from './PositionAiAssistant'
 import EffectiveCapitalEvidence from './EffectiveCapitalEvidence'
+import { fetchStockDecisionCard } from '../decisionCardClient'
 
 type DecisionCardMode = 'watchlist' | 'holding'
 type WatchlistStock = { code: string; name: string; score: number; tier: string }
 type CardLoadIntent = 'cached' | 'explicit' | 'background' | 'ensure-current'
-
-function isAshareCollectionWindow() {
-  const parts = Object.fromEntries(
-    new Intl.DateTimeFormat('en-CA', {
-      timeZone: 'Asia/Shanghai', weekday: 'short', hour: '2-digit', minute: '2-digit', hour12: false,
-    }).formatToParts(new Date()).map(part => [part.type, part.value]),
-  )
-  if (parts.weekday === 'Sat' || parts.weekday === 'Sun') return false
-  const minute = Number(parts.hour || 0) * 60 + Number(parts.minute || 0)
-  // Post-close quotes are needed to analyze stocks added by the daily rotation.
-  return minute >= 9 * 60 + 15
-}
 
 echarts.use([LineChart, BarChart, ScatterChart, GridComponent, LegendComponent, TooltipComponent, CanvasRenderer])
 
@@ -46,7 +35,6 @@ export default function DecisionCard({ mode = 'watchlist' }: { mode?: DecisionCa
   const selectedCodeRef = useRef('')
   const targetCodesRef = useRef<string[]>([])
   const explicitTargetRef = useRef('')
-  const loadCardRef = useRef<(target: string, intent?: CardLoadIntent) => void>(() => undefined)
 
   const loadCard = useCallback((target: string, intent: CardLoadIntent = 'cached') => {
     const normalized = target.trim()
@@ -65,26 +53,20 @@ export default function DecisionCard({ mode = 'watchlist' }: { mode?: DecisionCa
       setExpectationChain(null)
       selectedCodeRef.current = ''
     }
-    fetch(
-      `${API_BASE}/api/stocks/${normalized}/decision-card${refresh ? '/refresh' : ''}`,
-      refresh ? { method: 'POST', cache: 'no-store' } : { cache: 'no-store' },
-    )
-      .then(async r => {
-        if (!r.ok) {
-          const payload = await r.json().catch(() => null) as { detail?: string } | null
-          throw new Error(payload?.detail || `个股决策卡读取失败（${r.status}）`)
-        }
-        return r.json()
-      })
+    fetchStockDecisionCard(normalized, {
+      forceRefresh: refresh,
+      refreshIfStale: intent === 'cached',
+      timeoutMs: 12_000,
+    })
       .then((data: StockDecisionCard) => {
         if (requestId !== requestSequence.current) return
         setCard(data)
         selectedCodeRef.current = data.code
         if (intent !== 'background') setCode(data.code)
-        if (intent === 'cached' && !data.is_current_session && isAshareCollectionWindow()) {
-          window.setTimeout(() => loadCardRef.current(data.code, 'ensure-current'), 0)
-        }
-        return fetch(`${API_BASE}/api/stocks/${data.code}/expectation-chain?trade_date=${encodeURIComponent(data.expectation.trade_date)}`)
+        return fetch(
+          `${API_BASE}/api/stocks/${data.code}/expectation-chain?trade_date=${encodeURIComponent(data.expectation.trade_date)}`,
+          { cache: 'no-store' },
+        )
           .then(response => response.ok ? response.json() : Promise.reject())
           .then((chain: ExpectationChain) => {
             if (requestId === requestSequence.current) setExpectationChain(chain)
@@ -110,8 +92,6 @@ export default function DecisionCard({ mode = 'watchlist' }: { mode?: DecisionCa
         if (requestId === requestSequence.current && intent !== 'background') setLoading(false)
       })
   }, [])
-  loadCardRef.current = loadCard
-
   useEffect(() => {
     const applyTargets = (
       data: HoldingOut[] | WatchlistStock[],
@@ -278,7 +258,11 @@ export default function DecisionCard({ mode = 'watchlist' }: { mode?: DecisionCa
               <div>
                 <strong>{card.name} <span className="mono">{card.code}</span></strong>
                 <span>{card.industry || '行业待确认'} · {(card.concepts || []).slice(0, 5).join('、') || '概念待确认'} · {chineseLabel(card.data_quality)}</span>
-                <span className={card.is_current_session ? 'decision-data-current' : 'decision-data-stale'}>
+                <span className={card.is_current_session
+                  ? 'decision-data-current'
+                  : card.is_latest_available
+                    ? 'decision-data-reference'
+                    : 'decision-data-stale'}>
                   行情日 {card.market_data_trade_date || '待核验'} · {card.data_status_note}
                 </span>
               </div>

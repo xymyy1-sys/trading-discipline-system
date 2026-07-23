@@ -416,7 +416,8 @@ def decision_market_data_status(
         (minute_date and provider_date and minute_date != provider_date)
         or (market_evidence_date and capture_date and market_evidence_date != capture_date)
     )
-    quote_as_of = provider_event_at or minute_bar_as_of
+    quote_times = [value for value in (provider_event_at, minute_bar_as_of) if value is not None]
+    quote_as_of = max(quote_times, default=None)
     display_as_of = quote_as_of or (capture.captured_at if capture is not None else None)
     if display_as_of is not None and display_as_of.tzinfo is not None:
         display_as_of = shanghai_now_naive(display_as_of)
@@ -444,7 +445,15 @@ def decision_market_data_status(
             return time(14, 59) <= value.time() <= time(15, 1)
         return False
 
-    snapshot_fresh = anchored_for_window(quote_as_of)
+    # A provider's post-close f124 can be later than 15:00 while the minute
+    # tape has a valid 15:00 close.  Either independently anchored clock is
+    # sufficient for quote freshness; the minute tape retains its own stricter
+    # reliability flag below.
+    snapshot_fresh = any(
+        anchored_for_window(value)
+        for value in (provider_event_at, minute_bar_as_of)
+        if value is not None
+    )
     minute_bar_current = bool(minute_rows and anchored_for_window(minute_bar_as_of))
     has_quote = _safe_float(quote.get("price")) > 0
     current_session = bool(
@@ -456,6 +465,27 @@ def decision_market_data_status(
         and not bool(quote.get("is_delayed_endpoint"))
         and not bool(capture is not None and capture.is_stale)
     )
+    minute_close_anchor = bool(
+        minute_bar_as_of is not None
+        and minute_bar_as_of.date().isoformat() == expected_date
+        and time(14, 59) <= minute_bar_as_of.time() <= time(15, 1)
+    )
+    # Eastmoney's quote timestamp can be refreshed after the 15:00 close
+    # (commonly around 16:xx). Accept that bounded close-publication window,
+    # but never treat an arbitrary late-night timestamp as exchange evidence.
+    provider_close_anchor = bool(
+        provider_event_at is not None
+        and provider_event_at.date().isoformat() == expected_date
+        and time(14, 59) <= provider_event_at.time() <= time(18, 0)
+    )
+    latest_completed_reference = bool(
+        has_quote
+        and expected_date < calendar_date
+        and market_evidence_date == expected_date
+        and not conflicting_dates
+        and (minute_close_anchor or provider_close_anchor)
+    )
+    is_latest_available = bool(current_session or latest_completed_reference)
     if not quote:
         note = "尚无可核验行情快照；请点击查询获取当日数据。"
     elif conflicting_dates:
@@ -483,6 +513,7 @@ def decision_market_data_status(
         "provider_event_at": provider_event_at,
         "data_age_seconds": round(age_seconds, 1) if age_seconds is not None else None,
         "is_current_session": current_session,
+        "is_latest_available": is_latest_available,
         "minute_bar_as_of": minute_bar_as_of,
         "minute_bar_current": minute_bar_current,
         "data_status_note": note,
@@ -1335,7 +1366,14 @@ def _persisted_quote_for_code(
     db: Session,
     code: str,
 ) -> tuple[dict[str, Any], DataCaptureSnapshot | None]:
-    """Return the newest collector snapshot for a stock without provider I/O."""
+    """Return the newest *market event* snapshot without provider I/O.
+
+    Collector receipt time is not market time.  A delayed endpoint can be
+    polled today and therefore have a newer ``captured_at`` than yesterday's
+    valid close while its underlying quote is two sessions older.  Current
+    session evidence is preferred first; historical fallback is ranked by the
+    provider/minute trade date and event time, never by poll time alone.
+    """
 
     normalized = code.zfill(6)
     rows = (
@@ -1350,7 +1388,13 @@ def _persisted_quote_for_code(
     )
     if not rows:
         return {}, None
-    historical_fallback: tuple[dict[str, Any], DataCaptureSnapshot] | None = None
+    expected_date = str(decision_market_data_status({}, None)["expected_trade_date"] or "")
+    historical_candidates: list[
+        tuple[str, datetime, datetime, int, dict[str, Any], DataCaptureSnapshot]
+    ] = []
+    future_candidates: list[
+        tuple[str, datetime, datetime, int, dict[str, Any], DataCaptureSnapshot]
+    ] = []
     for row in rows:
         try:
             value = json.loads(row.raw_value_json or "{}")
@@ -1358,12 +1402,38 @@ def _persisted_quote_for_code(
             continue
         if not isinstance(value, dict) or _safe_float(value.get("price")) <= 0:
             continue
-        if decision_market_data_status(value, row)["is_current_session"]:
+        status = decision_market_data_status(value, row)
+        if status["is_current_session"]:
             return value, row
-        if historical_fallback is None:
-            historical_fallback = (value, row)
-    if historical_fallback is not None:
-        return historical_fallback
+        evidence_date = str(status["market_data_trade_date"] or "")
+        if not evidence_date:
+            evidence_date = str(row.trade_date or "")
+        event_at = (
+            _as_naive_datetime(value.get("provider_event_at"))
+            or _as_naive_datetime(value.get("minute_bar_as_of"))
+            or datetime.min
+        )
+        captured_at = _as_naive_datetime(row.captured_at) or datetime.min
+        candidate = (evidence_date, event_at, captured_at, int(row.id or 0), value, row)
+        # A future-dated row must remain visible to the data-quality guard so
+        # it can report FUTURE_TIMESTAMP, but it may never outrank a usable
+        # current/historical snapshot.
+        if expected_date and evidence_date and evidence_date > expected_date:
+            future_candidates.append(candidate)
+        else:
+            historical_candidates.append(candidate)
+    if historical_candidates:
+        _date, _event_at, _captured_at, _id, value, row = max(
+            historical_candidates,
+            key=lambda item: item[:4],
+        )
+        return value, row
+    if future_candidates:
+        _date, _event_at, _captured_at, _id, value, row = max(
+            future_candidates,
+            key=lambda item: item[:4],
+        )
+        return value, row
     # Keep the newest failed capture for diagnostics, but never let its empty
     # payload masquerade as the stock's latest usable market evidence.
     return {}, rows[0]
@@ -1403,6 +1473,8 @@ def _persisted_expectation_row(
     db: Session,
     code: str,
     stage: str,
+    *,
+    trade_date: str,
 ) -> ExpectationSnapshot | None:
     normalized = code.zfill(6)
     candidates = [code, normalized, normalized.lstrip("0")]
@@ -1411,18 +1483,14 @@ def _persisted_expectation_row(
         .filter(
             ExpectationSnapshot.code.in_(candidates),
             ExpectationSnapshot.stage == stage,
+            ExpectationSnapshot.trade_date == trade_date,
         )
         .order_by(ExpectationSnapshot.created_at.desc(), ExpectationSnapshot.id.desc())
         .first()
     )
     if row is not None:
         return row
-    return (
-        db.query(ExpectationSnapshot)
-        .filter(ExpectationSnapshot.code.in_(candidates))
-        .order_by(ExpectationSnapshot.created_at.desc(), ExpectationSnapshot.id.desc())
-        .first()
-    )
+    return None
 
 
 def _daily_metrics_from_volume(row: VolumePriceSnapshot | None) -> dict[str, float]:
@@ -1496,7 +1564,12 @@ def decision_card(db: Session, code: str) -> StockDecisionCardOut:
             "data_quality": "partial",
             "vwap_reliable": False,
         })
-    expectation_row = _persisted_expectation_row(db, code, stage)
+    expectation_row = _persisted_expectation_row(
+        db,
+        code,
+        stage,
+        trade_date=_today(now),
+    )
     if expectation_row is not None:
         expectation = _expectation_out(expectation_row)
     elif baseline:
@@ -1835,6 +1908,8 @@ def decision_card(db: Session, code: str) -> StockDecisionCardOut:
         data_quality=(
             str(capture.quality or "missing")
             if market_data_status["is_current_session"] and capture is not None
+            else "historical_close"
+            if market_data_status["is_latest_available"] and quote
             else "stale" if quote
             else "missing"
         ),
@@ -1847,5 +1922,6 @@ def decision_card(db: Session, code: str) -> StockDecisionCardOut:
         provider_event_at=market_data_status["provider_event_at"],
         data_age_seconds=market_data_status["data_age_seconds"],
         is_current_session=market_data_status["is_current_session"],
+        is_latest_available=market_data_status["is_latest_available"],
         data_status_note=market_data_status["data_status_note"],
     )
