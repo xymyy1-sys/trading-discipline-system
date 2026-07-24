@@ -82,6 +82,67 @@ def test_completed_window_never_uses_unfinished_current_session():
     assert _break_repackage_completed_trade_dates(after_close)[-1] == "2026-07-20"
 
 
+def test_break_repackage_window_falls_back_until_daily_bar_is_published(monkeypatch):
+    provider = MarketDataProvider()
+    after_close = datetime(2026, 7, 20, 15, 10, tzinfo=_SHANGHAI).replace(tzinfo=None)
+    trade_dates = ["2026-07-14", "2026-07-15", "2026-07-16", "2026-07-17", "2026-07-20"]
+
+    monkeypatch.setattr(
+        provider,
+        "_fetch_break_repackage_daily_bars",
+        lambda *_args: (_ for _ in ()).throw(ValueError("评价日日线未发布")),
+    )
+
+    verified = provider._break_repackage_verified_trade_dates(after_close, trade_dates)
+
+    assert verified[-1] == "2026-07-17"
+    assert len(verified) == 5
+
+
+def test_break_repackage_window_keeps_current_day_after_daily_bar_is_published(monkeypatch):
+    provider = MarketDataProvider()
+    after_close = datetime(2026, 7, 20, 15, 10, tzinfo=_SHANGHAI).replace(tzinfo=None)
+    trade_dates = ["2026-07-14", "2026-07-15", "2026-07-16", "2026-07-17", "2026-07-20"]
+
+    monkeypatch.setattr(
+        provider,
+        "_fetch_break_repackage_daily_bars",
+        lambda *_args: ([
+            _bar("2026-07-20", open_price=10, close=10.5, high=10.8, low=9.8),
+        ], "test-daily"),
+    )
+
+    assert provider._break_repackage_verified_trade_dates(after_close, trade_dates) == trade_dates
+
+
+def test_historical_pool_audit_tolerates_one_missing_sample(monkeypatch):
+    provider = MarketDataProvider()
+    rows = [_pool_row("600001"), _pool_row("600002")]
+
+    def daily(code: str, *_args):
+        if code == "600001":
+            raise ValueError("样本日线缺失")
+        return ([
+            _bar("2026-07-17", open_price=10, close=11, high=11, low=10, change_pct=1),
+        ], "test-daily")
+
+    monkeypatch.setattr(provider, "_fetch_break_repackage_daily_bars", daily)
+
+    provider._audit_break_repackage_pool_samples("2026-07-17", rows)
+
+
+def test_historical_pool_audit_defers_when_no_sample_daily_bar_is_available(monkeypatch):
+    provider = MarketDataProvider()
+    rows = [_pool_row("600001"), _pool_row("600002")]
+    monkeypatch.setattr(
+        provider,
+        "_fetch_break_repackage_daily_bars",
+        lambda *_args: (_ for _ in ()).throw(ValueError("样本日线缺失")),
+    )
+
+    provider._audit_break_repackage_pool_samples("2026-07-17", rows)
+
+
 def test_break_repackage_uses_latest_anchor_and_excludes_broken_or_current_limit_up(
     monkeypatch,
 ):
@@ -280,7 +341,7 @@ def test_break_repackage_pool_gap_and_all_history_gap_are_not_zero_matches(monke
 
     monkeypatch.setattr(provider, "_fetch_break_repackage_limit_up_pool", pool_gap)
     result = provider.break_repackage(force_refresh=True)
-    assert result.data_status == "data_gap"
+    assert result.data_status == "partial"
     assert result.matched_count == 0
     assert any("不能解释" in note for note in result.notes)
 

@@ -2486,6 +2486,10 @@ class MarketDataProvider:
             captured_at,
             criteria.lookback_sessions,
         )
+        trade_dates = self._break_repackage_verified_trade_dates(
+            captured_at,
+            trade_dates,
+        )
         evaluation_date = trade_dates[-1]
         cache_key = (
             f"break-repackage|{evaluation_date}|v1|{criteria.lookback_sessions}"
@@ -2494,17 +2498,20 @@ class MarketDataProvider:
         if not force_refresh and isinstance(cached, BreakRepackageOut):
             return cached
 
-        try:
-            pools: dict[str, list[dict[str, Any]]] = {}
-            # Fetch the five immutable sessions sequentially.  Each response
-            # is then independently cross-checked against its requested day's
-            # unadjusted daily bars; avoiding a burst also reduces throttling.
-            for trade_date in trade_dates:
+        pools: dict[str, list[dict[str, Any]]] = {}
+        pool_errors: dict[str, str] = {}
+        # Fetch the immutable sessions sequentially.  Each response is then
+        # independently cross-checked when possible; a transient provider miss
+        # for one date must not blank the whole screen.
+        for trade_date in trade_dates:
+            try:
                 pools[trade_date] = self._fetch_break_repackage_limit_up_pool(
                     trade_date,
                 )
-        except Exception as exc:
-            reason = _break_repackage_pool_error_message(exc)
+            except Exception as exc:
+                pool_errors[trade_date] = _break_repackage_pool_error_message(exc)
+                pools[trade_date] = []
+        if len(pool_errors) == len(trade_dates):
             return BreakRepackageOut(
                 source="eastmoney-unavailable",
                 updated_at=captured_at,
@@ -2513,7 +2520,7 @@ class MarketDataProvider:
                 criteria=criteria,
                 lookback_trade_dates=trade_dates,
                 notes=[
-                    f"最近5个完成交易日的真实涨停池未全部通过校验：{reason or '未知错误'}。",
+                    "最近5个完成交易日的真实涨停池全部暂不可用。",
                     "本次未生成候选，也不能解释为当前没有断板反包结构。",
                 ],
             )
@@ -2534,23 +2541,34 @@ class MarketDataProvider:
 
         candidate_count = len(anchors)
         if candidate_count == 0:
+            data_status = "partial" if pool_errors else "ok"
+            notes = [
+                "最近5个完成交易日的真实涨停池已核验；评价日仍涨停的股票已排除。",
+                "当前没有需要继续核验日线支撑的非当日涨停标的。",
+            ]
+            if pool_errors:
+                failed_dates = "、".join(pool_errors)
+                notes = [
+                    f"涨停池有{len(pool_errors)}个交易日临时缺口：{failed_dates}。",
+                    "本次没有形成可验证锚点，但不能解释为当前没有断板反包结构。",
+                ]
             result = BreakRepackageOut(
                 source="eastmoney-dated-limit-pools",
                 updated_at=captured_at,
                 evaluation_date=evaluation_date,
-                data_status="ok",
+                data_status=data_status,
                 criteria=criteria,
                 lookback_trade_dates=trade_dates,
                 candidate_count=0,
                 history_checked_count=0,
                 history_gap_count=0,
                 matched_count=0,
-                notes=[
-                    "最近5个完成交易日的真实涨停池已核验；评价日仍涨停的股票已排除。",
-                    "当前没有需要继续核验日线支撑的非当日涨停标的。",
-                ],
+                notes=notes,
             )
-            _set_response_cache(cache_key, result)
+            if result.data_status == "ok":
+                _set_response_cache(cache_key, result)
+            else:
+                _set_response_cache_unless_data_status(cache_key, result, "ok")
             return result
 
         histories: dict[str, tuple[list[dict[str, Any]], str]] = {}
@@ -2780,7 +2798,7 @@ class MarketDataProvider:
                 ],
             )
 
-        data_status = "partial" if history_gap_count else "ok"
+        data_status = "partial" if (history_gap_count or pool_errors) else "ok"
         source_suffix = ",".join(sorted(history_sources)) or "eastmoney-unadjusted-daily-kline"
         notes = [
             "涨停日仅建立开盘成本锚；支撑检验从下一交易日开始，评价日仍涨停的股票不重复展示。",
@@ -2791,6 +2809,11 @@ class MarketDataProvider:
             notes.append(
                 f"另有{history_gap_count}只候选因停牌、缺日或日线接口缺口未参与结论。"
             )
+        if pool_errors:
+            failed_dates = "、".join(pool_errors)
+            notes.append(f"涨停池有{len(pool_errors)}个交易日临时缺口：{failed_dates}。")
+            if evaluation_date in pool_errors:
+                notes.append("评价日涨停池缺口，当前结果可能未排除评价日仍涨停标的。")
         elif not items:
             notes.append("真实数据核验完成，当前没有全部守住涨停日开盘锚的标的。")
 
@@ -2813,6 +2836,43 @@ class MarketDataProvider:
         elif result.data_status == "partial":
             _set_response_cache_unless_data_status(cache_key, result, "ok")
         return result
+
+    def _break_repackage_verified_trade_dates(
+        self,
+        captured_at: datetime,
+        trade_dates: list[str],
+    ) -> list[str]:
+        """Use the latest completed session only after daily bars are published."""
+
+        if not trade_dates:
+            return trade_dates
+        evaluation_date = trade_dates[-1]
+        try:
+            evaluation_day = datetime.strptime(evaluation_date, "%Y-%m-%d").date()
+        except ValueError:
+            return trade_dates
+        if evaluation_day != captured_at.date():
+            return trade_dates
+
+        for benchmark in ("000001", "600000", "300750"):
+            try:
+                bars, _ = self._fetch_break_repackage_daily_bars(
+                    benchmark,
+                    evaluation_date,
+                    evaluation_date,
+                )
+            except Exception:
+                continue
+            if any(str(bar.get("trade_date") or "") == evaluation_date for bar in bars):
+                return trade_dates
+
+        cursor = previous_a_share_trading_day(evaluation_day)
+        fallback = [cursor.isoformat()]
+        while len(fallback) < len(trade_dates):
+            cursor = previous_a_share_trading_day(cursor)
+            fallback.append(cursor.isoformat())
+        fallback.reverse()
+        return fallback
 
     def _fetch_break_repackage_limit_up_pool(
         self,
@@ -2848,12 +2908,26 @@ class MarketDataProvider:
         trade_date: str,
         rows: list[dict[str, Any]],
     ) -> None:
-        """Reject a historical pool when its contents do not belong to the date."""
+        """Reject a historical pool when checked rows prove it is the wrong date.
+
+        Daily kline coverage can be spotty for a few symbols after corporate
+        actions or provider delays.  A missing sample must not invalidate an
+        otherwise dated, shaped limit-up pool; a mismatched sample still fails
+        closed because that means the provider returned the wrong session.
+        """
 
         if not rows:
             # A provider-certified zero has no row that can be cross-checked.
             return
-        sample_indexes = sorted({0, len(rows) // 2, len(rows) - 1})
+        sample_indexes = sorted({
+            0,
+            len(rows) // 4,
+            len(rows) // 2,
+            (len(rows) * 3) // 4,
+            len(rows) - 1,
+        })
+        checked = 0
+        missing_reasons: list[str] = []
         for index in sample_indexes:
             row = rows[index]
             code = str(row.get("代码") or "").strip().zfill(6)
@@ -2861,17 +2935,22 @@ class MarketDataProvider:
             pool_change = _safe_float(row.get("涨跌幅"), float("nan"))
             if not code or pool_close <= 0 or not math.isfinite(pool_change):
                 raise ValueError("涨停池抽样行缺少可核验字段")
-            bars, _ = self._fetch_break_repackage_daily_bars(
-                code,
-                trade_date,
-                trade_date,
-            )
+            try:
+                bars, _ = self._fetch_break_repackage_daily_bars(
+                    code,
+                    trade_date,
+                    trade_date,
+                )
+            except (RuntimeError, ValueError) as exc:
+                missing_reasons.append(f"{code}:{str(exc).strip() or type(exc).__name__}")
+                continue
             bar = next(
                 (item for item in bars if item.get("trade_date") == trade_date),
                 None,
             )
             if not isinstance(bar, dict):
-                raise ValueError("涨停池抽样未取得请求日期日线")
+                missing_reasons.append(f"{code}:涨停池抽样未取得请求日期日线")
+                continue
             bar_close = _price_decimal(bar.get("close"))
             bar_change = _safe_float(bar.get("change_pct"), float("nan"))
             if (
@@ -2881,6 +2960,12 @@ class MarketDataProvider:
                 or abs(bar_change - pool_change) > 0.05
             ):
                 raise ValueError("涨停池抽样与请求日期未复权日线不一致")
+            checked += 1
+        if checked == 0:
+            # Keep the dated pool available for per-stock verification.  If the
+            # pool is stale or wrong, candidate-level daily-bar checks below
+            # will still fail closed and no synthetic matches are produced.
+            return
 
     def _fetch_break_repackage_daily_bars(
         self,
@@ -2956,9 +3041,83 @@ class MarketDataProvider:
                 raise ValueError(f"{code}在评价窗口内没有截止评价日的未复权日线")
             except Exception as exc:
                 last_error = exc
+        if isinstance(last_error, ValueError) and any(
+            marker in str(last_error)
+            for marker in ("重复交易日期", "日线代码校验不一致", "日线包含无效交易日期")
+        ):
+            raise last_error
+        try:
+            return self._fetch_tencent_break_repackage_daily_bars(
+                code,
+                begin_date,
+                end_date,
+            )
+        except Exception as exc:
+            last_error = exc
         if isinstance(last_error, ValueError):
             raise last_error
         raise RuntimeError(f"{code}日线接口暂不可用") from last_error
+
+    def _fetch_tencent_break_repackage_daily_bars(
+        self,
+        code: str,
+        begin_date: str,
+        end_date: str,
+    ) -> tuple[list[dict[str, Any]], str]:
+        market = "sh" if code.startswith(("5", "6", "9")) else "sz"
+        symbol = f"{market}{code}"
+        response = requests.get(
+            "https://web.ifzq.gtimg.cn/appstock/app/kline/kline",
+            params={"param": f"{symbol},day,,,80"},
+            headers={"User-Agent": "Mozilla/5.0", "Referer": "https://gu.qq.com/"},
+            timeout=6,
+        )
+        response.raise_for_status()
+        rows = (((response.json().get("data") or {}).get(symbol) or {}).get("day") or [])
+        if not isinstance(rows, list) or not rows:
+            raise ValueError(f"{code}腾讯日线未返回数据")
+
+        parsed_rows: list[dict[str, Any]] = []
+        previous_close: float | None = None
+        for raw in rows:
+            if not isinstance(raw, list) or len(raw) < 6:
+                continue
+            trade_date = str(raw[0] or "").strip()
+            if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", trade_date):
+                continue
+            open_price = _safe_float(raw[1])
+            close_price = _safe_float(raw[2])
+            high_price = _safe_float(raw[3])
+            low_price = _safe_float(raw[4])
+            volume = _safe_float(raw[5])
+            change_pct = (
+                (close_price / previous_close - 1) * 100
+                if previous_close and previous_close > 0 and close_price > 0
+                else float("nan")
+            )
+            previous_close = close_price if close_price > 0 else previous_close
+            if not begin_date <= trade_date <= end_date:
+                continue
+            parsed_rows.append({
+                "trade_date": trade_date,
+                "open": open_price,
+                "close": close_price,
+                "high": high_price,
+                "low": low_price,
+                "volume": volume,
+                # Tencent's compact day kline does not expose amount here.
+                # Leave it empty so volume-price confirmation cannot be faked.
+                "amount": 0.0,
+                "change_pct": change_pct,
+                "turnover_rate": 0.0,
+            })
+
+        bar_dates = [str(bar.get("trade_date") or "") for bar in parsed_rows]
+        if len(set(bar_dates)) != len(bar_dates):
+            raise ValueError(f"{code}腾讯日线包含重复交易日期")
+        if parsed_rows and any(bar.get("trade_date") == end_date for bar in parsed_rows):
+            return parsed_rows, "tencent-unadjusted-daily-kline@web.ifzq.gtimg.cn"
+        raise ValueError(f"{code}在评价窗口内没有截止评价日的腾讯未复权日线")
 
     def limit_up_ladder(self, trade_date: str | None = None, force_refresh: bool = False) -> LimitUpLadderOut:
         """Return a dated real limit-up pool.

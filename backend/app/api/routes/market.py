@@ -261,9 +261,14 @@ def break_repackage(request: Request) -> BreakRepackageOut:
     """Read the last explicitly refreshed close-confirmed structure screen."""
 
     criteria = BreakRepackageCriteria()
+    now = shanghai_now_naive()
     trade_dates = _break_repackage_completed_trade_dates(
-        shanghai_now_naive(),
+        now,
         criteria.lookback_sessions,
+    )
+    trade_dates = market_provider._break_repackage_verified_trade_dates(
+        now,
+        trade_dates,
     )
     evaluation_date = trade_dates[-1]
     cache_key = (
