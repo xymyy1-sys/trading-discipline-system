@@ -57,6 +57,23 @@ type WorkspacePageProps = {
   children?: ReactNode
 }
 
+type PlanLoopSnapshot = {
+  plan: NextDayPlanOut
+  holding?: HoldingOut
+  execution?: PositionExecutionState
+  priority: number
+}
+
+type PlanLoopTacticalBucketKey = 'critical' | 'noChase' | 'panicGuard' | 'profitProtect' | 'observe'
+
+type PlanLoopTacticalBucket = {
+  key: PlanLoopTacticalBucketKey
+  label: string
+  tone: string
+  empty: string
+  items: PlanLoopSnapshot[]
+}
+
 class WorkspaceModuleErrorBoundary extends Component<
   { children: ReactNode; moduleName: string },
   { failed: boolean }
@@ -456,6 +473,7 @@ export function TodayDecisionSummary() {
     .sort((left, right) => right.priority - left.priority),
   [nextDayPlans, holdings, executionStates])
   const planLoopTaskRisks = planLoopSnapshots.filter(item => planLoopIsTask(item.plan.auction_plan))
+  const planLoopTacticalBuckets = useMemo(() => buildPlanLoopTacticalBuckets(planLoopSnapshots), [planLoopSnapshots])
   const expectationRisks = useMemo(() => holdings.flatMap(holding => {
     const card = decisionCards[holding.code]
     if (!card || !['INVALID', 'WEAKER'].includes(card.expectation.expectation_result)) return []
@@ -624,6 +642,22 @@ export function TodayDecisionSummary() {
           <h3><Clock3 size={16} />预期剧本闭环主控</h3>
           <span>盘后剧本 → 竞价自动选支 → 开盘量价验证 → 建议覆盖更新</span>
         </header>
+        <div className="plan-loop-tactical-strip" aria-label="预期量价战术提醒分组">
+          {planLoopTacticalBuckets.map(bucket => {
+            const first = bucket.items[0]
+            return (
+              <article key={`plan-loop-bucket-${bucket.key}`} className={bucket.tone}>
+                <strong>{bucket.label}</strong>
+                <b>{bucket.items.length} 只</b>
+                {first ? <>
+                  <span>{first.holding?.name || first.plan.name} · {first.plan.auction_plan.selected_branch_label || '剧本验证'}</span>
+                  <small>{planLoopTacticalReason(first.plan.auction_plan)}</small>
+                  <button type="button" onClick={() => setSelectedCode(first.plan.code)}>查看</button>
+                </> : <small>{bucket.empty}</small>}
+              </article>
+            )
+          })}
+        </div>
         {planLoopSnapshots.length ? (
           <div className="plan-loop-command-grid">
             {planLoopSnapshots.slice(0, 6).map(({ plan }) => (
@@ -634,6 +668,9 @@ export function TodayDecisionSummary() {
                 </header>
                 <p>{planLoopBranchSummary(plan.auction_plan)}</p>
                 <small>{planLoopAction(plan.auction_plan)}</small>
+                {!!plan.auction_plan.volume_shape_guidance && (
+                  <small className="plan-loop-volume-note">量价：{chineseEvidence(plan.auction_plan.volume_shape_guidance)}</small>
+                )}
                 <button type="button" onClick={() => setSelectedCode(plan.code)}>查看该股完整链路</button>
               </article>
             ))}
@@ -685,7 +722,7 @@ export function TodayDecisionSummary() {
               <article key={`plan-loop-task-${plan.code}`} className={`plan-loop-task ${planLoopTone(plan.auction_plan)}`}>
                 <b>{plan.name} · {plan.auction_plan.selected_branch_label || '剧本验证'}</b>
                 <span>{planLoopAction(plan.auction_plan)}</span>
-                <small className="sensitive-evidence">{plan.auction_plan.advice_change_reason || plan.auction_plan.branch_reason || '开盘分支和分钟量价正在共同验证。'}</small>
+                <small className="sensitive-evidence">{planLoopEvidenceLine(plan.auction_plan)}</small>
                 <details><summary>查看剧本分支、建议版本与执行依据</summary><div className="decision-basis">
                   <PlanLoopStatus plan={plan.auction_plan} planDate={plan.plan_date} />
                   {execution && <DecisionBasis execution={execution} fallback={plan.auction_plan.stage_checks?.flatMap(item => item.evidence) ?? []} />}
@@ -1546,6 +1583,60 @@ function planLoopTone(plan?: NextDayPlanOut['auction_plan'] | null) {
   return 'signal-neutral'
 }
 
+function buildPlanLoopTacticalBuckets(snapshots: PlanLoopSnapshot[]): PlanLoopTacticalBucket[] {
+  const buckets: PlanLoopTacticalBucket[] = [
+    { key: 'critical', label: '严重风险', tone: 'signal-sell-high', empty: '暂无预期证伪与量价破位共振。', items: [] },
+    { key: 'noChase', label: '禁止追高', tone: 'signal-sell-medium', empty: '暂无缩量诱多、放量滞涨或高开追高风险。', items: [] },
+    { key: 'panicGuard', label: '低点恐慌保护', tone: 'signal-panic-guard', empty: '暂无需要撤销低点追卖的修复证据。', items: [] },
+    { key: 'profitProtect', label: '冲高兑现/利润保护', tone: 'signal-sell-medium', empty: '暂无冲高回落或兑现窗口。', items: [] },
+    { key: 'observe', label: '继续观察', tone: 'signal-neutral', empty: '盘后剧本等待下一阶段真实证据。', items: [] },
+  ]
+  const byKey = new Map(buckets.map(bucket => [bucket.key, bucket]))
+  snapshots.forEach(snapshot => {
+    const key = planLoopTacticalBucketKey(snapshot.plan.auction_plan)
+    byKey.get(key)?.items.push(snapshot)
+  })
+  return buckets
+}
+
+function planLoopTacticalBucketKey(plan?: NextDayPlanOut['auction_plan'] | null): PlanLoopTacticalBucketKey {
+  if (!plan) return 'observe'
+  const text = planLoopSearchText(plan)
+  if (plan.advice_level === 'critical' || /严重风险|预期证伪|承接失败|破位|禁止补仓|反抽优先降风险/.test(text)) {
+    return 'critical'
+  }
+  if (/禁止追高|冲动追高|直线拉升|诱多|缩量上涨脆弱|放量滞涨|承载效率下降|高开冲高未获量价承接/.test(text)) {
+    return 'noChase'
+  }
+  if (plan.advice_change === 'withdrawn' || /撤销低点|停止沿用低点卖出|低点恐慌|不在.*恐慌|回踩仍守住|V形|站回VWAP/.test(text)) {
+    return 'panicGuard'
+  }
+  if (/冲高兑现|利润保护|保护利润|兑现区|冲高回落/.test(text)) {
+    return 'profitProtect'
+  }
+  return 'observe'
+}
+
+function planLoopSearchText(plan: NextDayPlanOut['auction_plan']) {
+  return [
+    plan.current_advice,
+    plan.operation_advice,
+    plan.stage_decision,
+    plan.branch_reason,
+    plan.advice_change_reason,
+    plan.volume_shape_guidance,
+    plan.volume_price_status,
+    ...(plan.stage_checks ?? []).flatMap(item => [item.stage, item.status, item.decision, item.required_action, ...(item.evidence ?? [])]),
+  ].filter(Boolean).join(' ')
+}
+
+function planLoopTacticalReason(plan?: NextDayPlanOut['auction_plan'] | null) {
+  if (!plan) return '等待盘后剧本生成。'
+  const guidance = plan.volume_shape_guidance ? chineseEvidence(plan.volume_shape_guidance) : ''
+  if (guidance) return guidance
+  return planLoopAction(plan)
+}
+
 function planLoopLevelText(plan?: NextDayPlanOut['auction_plan'] | null) {
   if (!plan) return '等待'
   const labels: Record<string, string> = {
@@ -1572,6 +1663,16 @@ function planLoopAction(plan?: NextDayPlanOut['auction_plan'] | null) {
     ? `${planLoopChangeText(plan.advice_change)}：`
     : ''
   return `${change}${chineseEvidence(advice)}`
+}
+
+function planLoopEvidenceLine(plan?: NextDayPlanOut['auction_plan'] | null) {
+  if (!plan) return '开盘分支和分钟量价正在共同验证。'
+  return chineseEvidence(
+    plan.volume_shape_guidance
+    || plan.advice_change_reason
+    || plan.branch_reason
+    || '开盘分支和分钟量价正在共同验证。',
+  )
 }
 
 function planLoopChangeText(change?: string) {
