@@ -909,6 +909,97 @@ h4 {
   grid-column: span 2;
 }
 
+.command-signal-board {
+  grid-column: 1 / -1;
+  border-left: 4px solid var(--accent);
+}
+
+.command-signal-board > header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.command-signal-board h3 {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  margin: 0;
+}
+
+.command-signal-board > header span {
+  color: var(--ink-muted);
+  font-size: 12px;
+}
+
+.command-signal-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.command-signal-grid article {
+  display: grid;
+  gap: 7px;
+  min-height: 142px;
+  padding: 13px;
+  border: 1px solid var(--border-dim);
+  border-left-width: 5px;
+  border-radius: 10px;
+  background: var(--bg-surface);
+}
+
+.command-signal-grid article > strong {
+  color: var(--ink-muted);
+  font-size: 12px;
+}
+
+.command-signal-grid article > b {
+  font-size: 24px;
+  line-height: 1.1;
+}
+
+.command-signal-grid article > span {
+  font-weight: 800;
+}
+
+.command-signal-grid article > small {
+  color: var(--ink-muted);
+  line-height: 1.5;
+}
+
+.command-signal-grid article > button {
+  justify-self: start;
+  align-self: end;
+  padding: 7px 11px;
+  border: 1px solid var(--border-dim);
+  border-radius: 7px;
+  background: var(--ink);
+  color: var(--bg-surface);
+  cursor: pointer;
+}
+
+.command-signal-grid article.signal-sell-high {
+  border-left-color: #dc2626;
+  background: color-mix(in srgb, #dc2626 8%, var(--bg-surface));
+}
+
+.command-signal-grid article.signal-panic-guard {
+  border-left-color: #2563eb;
+  background: color-mix(in srgb, #2563eb 7%, var(--bg-surface));
+}
+
+.command-signal-grid article.signal-add-eligible {
+  border-left-color: #059669;
+  background: color-mix(in srgb, #059669 7%, var(--bg-surface));
+}
+
+.command-signal-grid article.signal-neutral {
+  border-left-color: var(--border-dim);
+}
+
 .command-list header {
   display: flex;
   justify-content: space-between;
@@ -5603,6 +5694,9 @@ h3 {
   .decision-command {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
+  .command-signal-grid {
+    grid-template-columns: 1fr;
+  }
   .execution-card-grid,
   .execution-mini-sections,
   .time-stop-rule-grid,
@@ -5650,6 +5744,10 @@ h3 {
   }
   .command-list {
     grid-column: span 1;
+  }
+  .command-signal-board > header {
+    align-items: flex-start;
+    flex-direction: column;
   }
   .command-list article {
     grid-template-columns: 1fr;

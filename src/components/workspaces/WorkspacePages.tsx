@@ -423,6 +423,27 @@ export function TodayDecisionSummary() {
     if (!signals.length) return []
     return [{ execution, signal: signals[0], relatedSignals: signals.slice(1) }]
   }), [executionStates])
+  const holdingSignalGroups = useMemo(() => {
+    const groups = {
+      highSell: [] as Array<{ execution: PositionExecutionState; signal: HoldingExecutionSignal }>,
+      panicGuard: [] as Array<{ execution: PositionExecutionState; signal: HoldingExecutionSignal }>,
+      addEvaluation: [] as Array<{ execution: PositionExecutionState; signal: HoldingExecutionSignal }>,
+    }
+    executionStates.forEach(execution => {
+      const highSell = execution.high_sell_signal
+      if (highSell?.status === 'ACTIVE') groups.highSell.push({ execution, signal: highSell })
+      const panicGuard = execution.panic_sell_guard
+      if (panicGuard?.status === 'ACTIVE') groups.panicGuard.push({ execution, signal: panicGuard })
+      const addEvaluation = execution.contrarian_add_signal
+      if (addEvaluation?.status === 'ELIGIBLE') groups.addEvaluation.push({ execution, signal: addEvaluation })
+    })
+    const sortByPriority = (left: { signal: HoldingExecutionSignal }, right: { signal: HoldingExecutionSignal }) =>
+      holdingSignalPriority(right.signal) - holdingSignalPriority(left.signal)
+    groups.highSell.sort(sortByPriority)
+    groups.panicGuard.sort(sortByPriority)
+    groups.addEvaluation.sort(sortByPriority)
+    return groups
+  }, [executionStates])
   const expectationRisks = useMemo(() => holdings.flatMap(holding => {
     const card = decisionCards[holding.code]
     if (!card || !['INVALID', 'WEAKER'].includes(card.expectation.expectation_result)) return []
@@ -535,6 +556,42 @@ export function TodayDecisionSummary() {
         <span>全市场订单流估算</span>
         <strong className={(marketRegime?.market_main_net_inflow_yi ?? 0) < 0 ? 'num-down' : 'num-up'}>{formatSignedNumber(marketRegime?.market_main_net_inflow_yi, ' 亿')}</strong>
         <small>{marketRegime ? `上涨 ${marketRegime.up_count ?? '--'} · 下跌 ${marketRegime.down_count ?? '--'} · 涨停/跌停 ${marketRegime.limit_up_count ?? '--'}/${marketRegime.limit_down_count ?? '--'}` : '等待全市场订单流方向与涨跌家数'}</small>
+      </div>
+
+      <div className="panel command-signal-board">
+        <header>
+          <h3><AlertTriangle size={16} />持仓纪律主控</h3>
+          <span>先处理卖点和恐慌保护，再考虑任何加仓</span>
+        </header>
+        <div className="command-signal-grid">
+          <article className={holdingSignalGroups.highSell.length ? 'signal-sell-high' : 'signal-neutral'}>
+            <strong>冲高兑现</strong>
+            <b>{holdingSignalGroups.highSell.length} 只</b>
+            {holdingSignalGroups.highSell[0] ? <>
+              <span>{holdingSignalGroups.highSell[0].execution.name} · {holdingSignalGroups.highSell[0].signal.title}</span>
+              <small>{holdingSignalGroups.highSell[0].signal.action}</small>
+              <button type="button" onClick={() => openExecutionFeedback(holdingSignalGroups.highSell[0].execution.code)}>去处理</button>
+            </> : <small>暂无冲高兑现窗口，不因主观猜顶清仓。</small>}
+          </article>
+          <article className={holdingSignalGroups.panicGuard.length ? 'signal-panic-guard' : 'signal-neutral'}>
+            <strong>禁止恐慌卖</strong>
+            <b>{holdingSignalGroups.panicGuard.length} 只</b>
+            {holdingSignalGroups.panicGuard[0] ? <>
+              <span>{holdingSignalGroups.panicGuard[0].execution.name} · {holdingSignalGroups.panicGuard[0].signal.title}</span>
+              <small>{holdingSignalGroups.panicGuard[0].signal.action}</small>
+              <button type="button" onClick={() => openExecutionFeedback(holdingSignalGroups.panicGuard[0].execution.code)}>看承接条件</button>
+            </> : <small>暂无低位恐慌保护；若触发硬止损仍按纪律执行。</small>}
+          </article>
+          <article className={holdingSignalGroups.addEvaluation.length ? 'signal-add-eligible' : 'signal-neutral'}>
+            <strong>逆势加仓评估</strong>
+            <b>{holdingSignalGroups.addEvaluation.length} 只</b>
+            {holdingSignalGroups.addEvaluation[0] ? <>
+              <span>{holdingSignalGroups.addEvaluation[0].execution.name} · 仅允许评估</span>
+              <small>{holdingSignalGroups.addEvaluation[0].signal.action}</small>
+              <button type="button" onClick={() => openExecutionFeedback(holdingSignalGroups.addEvaluation[0].execution.code)}>看四道闸门</button>
+            </> : <small>没有同时满足市场、板块、个股反转和风报比的补仓机会。</small>}
+          </article>
+        </div>
       </div>
 
       <div className="panel command-list">
