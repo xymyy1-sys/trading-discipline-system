@@ -85,7 +85,7 @@ from app.services.intraday_collector import (
     collector_status,
     run_intraday_collection_once,
 )
-from app.api.helpers.quotes import _normalize_code, _quote_code_candidates
+from app.api.helpers.quotes import _normalize_code, _quote_code_candidates, _safe_float
 from app.services.recommendation_feedback import (
     rematch_execution_feedback_for_codes,
     resolve_feedback_execution,
@@ -678,15 +678,15 @@ def get_holding_profit_protection(
             holding_id=row.holding_id,
             code=row.code,
             captured_at=row.captured_at,
-            current_profit_pct=row.current_profit_pct,
-            maximum_profit_pct=row.maximum_profit_pct,
-            profit_drawdown_pct=row.profit_drawdown_pct,
-            maximum_price=row.maximum_price,
+            current_profit_pct=_safe_float(getattr(row, "current_profit_pct", 0)),
+            maximum_profit_pct=_safe_float(getattr(row, "maximum_profit_pct", 0)),
+            profit_drawdown_pct=_safe_float(getattr(row, "profit_drawdown_pct", 0)),
+            maximum_price=_safe_float(getattr(row, "maximum_price", 0)),
             maximum_profit_at=row.maximum_profit_at,
-            day_max_profit_pct=row.day_max_profit_pct,
+            day_max_profit_pct=_safe_float(getattr(row, "day_max_profit_pct", 0)),
             day_max_profit_at=row.day_max_profit_at,
             protection_level=row.protection_level,
-            protection_floor=row.protection_floor,
+            protection_floor=_safe_float(getattr(row, "protection_floor", 0)),
             triggered=row.triggered,
             recommended_action=row.recommended_action,
         )

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 import sqlite3
 
 from alembic import command
@@ -228,6 +229,89 @@ def test_execution_state_get_is_read_only_and_weekend_uses_latest_snapshot(
     db_session.refresh(state)
     db_session.refresh(recommendation)
     assert (state.updated_at, recommendation.created_at, recommendation.updated_at) == before_times
+
+
+def test_execution_state_handles_legacy_profit_snapshot_null_day_max():
+    state_time = datetime(2026, 7, 17, 14, 30)
+    state = SimpleNamespace(
+        id=1,
+        holding_id=1,
+        code="600905",
+        name="legacy-null-snapshot",
+        trade_date="2026-07-17",
+        state="NORMAL_HOLD",
+        expectation_state="MATCHED",
+        volume_price_state="VWAP_STRONG",
+        sector_state="NEUTRAL",
+        current_quantity=1000,
+        sellable_quantity=1000,
+        today_buy_quantity=0,
+        yesterday_quantity=1000,
+        current_position_ratio=0.1,
+        recommended_position_ratio=0.1,
+        recommended_action="继续持有",
+        recommended_reduce_ratio=0,
+        structure_stop_price=9.6,
+        hard_stop_price=9.3,
+        stop_source="fallback_candidate",
+        stop_source_detail="",
+        trailing_stop_price=9.8,
+        profit_protection_price=9.8,
+        t_eligible=False,
+        t_type="NO_T",
+        evidence_json="[]",
+        counter_evidence_json="[]",
+        invalid_conditions_json="[]",
+        recovery_conditions_json="[]",
+        data_quality="realtime",
+        data_time="2026-07-17 14:30",
+        updated_at=state_time,
+    )
+    snapshot = SimpleNamespace(
+        id=1,
+        holding_id=1,
+        code="600905",
+        captured_at=datetime(2026, 7, 17, 6, 30),
+        current_profit_pct=1.2,
+        maximum_profit_pct=2.4,
+        profit_drawdown_pct=1.2,
+        maximum_price=10.2,
+        maximum_profit_at=None,
+        day_max_profit_pct=None,
+        day_max_profit_at=None,
+        protection_level="NONE",
+        protection_floor=None,
+        triggered=False,
+        recommended_action="继续持有",
+    )
+    recommendation = SimpleNamespace(
+        id=1,
+        current_revision_id=None,
+        current_decision_hash="legacy-null-snapshot",
+        trade_date="2026-07-17",
+        target_key="holding:1",
+        holding_id=1,
+        code="600905",
+        name="legacy-null-snapshot",
+        level="INFO",
+        state="NORMAL_HOLD",
+        action="继续持有",
+        recommended_ratio=0,
+        evidence_json="[]",
+        counter_evidence_json="[]",
+        invalid_conditions_json="[]",
+        recovery_conditions_json="[]",
+        created_at=state_time,
+        updated_at=state_time,
+        expires_at=None,
+        acknowledged_at=None,
+    )
+
+    output = execution._execution_state_out(state, snapshot, recommendation, [])
+
+    assert output.profit_snapshot is not None
+    assert output.profit_snapshot.day_max_profit_pct == 0
+    assert output.profit_snapshot.protection_floor == 0
 
 
 def test_decision_card_and_direct_snapshot_gets_are_side_effect_free(
