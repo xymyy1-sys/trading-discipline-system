@@ -233,14 +233,26 @@ export function TodayDecisionSummary() {
       fetchJsonWithTimeout(`${API_BASE}/api/next-day-plans`, 12000),
     ]).then(results => {
       const [holdingRes, executionRes, seesawRes, themeRes, alertRes, intelRes, planRes] = results
+      let visibleHoldingCodes = holdingCodesRef.current
       if (holdingRes.status === 'fulfilled' && Array.isArray(holdingRes.value)) {
-        setHoldings(holdingRes.value)
-        holdingCodesRef.current = new Set(holdingRes.value.map((item: HoldingOut) => item.code))
+        const nextHoldings = holdingRes.value as HoldingOut[]
+        const nextHoldingCodes = new Set(nextHoldings.map(item => item.code))
+        setHoldings(nextHoldings)
+        holdingCodesRef.current = nextHoldingCodes
+        setRealtimeEvents(previous => previous.filter(event => (
+          ['sector', 'market'].includes(event.scope) || nextHoldingCodes.has(event.target_code)
+        )))
+        setActiveAlerts(previous => previous.filter(item => nextHoldingCodes.has(item.code)))
+        setStockReflexivity(previous => Object.fromEntries(Object.entries(previous).filter(([code]) => nextHoldingCodes.has(code))))
+        holdingDecisionRefreshedAt.current = Object.fromEntries(
+          Object.entries(holdingDecisionRefreshedAt.current).filter(([code]) => nextHoldingCodes.has(code)),
+        )
+        visibleHoldingCodes = nextHoldingCodes
         setSelectedCode(current => holdingRes.value.some((item: HoldingOut) => item.code === current)
           ? current
           : holdingRes.value[0]?.code || '')
-        loadIntradayReviews(holdingRes.value)
-        loadDecisionCards(holdingRes.value)
+        loadIntradayReviews(nextHoldings)
+        loadDecisionCards(nextHoldings)
       }
       if (executionRes.status === 'fulfilled' && Array.isArray(executionRes.value)) {
         setExecutionStates(executionRes.value)
@@ -253,7 +265,10 @@ export function TodayDecisionSummary() {
         setNextDayPlans((planRes.value as NextDayPlanOut[]).filter(item => item.plan_type === 'holding'))
       }
       const holdingRiskEvents = executionRes.status === 'fulfilled' && Array.isArray(executionRes.value)
-        ? (executionRes.value as PositionExecutionState[]).flatMap(item => item.events ?? []).filter(isRiskEvent)
+        ? (executionRes.value as PositionExecutionState[])
+          .filter(item => visibleHoldingCodes.has(item.code))
+          .flatMap(item => item.events ?? [])
+          .filter(isRiskEvent)
         : []
       setRealtimeEvents(previous => mergeRealtimeEventList([...previous, ...holdingRiskEvents]))
     })
@@ -310,6 +325,12 @@ export function TodayDecisionSummary() {
   // 初次装载一次；后续刷新由按钮、SSE 与独立定时器触发。
   useEffect(() => {
     loadRef.current()
+  }, [])
+
+  useEffect(() => {
+    const handleHoldingsUpdated = () => loadRef.current()
+    window.addEventListener('holdings-updated', handleHoldingsUpdated)
+    return () => window.removeEventListener('holdings-updated', handleHoldingsUpdated)
   }, [])
 
   useEffect(() => {
@@ -428,25 +449,51 @@ export function TodayDecisionSummary() {
     }
   }, [])
 
-  const riskStates = useMemo(
-    () => executionStates.filter(item => ['EXIT_REQUIRED', 'REDUCE_REQUIRED', 'EXPECTATION_INVALIDATED', 'EXPECTATION_VOLUME_BREAKDOWN', 'PROFIT_PROTECTION', 'DIVERGENCE_HOLD'].includes(item.state) || item.recommended_reduce_ratio > 0),
-    [executionStates],
+  const currentHoldingCodeSet = useMemo(
+    () => new Set(holdings.map(item => item.code)),
+    [holdings],
   )
-  const urgentHoldingSignals = useMemo(() => executionStates.flatMap(execution => {
+  const currentExecutionStates = useMemo(
+    () => executionStates.filter(item => currentHoldingCodeSet.has(item.code)),
+    [executionStates, currentHoldingCodeSet],
+  )
+  const currentNextDayPlans = useMemo(
+    () => nextDayPlans.filter(item => currentHoldingCodeSet.has(item.code)),
+    [nextDayPlans, currentHoldingCodeSet],
+  )
+  const currentActiveAlerts = useMemo(
+    () => activeAlerts.filter(item => currentHoldingCodeSet.has(item.code)),
+    [activeAlerts, currentHoldingCodeSet],
+  )
+  const currentHoldingAlerts = useMemo(
+    () => (seesaw?.holding_alerts ?? []).filter(item => currentHoldingCodeSet.has(item.code)),
+    [seesaw, currentHoldingCodeSet],
+  )
+  const currentRealtimeEvents = useMemo(
+    () => realtimeEvents.filter(event => (
+      ['sector', 'market'].includes(event.scope) || currentHoldingCodeSet.has(event.target_code)
+    )),
+    [realtimeEvents, currentHoldingCodeSet],
+  )
+  const riskStates = useMemo(
+    () => currentExecutionStates.filter(item => ['EXIT_REQUIRED', 'REDUCE_REQUIRED', 'EXPECTATION_INVALIDATED', 'EXPECTATION_VOLUME_BREAKDOWN', 'PROFIT_PROTECTION', 'DIVERGENCE_HOLD'].includes(item.state) || item.recommended_reduce_ratio > 0),
+    [currentExecutionStates],
+  )
+  const urgentHoldingSignals = useMemo(() => currentExecutionStates.flatMap(execution => {
     const signals = [execution.high_sell_signal, execution.panic_sell_guard, execution.contrarian_add_signal]
       .filter((signal): signal is HoldingExecutionSignal => Boolean(signal))
       .filter(signal => signal.status === 'ACTIVE' || signal.status === 'ELIGIBLE')
       .sort((left, right) => holdingSignalPriority(right) - holdingSignalPriority(left))
     if (!signals.length) return []
     return [{ execution, signal: signals[0], relatedSignals: signals.slice(1) }]
-  }), [executionStates])
+  }), [currentExecutionStates])
   const holdingSignalGroups = useMemo(() => {
     const groups = {
       highSell: [] as Array<{ execution: PositionExecutionState; signal: HoldingExecutionSignal }>,
       panicGuard: [] as Array<{ execution: PositionExecutionState; signal: HoldingExecutionSignal }>,
       addEvaluation: [] as Array<{ execution: PositionExecutionState; signal: HoldingExecutionSignal }>,
     }
-    executionStates.forEach(execution => {
+    currentExecutionStates.forEach(execution => {
       const highSell = execution.high_sell_signal
       if (highSell?.status === 'ACTIVE') groups.highSell.push({ execution, signal: highSell })
       const panicGuard = execution.panic_sell_guard
@@ -460,26 +507,26 @@ export function TodayDecisionSummary() {
     groups.panicGuard.sort(sortByPriority)
     groups.addEvaluation.sort(sortByPriority)
     return groups
-  }, [executionStates])
-  const planLoopSnapshots = useMemo(() => nextDayPlans
+  }, [currentExecutionStates])
+  const planLoopSnapshots = useMemo(() => currentNextDayPlans
     .filter(plan => plan.plan_type === 'holding' && plan.auction_plan)
     .map(plan => ({
       plan,
       holding: holdings.find(item => item.code === plan.code),
-      execution: executionStates.find(item => item.code === plan.code),
+      execution: currentExecutionStates.find(item => item.code === plan.code),
       priority: planLoopPriority(plan.auction_plan),
     }))
     .filter(item => planLoopIsVisible(item.plan.auction_plan))
     .sort((left, right) => right.priority - left.priority),
-  [nextDayPlans, holdings, executionStates])
+  [currentNextDayPlans, holdings, currentExecutionStates])
   const planLoopTaskRisks = planLoopSnapshots.filter(item => planLoopIsTask(item.plan.auction_plan))
   const planLoopTacticalBuckets = useMemo(() => buildPlanLoopTacticalBuckets(planLoopSnapshots), [planLoopSnapshots])
   const expectationRisks = useMemo(() => holdings.flatMap(holding => {
     const card = decisionCards[holding.code]
     if (!card || !['INVALID', 'WEAKER'].includes(card.expectation.expectation_result)) return []
-    const execution = executionStates.find(item => item.code === holding.code)
+    const execution = currentExecutionStates.find(item => item.code === holding.code)
     return [{ holding, card, execution }]
-  }), [holdings, decisionCards, executionStates])
+  }), [holdings, decisionCards, currentExecutionStates])
   const effectiveCapitalSignals = useMemo(() => holdings.flatMap(holding => {
     const evidence = decisionCards[holding.code]?.effective_capital
     if (!evidence || evidence.data_quality !== 'realtime' || ['INSUFFICIENT_DATA', 'INCONCLUSIVE'].includes(evidence.state)) return []
@@ -489,7 +536,7 @@ export function TodayDecisionSummary() {
     ['DISTRIBUTION_RISK', 'OUTFLOW_CONFIRMED', 'LIQUIDITY_SHOCK'].includes(item.evidence.state)
     && item.evidence.data_quality === 'realtime',
   )
-  const highRiskAlerts = (seesaw?.holding_alerts ?? []).filter(item => ['高', '中高', '中'].includes(item.risk_level))
+  const highRiskAlerts = currentHoldingAlerts.filter(item => ['高', '中高', '中'].includes(item.risk_level))
   const urgentTaskCodes = new Set(urgentHoldingSignals.map(item => item.execution.code))
   const planLoopTaskCodes = new Set(planLoopTaskRisks.map(item => item.plan.code))
   const expectationTaskRisks = expectationRisks.filter(item => !urgentTaskCodes.has(item.holding.code) && !planLoopTaskCodes.has(item.holding.code))
@@ -522,23 +569,23 @@ export function TodayDecisionSummary() {
     ...riskStateTasks.map(item => item.code),
     ...highRiskAlertTasks.map(item => item.code),
   ])
-  const orphanAlertTasks = activeAlerts.filter((item, index, items) => (
+  const orphanAlertTasks = currentActiveAlerts.filter((item, index, items) => (
     !handledTaskCodes.has(item.code)
     && items.findIndex(candidate => candidate.code === item.code) === index
   ))
-  const activeAlertByCode = new Map(activeAlerts.map(item => [item.code, item]))
-  const riskTargetCount = new Set([...riskStates.map(item => item.code), ...expectationRisks.map(item => item.holding.code), ...effectiveCapitalRisks.map(item => item.holding.code), ...highRiskAlerts.map(item => item.code), ...urgentHoldingSignals.map(item => item.execution.code), ...activeAlerts.map(item => item.code)]).size
+  const activeAlertByCode = new Map(currentActiveAlerts.map(item => [item.code, item]))
+  const riskTargetCount = new Set([...riskStates.map(item => item.code), ...expectationRisks.map(item => item.holding.code), ...effectiveCapitalRisks.map(item => item.holding.code), ...highRiskAlerts.map(item => item.code), ...urgentHoldingSignals.map(item => item.execution.code), ...currentActiveAlerts.map(item => item.code)]).size
   const totalMarketValue = holdings.reduce((sum, item) => sum + item.market_value, 0)
   const totalProfit = holdings.reduce((sum, item) => sum + item.profit_amount, 0)
   const selectedHolding = holdings.find(item => item.code === selectedCode) ?? holdings[0]
-  const selectedExecution = executionStates.find(item => item.code === selectedHolding?.code) ?? null
+  const selectedExecution = currentExecutionStates.find(item => item.code === selectedHolding?.code) ?? null
   const selectedCard = selectedHolding ? decisionCards[selectedHolding.code] ?? null : null
   const selectedReview = selectedHolding ? intradayReviews[selectedHolding.code] ?? null : null
   const selectedTimeline = useMemo(
     () => chooseFreshTimeline(selectedReview, selectedCard),
     [selectedReview, selectedCard],
   )
-  const selectedPlan = selectedHolding ? nextDayPlans.find(item => item.code === selectedHolding.code) ?? null : null
+  const selectedPlan = selectedHolding ? currentNextDayPlans.find(item => item.code === selectedHolding.code) ?? null : null
   const marketCycle = marketRegime?.regime_name ?? inferMarketCycle(theme?.market_temperature, seesaw?.market_mode)
   const earningEffect = marketRegime ? marketEffectLabel(marketRegime.opportunity_score) : inferEarningEffect(theme, seesaw)
   const marketRiskActive = Boolean(marketRegime && ['极高', '高', '中高'].includes(marketRegime.risk_level))
@@ -558,7 +605,7 @@ export function TodayDecisionSummary() {
 
   const taskActions = (code: string) => {
     const alert = activeAlertByCode.get(code)
-    const execution = executionStates.find(item => item.code === code)
+    const execution = currentExecutionStates.find(item => item.code === code)
     if (!alert && !execution?.recommendation?.id) return null
     return <div className="task-actions">
       {alert && <button type="button" className="alert-ack-button" disabled={!alert.id} title={alert.id ? '仅记录已读，不代表已经执行' : '该提醒缺少可追溯编号'} onClick={() => acknowledgeAlert(alert)}>仅标记已读</button>}
@@ -847,12 +894,12 @@ export function TodayDecisionSummary() {
           <span className="stream-state">{streamState}{streamLastAt ? ` · ${streamLastAt}` : ''}</span>
         </header>
         {streamNotice && <p className="stream-health-notice">{streamNotice}{streamReconnects ? ` · 已恢复 ${streamReconnects} 次` : ''}</p>}
-        {realtimeEvents.length ? (
-          realtimeEvents.map(event => (
+        {currentRealtimeEvents.length ? (
+          currentRealtimeEvents.map(event => (
             <article key={`${event.id}-${event.event_type}`} className={intradayEventSemantics(event.event_type, event.severity).toneClass}>
               <b>{event.target_name || event.target_code}</b>
-              <span>{chineseLabel(event.event_type)} · {riskActionForEvent(event, executionStates)}</span>
-              <small className="sensitive-evidence">{riskDetailForEvent(event, decisionCards, executionStates)}</small>
+              <span>{chineseLabel(event.event_type)} · {riskActionForEvent(event, currentExecutionStates)}</span>
+              <small className="sensitive-evidence">{riskDetailForEvent(event, decisionCards, currentExecutionStates)}</small>
               {eventMetadataString(event, 'title') && (event.source_url
                 ? <small><a href={event.source_url} target="_blank" rel="noreferrer">原文：{eventMetadataString(event, 'title')}</a></small>
                 : <small>消息：{eventMetadataString(event, 'title')}</small>)}

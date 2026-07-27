@@ -408,7 +408,7 @@ export default function NextDayPlans({ mode = 'holding' }: { mode?: 'holding' | 
               </div>
             </section>
 
-            {(draft.plan_type === 'limit_up_auction' || draft.auction_plan.board_strength || draft.auction_plan.limit_quality) && (
+            {draft.plan_type === 'limit_up_auction' && (
               <section className="panel auction-plan-panel">
                 <h3>打板预期分析</h3>
                 <div className="stage-decision-bar">

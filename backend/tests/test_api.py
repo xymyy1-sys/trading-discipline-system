@@ -402,6 +402,54 @@ def test_active_alert_can_be_acknowledged(client, db_session):
     assert client.get("/api/alerts/active").json() == []
 
 
+def test_active_alerts_filter_out_deleted_lifecycle_when_holdings_exist(client, db_session):
+    from datetime import datetime, timedelta
+    from app.models.trading import ActionRecommendation, Holding
+
+    current_holding = Holding(code="600999", name="current", quantity=100, cost_price=10, current_price=10, total_asset=100000)
+    db_session.add(current_holding)
+    db_session.flush()
+    db_session.add_all([
+        ActionRecommendation(
+            trade_date="2026-07-12",
+            target_key="holding:600888:old",
+            holding_id=88,
+            code="600888",
+            name="deleted lifecycle",
+            created_at=datetime.now(),
+            level="REDUCE",
+            state="REDUCE_REQUIRED",
+            action="stale reduce",
+            evidence_json='["old"]',
+            counter_evidence_json="[]",
+            invalid_conditions_json="[]",
+            recovery_conditions_json="[]",
+            expires_at=datetime.now() + timedelta(minutes=15),
+        ),
+        ActionRecommendation(
+            trade_date="2026-07-12",
+            target_key=f"holding:{current_holding.id}:current",
+            holding_id=current_holding.id,
+            code=current_holding.code,
+            name=current_holding.name,
+            created_at=datetime.now(),
+            level="REDUCE",
+            state="REDUCE_REQUIRED",
+            action="current reduce",
+            evidence_json='["risk"]',
+            counter_evidence_json="[]",
+            invalid_conditions_json="[]",
+            recovery_conditions_json="[]",
+            expires_at=datetime.now() + timedelta(minutes=15),
+        ),
+    ])
+    db_session.commit()
+
+    payload = client.get("/api/alerts/active").json()
+
+    assert [item["code"] for item in payload] == ["600999"]
+
+
 def test_candidate_pool_excludes_invalid_execution(client, db_session):
     from datetime import datetime
     from app.models.trading import ExpectationSnapshot, Holding, PositionExecutionState, VolumePriceSnapshot

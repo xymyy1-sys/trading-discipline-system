@@ -45,6 +45,9 @@ export default function Positions({ mode = 'overview' }: { mode?: 'overview' | '
 
   const applyHoldings = (data: Holding[], messagePrefix = '已重算') => {
     setHoldings(data)
+    if (typeof window !== 'undefined') {
+      window.dispatchEvent(new CustomEvent('holdings-updated', { detail: { codes: data.map(item => item.code) } }))
+    }
     const failed = data.some(item => item.price_source !== 'realtime')
     const now = new Date().toLocaleTimeString('zh-CN', { hour12: false })
     setRefreshMessage(failed ? `${now} ${messagePrefix}，部分行情使用缓存/手工价` : `${now} ${messagePrefix}，已按实时行情更新`)
@@ -201,14 +204,17 @@ export default function Positions({ mode = 'overview' }: { mode?: 'overview' | '
   const cashAvailable = savedTotalAsset ? savedTotalAsset - totalMarketValue : 0
   const totalPositionRatio = savedTotalAsset ? totalMarketValue / savedTotalAsset : 0
   const highRiskAlerts = (seesaw?.holding_alerts ?? []).filter(item => ['高', '中高', '中'].includes(item.risk_level))
-  const executionByCode = new Map(executionStates.map(item => [item.code, item]))
+  const holdingCodeSet = new Set(holdings.map(item => item.code))
+  const visibleExecutionStates = executionStates.filter(item => holdingCodeSet.has(item.code))
+  const visibleHighRiskAlerts = highRiskAlerts.filter(item => holdingCodeSet.has(item.code))
+  const executionByCode = new Map(visibleExecutionStates.map(item => [item.code, item]))
   const executionPriority = (item: PositionExecutionState) => {
     const value = `${item.recommendation?.level ?? ''} ${item.state}`.toUpperCase()
     if (/EXIT|INVALID|CRITICAL|HIGH|必须退出|高风险/.test(value)) return 3
     if (/REDUCE|PROTECT|WARNING|MEDIUM|减仓|中风险/.test(value)) return 2
     return 1
   }
-  const sortedExecutionStates = [...executionStates].sort((left, right) => (
+  const sortedExecutionStates = [...visibleExecutionStates].sort((left, right) => (
     executionPriority(right) - executionPriority(left)
     || Date.parse(right.updated_at || '') - Date.parse(left.updated_at || '')
   ))
@@ -733,7 +739,7 @@ export default function Positions({ mode = 'overview' }: { mode?: 'overview' | '
             </div>
           </div>
           <div className="seesaw-alert-list">
-            {highRiskAlerts.length ? highRiskAlerts.slice(0, 6).map(item => (
+            {visibleHighRiskAlerts.length ? visibleHighRiskAlerts.slice(0, 6).map(item => (
               <article className={`seesaw-alert-card risk-${item.risk_level}`} key={`${item.code}-${item.sector}`}>
                 <div className="seesaw-alert-title">
                   <div>
@@ -802,7 +808,7 @@ export default function Positions({ mode = 'overview' }: { mode?: 'overview' | '
         </section>
       )}
 
-      {executionStates.length > 0 && (
+      {holdings.length > 0 && (
         <section className="panel execution-panel">
           <div className="selected-theme-head">
             <div>
@@ -810,6 +816,7 @@ export default function Positions({ mode = 'overview' }: { mode?: 'overview' | '
               <span>按利润保护、分时均价、结构止损、板块证据生成动作；缺失数据会标明降级，不用 0 冒充。</span>
             </div>
           </div>
+          {sortedExecutionStates.length ? (
           <div className="execution-card-grid">
             {sortedExecutionStates.map(item => (
               <article id={`execution-feedback-${item.code}`} className={`execution-card ${executionCardTone(item)}`} key={`${item.code}-${item.updated_at}`}>
@@ -909,6 +916,12 @@ export default function Positions({ mode = 'overview' }: { mode?: 'overview' | '
               </article>
             ))}
           </div>
+          ) : (
+            <div className="data-gap-state">
+              <b>已有持仓，但执行纪律快照暂未返回</b>
+              <p>请点击“采集并刷新行情”或稍后自动刷新；系统不会再把空接口误显示成没有持仓。</p>
+            </div>
+          )}
         </section>
       )}
 

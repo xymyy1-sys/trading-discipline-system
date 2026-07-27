@@ -271,9 +271,30 @@ def _recommendation_out(row: ActionRecommendation, db: Session) -> ActionRecomme
     )
 
 
+def _current_holding_identity(db: Session) -> tuple[set[int], set[str]]:
+    rows = db.query(Holding.id, Holding.code).all()
+    return (
+        {int(row_id) for row_id, _ in rows if row_id is not None},
+        {_normalize_code(str(code)) for _, code in rows if code},
+    )
+
+
+def _recommendation_belongs_to_current_holding(
+    row: ActionRecommendation,
+    *,
+    holding_ids: set[int],
+    holding_codes: set[str],
+) -> bool:
+    if row.holding_id is not None and int(row.holding_id) in holding_ids:
+        return True
+    return _normalize_code(str(row.code or "")) in holding_codes
+
+
 @router.get("/alerts/active", response_model=list[ActionRecommendationOut])
 def list_active_alerts(include_acknowledged: bool = False, db: Session = Depends(get_db)) -> list[ActionRecommendationOut]:
     now = shanghai_now_naive()
+    current_holding_ids, current_holding_codes = _current_holding_identity(db)
+    filter_to_current_holdings = bool(current_holding_ids or current_holding_codes)
     rows = (
         db.query(ActionRecommendation)
         .filter(
@@ -287,6 +308,12 @@ def list_active_alerts(include_acknowledged: bool = False, db: Session = Depends
     latest_by_target: dict[str, ActionRecommendation] = {}
     for row in rows:
         if not include_acknowledged and row.acknowledged_at is not None:
+            continue
+        if filter_to_current_holdings and not _recommendation_belongs_to_current_holding(
+            row,
+            holding_ids=current_holding_ids,
+            holding_codes=current_holding_codes,
+        ):
             continue
         key = str(row.holding_id or row.code)
         latest_by_target.setdefault(key, row)
@@ -901,8 +928,11 @@ async def stream_intraday_events(
                     .limit(20)
                     .all()
                 )
+                holding_codes = {_normalize_code(str(code)) for (code,) in db.query(Holding.code).all() if code}
                 for row in rows:
                     last_id = max(last_id, int(row.id or 0))
+                    if str(row.scope or "") == "stock" and _normalize_code(str(row.target_code or "")) not in holding_codes:
+                        continue
                     if (
                         "NEWS_" in str(row.event_type or "")
                         and not _event_in_trade_session(row, shanghai_today().isoformat())
@@ -1202,7 +1232,10 @@ def delete_holding(holding_id: int, db: Session = Depends(get_db)) -> dict[str, 
     (
         db.query(ActionRecommendation)
         .filter(
-            ActionRecommendation.holding_id == holding_id,
+            or_(
+                ActionRecommendation.holding_id == holding_id,
+                ActionRecommendation.code.in_(list(code_candidates)),
+            ),
             ActionRecommendation.expires_at.is_not(None),
             ActionRecommendation.expires_at >= deleted_at,
         )
