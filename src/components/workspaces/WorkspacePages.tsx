@@ -444,6 +444,18 @@ export function TodayDecisionSummary() {
     groups.addEvaluation.sort(sortByPriority)
     return groups
   }, [executionStates])
+  const planLoopSnapshots = useMemo(() => nextDayPlans
+    .filter(plan => plan.plan_type === 'holding' && plan.auction_plan)
+    .map(plan => ({
+      plan,
+      holding: holdings.find(item => item.code === plan.code),
+      execution: executionStates.find(item => item.code === plan.code),
+      priority: planLoopPriority(plan.auction_plan),
+    }))
+    .filter(item => planLoopIsVisible(item.plan.auction_plan))
+    .sort((left, right) => right.priority - left.priority),
+  [nextDayPlans, holdings, executionStates])
+  const planLoopTaskRisks = planLoopSnapshots.filter(item => planLoopIsTask(item.plan.auction_plan))
   const expectationRisks = useMemo(() => holdings.flatMap(holding => {
     const card = decisionCards[holding.code]
     if (!card || !['INVALID', 'WEAKER'].includes(card.expectation.expectation_result)) return []
@@ -461,14 +473,16 @@ export function TodayDecisionSummary() {
   )
   const highRiskAlerts = (seesaw?.holding_alerts ?? []).filter(item => ['高', '中高', '中'].includes(item.risk_level))
   const urgentTaskCodes = new Set(urgentHoldingSignals.map(item => item.execution.code))
-  const expectationTaskRisks = expectationRisks.filter(item => !urgentTaskCodes.has(item.holding.code))
+  const planLoopTaskCodes = new Set(planLoopTaskRisks.map(item => item.plan.code))
+  const expectationTaskRisks = expectationRisks.filter(item => !urgentTaskCodes.has(item.holding.code) && !planLoopTaskCodes.has(item.holding.code))
   const expectationTaskCodes = new Set(expectationTaskRisks.map(item => item.holding.code))
   const effectiveCapitalTaskRisks = effectiveCapitalRisks.filter(item =>
-    !urgentTaskCodes.has(item.holding.code) && !expectationTaskCodes.has(item.holding.code),
+    !urgentTaskCodes.has(item.holding.code) && !planLoopTaskCodes.has(item.holding.code) && !expectationTaskCodes.has(item.holding.code),
   )
   const effectiveCapitalTaskCodes = new Set(effectiveCapitalTaskRisks.map(item => item.holding.code))
   const riskStateTasks = riskStates.filter((item, index, items) =>
     !urgentTaskCodes.has(item.code)
+    && !planLoopTaskCodes.has(item.code)
     && !expectationTaskCodes.has(item.code)
     && !effectiveCapitalTaskCodes.has(item.code)
     && items.findIndex(candidate => candidate.code === item.code) === index,
@@ -476,6 +490,7 @@ export function TodayDecisionSummary() {
   const riskStateTaskCodes = new Set(riskStateTasks.map(item => item.code))
   const highRiskAlertTasks = highRiskAlerts.filter((item, index, items) =>
     !urgentTaskCodes.has(item.code)
+    && !planLoopTaskCodes.has(item.code)
     && !expectationTaskCodes.has(item.code)
     && !effectiveCapitalTaskCodes.has(item.code)
     && !riskStateTaskCodes.has(item.code)
@@ -483,6 +498,7 @@ export function TodayDecisionSummary() {
   )
   const handledTaskCodes = new Set([
     ...urgentHoldingSignals.map(item => item.execution.code),
+    ...planLoopTaskRisks.map(item => item.plan.code),
     ...expectationTaskRisks.map(item => item.holding.code),
     ...effectiveCapitalTaskRisks.map(item => item.holding.code),
     ...riskStateTasks.map(item => item.code),
@@ -591,7 +607,40 @@ export function TodayDecisionSummary() {
               <button type="button" onClick={() => openExecutionFeedback(holdingSignalGroups.addEvaluation[0].execution.code)}>看四道闸门</button>
             </> : <small>没有同时满足市场、板块、个股反转和风报比的补仓机会。</small>}
           </article>
+          <article className={planLoopTaskRisks.length ? planLoopTone(planLoopTaskRisks[0].plan.auction_plan) : 'signal-neutral'}>
+            <strong>剧本闭环</strong>
+            <b>{planLoopTaskRisks.length} 只</b>
+            {planLoopTaskRisks[0] ? <>
+              <span>{planLoopTaskRisks[0].holding?.name || planLoopTaskRisks[0].plan.name} · {planLoopTaskRisks[0].plan.auction_plan.selected_branch_label || '已进入验证'}</span>
+              <small>{planLoopAction(planLoopTaskRisks[0].plan.auction_plan)}</small>
+              <button type="button" onClick={() => setSelectedCode(planLoopTaskRisks[0].plan.code)}>看闭环</button>
+            </> : <small>盘后剧本已等待竞价；未出现证伪、升级或撤销。</small>}
+          </article>
         </div>
+      </div>
+
+      <div className="panel plan-loop-command-board">
+        <header>
+          <h3><Clock3 size={16} />预期剧本闭环主控</h3>
+          <span>盘后剧本 → 竞价自动选支 → 开盘量价验证 → 建议覆盖更新</span>
+        </header>
+        {planLoopSnapshots.length ? (
+          <div className="plan-loop-command-grid">
+            {planLoopSnapshots.slice(0, 6).map(({ plan }) => (
+              <article key={`plan-loop-command-${plan.code}`} className={planLoopTone(plan.auction_plan)}>
+                <header>
+                  <div><b>{plan.name}</b><span>{plan.code}</span></div>
+                  <strong>{planLoopLevelText(plan.auction_plan)}</strong>
+                </header>
+                <p>{planLoopBranchSummary(plan.auction_plan)}</p>
+                <small>{planLoopAction(plan.auction_plan)}</small>
+                <button type="button" onClick={() => setSelectedCode(plan.code)}>查看该股完整链路</button>
+              </article>
+            ))}
+          </div>
+        ) : (
+          <p className="plain-text">盘后剧本尚未进入竞价/开盘验证；系统不会用旧剧本直接生成盘中动作。</p>
+        )}
       </div>
 
       <div className="panel command-list">
@@ -601,7 +650,7 @@ export function TodayDecisionSummary() {
             <RefreshCcw size={14} />{loading ? '采集中' : '采集并读取最新快照'}
           </button>
         </header>
-        {marketRiskActive || expectationTaskRisks.length || effectiveCapitalTaskRisks.length || riskStateTasks.length || highRiskAlertTasks.length || urgentHoldingSignals.length || orphanAlertTasks.length ? (
+        {marketRiskActive || planLoopTaskRisks.length || expectationTaskRisks.length || effectiveCapitalTaskRisks.length || riskStateTasks.length || highRiskAlertTasks.length || urgentHoldingSignals.length || orphanAlertTasks.length ? (
           <>
             {urgentHoldingSignals.map(({ execution, signal, relatedSignals }) => {
               const expectationRisk = expectationRisks.find(item => item.holding.code === execution.code)
@@ -632,6 +681,17 @@ export function TodayDecisionSummary() {
                 <details><summary>查看真实数据依据</summary><DecisionBasisView evidence={marketRegime.evidence} recoveryConditions={marketRegime.allowed_actions} dataQuality={marketRegime.data_quality} asOf={marketRegime.captured_at} /></details>
               </article>
             )}
+            {planLoopTaskRisks.map(({ plan, execution }) => (
+              <article key={`plan-loop-task-${plan.code}`} className={`plan-loop-task ${planLoopTone(plan.auction_plan)}`}>
+                <b>{plan.name} · {plan.auction_plan.selected_branch_label || '剧本验证'}</b>
+                <span>{planLoopAction(plan.auction_plan)}</span>
+                <small className="sensitive-evidence">{plan.auction_plan.advice_change_reason || plan.auction_plan.branch_reason || '开盘分支和分钟量价正在共同验证。'}</small>
+                <details><summary>查看剧本分支、建议版本与执行依据</summary><div className="decision-basis">
+                  <PlanLoopStatus plan={plan.auction_plan} planDate={plan.plan_date} />
+                  {execution && <DecisionBasis execution={execution} fallback={plan.auction_plan.stage_checks?.flatMap(item => item.evidence) ?? []} />}
+                </div></details>{taskActions(plan.code)}
+              </article>
+            ))}
             {expectationTaskRisks.map(({ holding, card, execution }) => {
               const effectiveCapitalRisk = effectiveCapitalRisks.find(item => item.holding.code === holding.code)
               const flowAlert = highRiskAlerts.find(item => item.code === holding.code)
@@ -1434,6 +1494,96 @@ function holdingSignalStatus(status: string) {
     INACTIVE: '未触发',
   }
   return labels[status] || chineseLabel(status)
+}
+
+function planLoopPriority(plan?: NextDayPlanOut['auction_plan'] | null) {
+  if (!plan) return 0
+  const levelScore: Record<string, number> = { critical: 500, warning: 420, positive: 260, observe: 120 }
+  const changeScore: Record<string, number> = {
+    upgraded: 120,
+    replaced: 100,
+    withdrawn: 95,
+    downgraded: 80,
+    initialized: 20,
+    unchanged: 0,
+  }
+  const branchScore: Record<string, number> = {
+    low_open_selloff: 80,
+    high_open_rally: 65,
+    range_open_balance: 35,
+    data_gap: 0,
+  }
+  return (levelScore[plan.advice_level || 'observe'] ?? 0)
+    + (changeScore[plan.advice_change || 'unchanged'] ?? 0)
+    + (branchScore[plan.selected_branch || 'data_gap'] ?? 0)
+}
+
+function planLoopIsVisible(plan?: NextDayPlanOut['auction_plan'] | null) {
+  if (!plan) return false
+  return Boolean(
+    plan.selected_branch && plan.selected_branch !== 'data_gap'
+    || plan.advice_level && plan.advice_level !== 'observe'
+    || plan.advice_change && !['initialized', 'unchanged'].includes(plan.advice_change)
+    || plan.current_stage && plan.current_stage !== '盘后预期',
+  )
+}
+
+function planLoopIsTask(plan?: NextDayPlanOut['auction_plan'] | null) {
+  if (!plan) return false
+  const level = plan.advice_level || 'observe'
+  const change = plan.advice_change || 'unchanged'
+  return ['critical', 'warning'].includes(level)
+    || ['upgraded', 'withdrawn', 'replaced', 'downgraded'].includes(change)
+    || ['low_open_selloff', 'high_open_rally'].includes(plan.selected_branch || '')
+}
+
+function planLoopTone(plan?: NextDayPlanOut['auction_plan'] | null) {
+  if (!plan) return 'signal-neutral'
+  if (plan.advice_level === 'critical') return 'signal-sell-high'
+  if (plan.advice_level === 'warning') return 'signal-sell-medium'
+  if (plan.advice_change === 'withdrawn' || plan.advice_level === 'positive') return 'signal-add-eligible'
+  if (plan.selected_branch === 'low_open_selloff') return 'signal-panic-guard'
+  return 'signal-neutral'
+}
+
+function planLoopLevelText(plan?: NextDayPlanOut['auction_plan'] | null) {
+  if (!plan) return '等待'
+  const labels: Record<string, string> = {
+    observe: '观察',
+    positive: '正向确认',
+    warning: '风险警告',
+    critical: '严重风险',
+  }
+  return `${labels[plan.advice_level || 'observe'] || '观察'} · V${plan.advice_revision ?? 1}`
+}
+
+function planLoopBranchSummary(plan?: NextDayPlanOut['auction_plan'] | null) {
+  if (!plan) return '盘后剧本尚未建立。'
+  const branch = plan.selected_branch_label || chineseLabel(plan.selected_branch || '等待竞价数据')
+  const stage = plan.current_stage || '等待下一阶段'
+  const reason = plan.branch_reason || plan.stage_decision || '等待竞价、开盘和分钟量价共同确认。'
+  return `${stage} · ${branch}：${reason}`
+}
+
+function planLoopAction(plan?: NextDayPlanOut['auction_plan'] | null) {
+  if (!plan) return '等待盘后剧本生成。'
+  const advice = plan.current_advice || plan.operation_advice || plan.stage_decision || '继续等待真实量价验证。'
+  const change = plan.advice_change && !['initialized', 'unchanged'].includes(plan.advice_change)
+    ? `${planLoopChangeText(plan.advice_change)}：`
+    : ''
+  return `${change}${chineseEvidence(advice)}`
+}
+
+function planLoopChangeText(change?: string) {
+  const labels: Record<string, string> = {
+    upgraded: '建议升级',
+    downgraded: '建议降级',
+    withdrawn: '原建议撤销',
+    replaced: '建议替换',
+    initialized: '初次生成',
+    unchanged: '继续有效',
+  }
+  return labels[change || ''] || '建议更新'
 }
 
 function DecisionBasis({ execution, fallback = [] }: { execution?: PositionExecutionState; fallback?: string[] }) {
