@@ -401,18 +401,65 @@ def _stage_status_from_volume(pattern: str, volume_price: Any | None = None) -> 
         "缩量诱多",
     )):
         return "失败", "量价承载效率下降，禁止追高；冲高后按计划保护利润。"
-    if "VWAP上方强势" in pattern or "放量上涨确认" in pattern:
+    if any(token in pattern for token in (
+        "放量下跌",
+        "资金流出加速",
+        "跌破VWAP",
+        "量价转弱",
+    )):
+        return "失败", "量价承接失效，反抽优先降风险，禁止逆势补仓。"
+    if any(token in pattern for token in (
+        "VWAP上方强势",
+        "放量上涨确认",
+        "放量反弹确认",
+        "站回VWAP",
+        "V形",
+    )):
         return "通过", "量价承接有效，可按计划持有确认。"
+    if "缩量回踩不破VWAP" in pattern or "回踩不破" in pattern:
+        return "通过", "缩量回踩仍守住分时均价线，不在回踩中恐慌卖出；等待重新放量上攻。"
+    if "缩量上涨·抛压较轻" in pattern or "缩量上涨但抛压较轻" in pattern:
+        return "观察", "缩量上涨可能代表抛压较轻，但不能单独追涨；等首次回踩不破VWAP。"
     if "放量上涨待承接确认" in pattern or "缩量上涨待确认" in pattern:
         return "观察", "上涨尚未得到承接确认，等待回踩、VWAP和订单流方向验证。"
-    if "冲高回落跌破VWAP" in pattern or "跌破VWAP" in pattern or "量价转弱" in pattern:
-        return "失败", "量价承接失效，反抽优先降风险。"
     if "冲高回落" in pattern:
         return "观察", "冲高回落但未完全证伪，等重新站回VWAP。"
     return "观察", "量价暂未给出强确认。"
 
 
 _ADVICE_LEVEL_RANK = {"positive": 0, "observe": 1, "warning": 2, "critical": 3}
+
+
+def _volume_shape_traits(pattern: str) -> dict[str, bool]:
+    return {
+        "fragile_rise": any(token in pattern for token in ("缩量上涨脆弱", "疑似诱多")),
+        "stalled_rise": any(token in pattern for token in ("放量上涨但承载效率下降", "放量滞涨", "高位承载衰减")),
+        "supported_shrink_rise": any(token in pattern for token in ("缩量上涨·抛压较轻", "缩量上涨但抛压较轻")),
+        "pullback_hold": any(token in pattern for token in ("缩量回踩不破VWAP", "回踩不破")),
+        "volume_rebound": any(token in pattern for token in ("放量反弹确认", "放量上涨确认", "站回VWAP", "V形")),
+        "volume_down": any(token in pattern for token in ("放量下跌", "资金流出加速", "量价转弱", "跌破VWAP")),
+    }
+
+
+def _volume_shape_guidance(pattern: str, volume_price: Any | None = None) -> str:
+    if not pattern:
+        return "量价形态待确认：没有真实分钟证据时不生成买卖动作。"
+    traits = _volume_shape_traits(pattern)
+    if not _volume_confirmation_reliable(volume_price):
+        return f"{pattern}：分钟样本或VWAP可靠性不足，仅作为观察，不升级买卖建议。"
+    if traits["stalled_rise"]:
+        return f"{pattern}：放量只代表分歧放大，价格推动效率下降时禁止追高，已有仓位优先核对冲高兑现和利润保护。"
+    if traits["fragile_rise"]:
+        return f"{pattern}：缩量上涨不能直接看成强势，若位置、订单流或板块承载偏弱，按诱多风险处理，禁止追高，尤其禁止冲动追高。"
+    if traits["pullback_hold"]:
+        return f"{pattern}：回踩仍守住分时均价线，先撤销低点恐慌卖出，等待重新放量上攻确认。"
+    if traits["volume_rebound"]:
+        return f"{pattern}：反弹获得量价修复证据，停止沿用低点卖出结论；但不自动加仓。"
+    if traits["supported_shrink_rise"]:
+        return f"{pattern}：抛压暂轻但参与不足，保留延续观察，不追直线拉升。"
+    if traits["volume_down"]:
+        return f"{pattern}：量价与价格承接同步转弱，反抽优先降风险，禁止逆势补仓。"
+    return f"{pattern}：继续等待VWAP、订单流方向和板块共振共同验证。"
 
 
 def _opening_branch(
@@ -470,10 +517,21 @@ def _derive_plan_advice(
     transition = str(getattr(expectation, "state_transition", "") or "")
     pattern = str(getattr(volume_price, "pattern", "") or "")
     volume_status, _ = _stage_status_from_volume(pattern, volume_price)
+    traits = _volume_shape_traits(pattern)
+    reliable_volume = _volume_confirmation_reliable(volume_price)
     reversal = (
         "REVERSAL" in transition
-        or any(token in pattern for token in ("V形", "站回VWAP", "回踩不破", "支撑确认"))
+        or (
+            reliable_volume
+            and (
+                traits["pullback_hold"]
+                or traits["volume_rebound"]
+                or any(token in pattern for token in ("支撑确认",))
+            )
+        )
     )
+    chase_risk = reliable_volume and (traits["fragile_rise"] or traits["stalled_rise"])
+    volume_breakdown = reliable_volume and (traits["volume_down"] or volume_status == "失败")
     weak_expectation = result in {"WEAKER", "SLIGHTLY_WEAKER", "INVALID"}
     strong_expectation = result in {"STRONGER", "SLIGHTLY_STRONGER"}
 
@@ -482,11 +540,11 @@ def _derive_plan_advice(
     if branch == "low_open_selloff":
         if reversal:
             return (
-                "低开分支出现修复证据，撤销低点立即卖出；等待站稳VWAP和抬高后的次低点确认，失败再恢复降风险。",
+                "低开分支出现量价修复，撤销低点立即卖出；等待站稳VWAP和抬高后的次低点确认，失败再恢复降风险。",
                 "observe",
                 f"低开后新增反转证据：{pattern or transition}。",
             )
-        if weak_expectation and volume_status == "失败":
+        if weak_expectation and volume_breakdown:
             return (
                 plan.underperform_action or "预期证伪且量价承接失败，反抽分批降风险，禁止补仓。",
                 "critical",
@@ -498,11 +556,17 @@ def _derive_plan_advice(
             "低开分支已激活，但尚未获得量价承接失败的双重确认。",
         )
     if branch == "high_open_rally":
-        if volume_status == "失败":
+        if chase_risk or volume_breakdown:
             return (
                 plan.trim_condition or "高开冲高未获量价承接，达到计划兑现区后分批保护利润。",
                 "warning",
                 f"高开后量价转弱：{pattern or '未站稳VWAP'}。",
+            )
+        if traits["supported_shrink_rise"] or traits["pullback_hold"]:
+            return (
+                "高开分支仍有承接，但缩量/回踩形态只支持观察；不追直线拉升，等回踩不破VWAP再确认延续。",
+                "observe",
+                f"高开后量价形态仍需验证：{pattern}。",
             )
         if strong_expectation or volume_status == "通过":
             return (
@@ -515,11 +579,23 @@ def _derive_plan_advice(
             "observe",
             "高开分支已激活，量价尚未确认。",
         )
-    if weak_expectation and volume_status == "失败":
+    if chase_risk:
+        return (
+            plan.trim_condition or "上涨形态出现承载衰减，禁止追高；已有仓位核对冲高兑现和利润保护。",
+            "warning",
+            f"区间分支出现追高风险：{pattern}。",
+        )
+    if weak_expectation and volume_breakdown:
         return (
             plan.underperform_action or "区间开盘后量价转弱，反抽分批降风险。",
             "warning",
             f"区间开盘后预期{result}且量价{pattern or '转弱'}。",
+        )
+    if traits["pullback_hold"] and weak_expectation:
+        return (
+            "弱于预期但回踩仍守住分时均价线，撤销恐慌追卖；若随后放量跌破VWAP，再恢复降风险。",
+            "observe",
+            f"弱预期下出现承接反证：{pattern}。",
         )
     if reversal or strong_expectation or volume_status == "通过":
         return (
@@ -781,6 +857,10 @@ def refresh_plan_stage_from_evidence(
             ],
             "expectation_match": str(getattr(expectation, "expectation_result", "") or auction.get("expectation_match") or ""),
             "volume_price_status": str(getattr(volume_price, "pattern", "") or auction.get("volume_price_status") or ""),
+            "volume_shape_guidance": _volume_shape_guidance(
+                str(getattr(volume_price, "pattern", "") or ""),
+                volume_price,
+            ),
             "refreshed_at": evaluated_at.strftime("%Y-%m-%d %H:%M:%S"),
         }
     )

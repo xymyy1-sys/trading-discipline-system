@@ -52,6 +52,9 @@ export default function PlanLoopStatus({ plan, planDate, compact = false }: Plan
         </header>
         <p><b>{branchLabel}</b> · {currentAdvice || '等待竞价、开盘与分钟量价共同确认。'}</p>
         <small>{plan.branch_reason || plan.advice_change_reason || '盘后剧本已建立，等待下一阶段真实证据。'}</small>
+        {!!plan.volume_shape_guidance && (
+          <small className="plan-loop-volume-guidance">量价形态：{chineseEvidence(plan.volume_shape_guidance)}</small>
+        )}
         {!!plan.previous_advice && change !== 'unchanged' && (
           <p className="plan-loop-change"><RotateCcw size={13} />{changeLabels[change]}：{plan.advice_change_reason || '证据变化触发自动修正。'}</p>
         )}
@@ -93,6 +96,11 @@ export default function PlanLoopStatus({ plan, planDate, compact = false }: Plan
         <span>{plan.advice_change_reason || '当前证据没有改变原计划。'}</span>
         {refreshedAt && <time><Clock3 size={13} />{formatTime(refreshedAt)}</time>}
       </div>
+      {!!plan.volume_shape_guidance && (
+        <p className="plan-loop-volume-guidance">
+          <b>量价形态：</b>{chineseEvidence(plan.volume_shape_guidance)}
+        </p>
+      )}
       {!!stages.length && (
         <div className="plan-loop-stages" aria-label="自动闭环阶段链">
           {stages.map((item, index) => (

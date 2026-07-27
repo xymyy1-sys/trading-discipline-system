@@ -314,8 +314,104 @@ def test_plan_advice_upgrades_then_is_withdrawn_by_reversal(db_session):
     assert restored["advice_level"] == "observe"
     assert restored["advice_change"] == "withdrawn"
     assert "撤销低点立即卖出" in restored["current_advice"]
+    assert "停止沿用低点卖出结论" in restored["volume_shape_guidance"]
     assert restored["advice_history"][-2]["state"] == "withdrawn"
     assert restored["advice_history"][-1]["state"] == "active"
+
+
+def test_low_open_volume_rebound_withdraws_low_point_sell_advice(db_session):
+    holding = _holding()
+    db_session.add(holding)
+    db_session.flush()
+    plan = _default_next_day_plan(holding, "2026-07-23", quote={"price": 10})
+    db_session.add(plan)
+    db_session.add(ExpectationSnapshot(
+        trade_date="2026-07-23",
+        code=holding.code,
+        name=holding.name,
+        stage="次日盘前预期",
+        expected_open_low=-1,
+        expected_open_high=1,
+    ))
+    db_session.commit()
+    invalid = SimpleNamespace(
+        expectation_result="INVALID",
+        state_transition="EXPECTATION_INVALIDATED",
+        expected_open_low=-1,
+        expected_open_high=1,
+        evidence=[],
+    )
+    refresh_plan_stage_from_evidence(
+        plan,
+        db_session,
+        expectation=invalid,
+        volume_price=_volume(pattern="跌破VWAP", reliable=True, bars=6, open_price=9.7, price=9.55),
+        quote={"price": 9.55, "open": 9.7, "prev_close": 10, "high": 9.8},
+        now=datetime(2026, 7, 23, 9, 36),
+    )
+    before = json.loads(plan.auction_plan)
+    assert before["advice_level"] == "critical"
+
+    repaired = SimpleNamespace(
+        expectation_result="INVALID",
+        state_transition="EXPECTATION_INVALIDATED",
+        expected_open_low=-1,
+        expected_open_high=1,
+        evidence=[],
+    )
+    refresh_plan_stage_from_evidence(
+        plan,
+        db_session,
+        expectation=repaired,
+        volume_price=_volume(pattern="放量反弹确认并站回VWAP", reliable=True, bars=12, open_price=9.7, price=10.05),
+        quote={"price": 10.05, "open": 9.7, "prev_close": 10, "high": 10.1},
+        now=datetime(2026, 7, 23, 9, 43),
+    )
+    auction = json.loads(plan.auction_plan)
+    assert auction["advice_level"] == "observe"
+    assert auction["advice_change"] == "withdrawn"
+    assert "撤销低点立即卖出" in auction["current_advice"]
+    assert "停止沿用低点卖出结论" in auction["volume_shape_guidance"]
+    assert "放量反弹确认" in auction["advice_change_reason"]
+
+
+def test_high_open_shrinking_rise_fragile_blocks_chasing(db_session):
+    holding = _holding()
+    db_session.add(holding)
+    db_session.flush()
+    plan = _default_next_day_plan(holding, "2026-07-23", quote={"price": 10})
+    db_session.add(plan)
+    db_session.add(ExpectationSnapshot(
+        trade_date="2026-07-23",
+        code=holding.code,
+        name=holding.name,
+        stage="次日盘前预期",
+        expected_open_low=-1,
+        expected_open_high=1,
+    ))
+    db_session.commit()
+    matched = SimpleNamespace(
+        expectation_result="MATCHED",
+        state_transition="CONSENSUS_STABLE",
+        expected_open_low=-1,
+        expected_open_high=1,
+        evidence=[],
+    )
+
+    refresh_plan_stage_from_evidence(
+        plan,
+        db_session,
+        expectation=matched,
+        volume_price=_volume(pattern="缩量上涨脆弱·疑似诱多", reliable=True, bars=8, open_price=10.4, price=10.5),
+        quote={"price": 10.5, "open": 10.4, "prev_close": 10, "high": 10.6},
+        now=datetime(2026, 7, 23, 9, 36),
+    )
+    auction = json.loads(plan.auction_plan)
+    assert auction["selected_branch"] == "high_open_rally"
+    assert auction["advice_level"] == "warning"
+    assert "禁止追高" in auction["volume_shape_guidance"]
+    assert "诱多风险" in auction["volume_shape_guidance"]
+    assert "高开后量价转弱" in auction["advice_change_reason"]
 
 
 def test_collector_plan_refresh_persists_event_and_execution_link(db_session):

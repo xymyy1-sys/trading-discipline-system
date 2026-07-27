@@ -15,6 +15,7 @@ const loopPlan = {
   previous_advice: '反抽无力时减仓。',
   advice_change: 'downgraded',
   advice_change_reason: '低点抬高且卖压衰减，风险建议降级。',
+  volume_shape_guidance: '水下V形反转站回VWAP：反弹获得量价修复证据，停止沿用低点卖出结论；但不自动加仓。',
   auto_refreshed_at: '2026-07-23 09:36:00',
   stage_checks: [
     { stage: '竞价确认', status: '失败', trigger: '低于区间', decision: '弱于预期', required_action: '禁止抢跑', evidence: [] },
@@ -36,6 +37,8 @@ describe('自动计划执行闭环', () => {
     expect(screen.getByText('低开下杀剧本')).toBeInTheDocument()
     expect(screen.getAllByText('撤销立即卖出，等待站稳分时均价再决定。')).toHaveLength(2)
     expect(screen.getByText('建议已降级')).toBeInTheDocument()
+    expect(screen.getByText(/量价形态/)).toBeInTheDocument()
+    expect(screen.getByText(/停止沿用低点卖出结论/)).toBeInTheDocument()
     expect(screen.getByLabelText('自动闭环阶段链')).toHaveTextContent('竞价确认')
     expect(screen.getByLabelText('自动闭环阶段链')).toHaveTextContent('五分钟确认')
     expect(screen.getByText('查看建议版本历史（2）')).toBeInTheDocument()
@@ -46,6 +49,7 @@ describe('自动计划执行闭环', () => {
 
     expect(screen.getByText('计划执行闭环')).toBeInTheDocument()
     expect(screen.getByText(/低开下杀剧本/)).toBeInTheDocument()
+    expect(screen.getByText(/水下V形反转站回VWAP/)).toBeInTheDocument()
     expect(screen.queryByText('自动闭环阶段链')).not.toBeInTheDocument()
     expect(screen.queryByText('查看建议版本历史（2）')).not.toBeInTheDocument()
   })

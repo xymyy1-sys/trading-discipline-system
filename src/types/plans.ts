@@ -97,6 +97,7 @@ export interface AuctionPlan {
   advice_change_reason?: string;
   auto_refreshed_at?: string;
   advice_history?: PlanAdviceHistoryItem[];
+  volume_shape_guidance?: string;
 }
 
 export interface NextDayPlan {

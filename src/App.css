@@ -6843,6 +6843,8 @@ h3 {
 .plan-loop-change { display: flex; flex-wrap: wrap; align-items: center; gap: 7px; margin: 0; padding: 9px 11px; border-radius: 8px; background: var(--surface); color: var(--ink-muted); }
 .plan-loop-change b { color: var(--ink); }
 .plan-loop-change time { display: inline-flex; align-items: center; gap: 4px; margin-left: auto; }
+.plan-loop-volume-guidance { margin: 0; padding: 9px 11px; border: 1px dashed color-mix(in srgb, var(--accent) 42%, var(--line)); border-radius: 8px; background: color-mix(in srgb, var(--accent) 5%, var(--panel)); color: var(--ink-muted); line-height: 1.55; }
+.plan-loop-volume-guidance b { color: var(--accent-strong); }
 .plan-loop-stages { display: grid; grid-template-columns: repeat(auto-fit, minmax(175px, 1fr)); gap: 8px; }
 .plan-loop-stages article { display: grid; align-content: start; gap: 6px; min-width: 0; padding: 10px; border: 1px solid var(--line); border-top: 3px solid var(--line); border-radius: 8px; background: var(--panel); }
 .plan-loop-stages article.stage-passed { border-top-color: #059669; }

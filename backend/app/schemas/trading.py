@@ -2364,6 +2364,7 @@ class AuctionPlan(BaseModel):
     advice_change_reason: str = ""
     auto_refreshed_at: str = ""
     advice_history: list[dict[str, Any]] = Field(default_factory=list)
+    volume_shape_guidance: str = ""
     plan_source: str = ""
     baseline_trade_date: str = ""
     execution_state_advice: str = ""
