@@ -81,6 +81,16 @@ export default function NextDayPlans({ mode = 'holding' }: { mode?: 'holding' | 
     return () => window.clearInterval(timer)
   }, [loadPlans])
 
+  useEffect(() => {
+    const handlePlansUpdated = (event: Event) => {
+      const detail = (event as CustomEvent<{ mode?: 'holding' | 'limit' }>).detail
+      if (detail?.mode && detail.mode !== mode) return
+      loadPlans()
+    }
+    window.addEventListener('next-day-plans-updated', handlePlansUpdated)
+    return () => window.removeEventListener('next-day-plans-updated', handlePlansUpdated)
+  }, [loadPlans, mode])
+
   const selected = useMemo(() => plans.find(p => p.id === selectedId) ?? null, [plans, selectedId])
   const selectedSeesaw = useMemo(
     () => seesaw?.holding_alerts.find(item => item.code === selected?.code || item.name === selected?.name) ?? null,

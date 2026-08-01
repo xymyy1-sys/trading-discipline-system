@@ -46,6 +46,8 @@ from app.schemas.trading import (
     VolumePriceSnapshotOut,
     CandidateOut,
     WatchlistRecommendationOut,
+    WatchlistCalibrationItemOut,
+    WatchlistCalibrationOut,
     WatchlistEntryIn,
     WatchlistEntryOut,
     ReplayReportOut,
@@ -63,6 +65,7 @@ router = APIRouter()
 
 _WATCHLIST_RECOMMENDATION_CAPTURE = "watchlist_recommendation"
 _WATCHLIST_GENERATION_CAPTURE = "watchlist_generation"
+_WATCHLIST_CALIBRATION_CAPTURE = "watchlist_calibration"
 _WATCHLIST_GENERATION_TARGET = "AUTO"
 
 
@@ -273,6 +276,276 @@ def _completed_trading_days(count: int, now: datetime | None = None) -> list[str
     return result
 
 
+def _latest_watchlist_recommendation_date_before(db: Session, outcome_trade_date: str) -> str:
+    row = (
+        db.query(DataCaptureSnapshot.trade_date)
+        .filter(
+            DataCaptureSnapshot.data_type == _WATCHLIST_RECOMMENDATION_CAPTURE,
+            DataCaptureSnapshot.trade_date < outcome_trade_date,
+            DataCaptureSnapshot.is_complete.is_(True),
+        )
+        .order_by(DataCaptureSnapshot.trade_date.desc(), DataCaptureSnapshot.captured_at.desc())
+        .first()
+    )
+    return str(row[0]) if row else ""
+
+
+def _watchlist_recommendation_snapshots(
+    db: Session,
+    snapshot_date: str,
+) -> list[WatchlistRecommendationOut]:
+    rows = (
+        db.query(DataCaptureSnapshot)
+        .filter(
+            DataCaptureSnapshot.trade_date == snapshot_date,
+            DataCaptureSnapshot.data_type == _WATCHLIST_RECOMMENDATION_CAPTURE,
+            DataCaptureSnapshot.is_complete.is_(True),
+        )
+        .order_by(DataCaptureSnapshot.target_code.asc(), DataCaptureSnapshot.captured_at.desc(), DataCaptureSnapshot.id.desc())
+        .all()
+    )
+    result: list[WatchlistRecommendationOut] = []
+    seen: set[str] = set()
+    for row in rows:
+        if row.target_code in seen:
+            continue
+        try:
+            payload = json.loads(row.normalized_value_json or "{}")
+            item = WatchlistRecommendationOut.model_validate(payload)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            continue
+        seen.add(row.target_code)
+        result.append(item)
+    return result
+
+
+def _read_watchlist_calibration(db: Session, outcome_trade_date: str | None = None) -> WatchlistCalibrationOut | None:
+    query = db.query(DataCaptureSnapshot).filter(
+        DataCaptureSnapshot.data_type == _WATCHLIST_CALIBRATION_CAPTURE,
+        DataCaptureSnapshot.target_code == _WATCHLIST_GENERATION_TARGET,
+    )
+    if outcome_trade_date:
+        query = query.filter(DataCaptureSnapshot.trade_date == outcome_trade_date)
+    row = query.order_by(DataCaptureSnapshot.trade_date.desc(), DataCaptureSnapshot.captured_at.desc(), DataCaptureSnapshot.id.desc()).first()
+    if row is None:
+        return None
+    try:
+        return WatchlistCalibrationOut.model_validate(json.loads(row.normalized_value_json or "{}"))
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return None
+
+
+def _persist_watchlist_calibration(db: Session, calibration: WatchlistCalibrationOut) -> None:
+    payload = calibration.model_dump(mode="json")
+    payload_json = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    row = db.query(DataCaptureSnapshot).filter(
+        DataCaptureSnapshot.trade_date == calibration.outcome_trade_date,
+        DataCaptureSnapshot.data_type == _WATCHLIST_CALIBRATION_CAPTURE,
+        DataCaptureSnapshot.target_code == _WATCHLIST_GENERATION_TARGET,
+    ).order_by(DataCaptureSnapshot.id.desc()).first()
+    if row is None:
+        row = DataCaptureSnapshot(
+            trade_date=calibration.outcome_trade_date,
+            source="自动观察池盘后校准",
+            data_type=_WATCHLIST_CALIBRATION_CAPTURE,
+            target_code=_WATCHLIST_GENERATION_TARGET,
+            target_name="自动观察池涨停命中校准",
+        )
+    row.captured_at = calibration.updated_at or shanghai_now_naive()
+    row.raw_value_json = json.dumps(
+        {
+            "schema_version": 1,
+            "source_snapshot_date": calibration.source_snapshot_date,
+            "outcome_trade_date": calibration.outcome_trade_date,
+            "total_count": calibration.total_count,
+            "hit_count": calibration.hit_count,
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    row.normalized_value_json = payload_json
+    row.quality = "derived"
+    row.latency_ms = 0
+    row.is_stale = False
+    row.is_degraded = calibration.status != "ok"
+    row.is_estimated = True
+    row.is_complete = True
+    row.status = calibration.status
+    row.error_message = "" if calibration.status == "ok" else calibration.summary
+    row.raw_payload_hash = hashlib.sha256(payload_json.encode("utf-8")).hexdigest()
+    db.add(row)
+
+
+def _watchlist_feedback_penalties(db: Session) -> dict[str, int]:
+    rows = (
+        db.query(DataCaptureSnapshot)
+        .filter(
+            DataCaptureSnapshot.data_type == _WATCHLIST_CALIBRATION_CAPTURE,
+            DataCaptureSnapshot.target_code == _WATCHLIST_GENERATION_TARGET,
+            DataCaptureSnapshot.is_complete.is_(True),
+        )
+        .order_by(DataCaptureSnapshot.trade_date.desc(), DataCaptureSnapshot.captured_at.desc())
+        .limit(5)
+        .all()
+    )
+    totals: dict[str, int] = {}
+    hits: dict[str, int] = {}
+    for row in rows:
+        try:
+            payload = json.loads(row.normalized_value_json or "{}")
+        except (TypeError, ValueError, json.JSONDecodeError):
+            continue
+        for item in payload.get("items") or []:
+            category = str(item.get("category") or "未分类")
+            totals[category] = totals.get(category, 0) + 1
+            if item.get("hit_limit_up"):
+                hits[category] = hits.get(category, 0) + 1
+    penalties: dict[str, int] = {}
+    for category, total in totals.items():
+        if total < 3:
+            continue
+        rate = hits.get(category, 0) / total
+        if rate < 0.10:
+            penalties[category] = 8
+        elif rate < 0.20:
+            penalties[category] = 5
+    return penalties
+
+
+def calibrate_watchlist_recommendations(
+    db: Session,
+    *,
+    outcome_trade_date: str | None = None,
+    force_refresh: bool = False,
+    persist: bool = True,
+) -> WatchlistCalibrationOut:
+    """Evaluate yesterday's automatic watchlist against today's limit-up pool."""
+
+    from app.services.market_data import MarketDataProvider, _is_valid_limit_up_ladder
+
+    outcome_trade_date = outcome_trade_date or _completed_trading_days(1)[0]
+    try:
+        source_snapshot_date = previous_a_share_trading_day(date.fromisoformat(outcome_trade_date)).isoformat()
+    except ValueError:
+        raise HTTPException(status_code=422, detail="trade_date must be YYYY-MM-DD")
+    recommendations = _watchlist_recommendation_snapshots(db, source_snapshot_date)
+    if not recommendations:
+        source_snapshot_date = _latest_watchlist_recommendation_date_before(db, outcome_trade_date)
+        recommendations = _watchlist_recommendation_snapshots(db, source_snapshot_date) if source_snapshot_date else []
+    updated_at = shanghai_now_naive()
+    if not recommendations:
+        calibration = WatchlistCalibrationOut(
+            source_snapshot_date=source_snapshot_date,
+            outcome_trade_date=outcome_trade_date,
+            status="missing",
+            summary="暂无可校准的上一批自动观察池推荐快照。",
+            diagnosis=["没有找到上一交易日的观察池推荐快照，无法计算涨停命中率。"],
+            adjustments=["先保证每日收盘后的自动观察池生成任务稳定落库，再评估推荐逻辑。"],
+            updated_at=updated_at,
+        )
+        if persist:
+            _persist_watchlist_calibration(db, calibration)
+        return calibration
+
+    provider = MarketDataProvider()
+    try:
+        ladder = provider.limit_up_ladder(outcome_trade_date, force_refresh=force_refresh)
+    except TypeError:
+        try:
+            ladder = provider.limit_up_ladder(outcome_trade_date)
+        except TypeError:
+            ladder = provider.limit_up_ladder()
+    except Exception as exc:
+        ladder = None
+        ladder_error = f"{exc.__class__.__name__}: {exc}"
+    else:
+        ladder_error = ""
+    if not _is_valid_limit_up_ladder(ladder):
+        calibration = WatchlistCalibrationOut(
+            source_snapshot_date=source_snapshot_date,
+            outcome_trade_date=outcome_trade_date,
+            total_count=len(recommendations),
+            status="degraded",
+            summary="今日涨停池暂不可用，无法完成自动观察池命中校准。",
+            evidence=[ladder_error or "涨停天梯数据为空或质量不合格。"],
+            diagnosis=["这不是推荐逻辑胜率为0，而是结果端数据缺口。"],
+            adjustments=["优先修复涨停天梯行情源；结果未确认前不应因缺失数据惩罚推荐模型。"],
+            updated_at=updated_at,
+        )
+        if persist:
+            _persist_watchlist_calibration(db, calibration)
+        return calibration
+
+    limit_info: dict[str, tuple[int, str]] = {}
+    for group in ladder.groups:
+        for stock in group.stocks:
+            limit_info[stock.code] = (max(group.level, stock.consecutive_limit_days), group.label)
+    items: list[WatchlistCalibrationItemOut] = []
+    for item in recommendations:
+        level, label = limit_info.get(item.code, (0, ""))
+        hit = level > 0
+        items.append(WatchlistCalibrationItemOut(
+            code=item.code,
+            name=item.name,
+            recommended_score=item.score,
+            tier=item.tier,
+            category=item.category,
+            theme=item.theme,
+            hit_limit_up=hit,
+            outcome_level=level,
+            outcome_note=(f"当日进入涨停天梯：{label or level}。" if hit else "当日未涨停，需要复盘题材、量价、风险收益比或买点约束是否失真。"),
+            reasons=item.reasons[:6],
+            risks=item.risks[:4] + item.missing_conditions[:4],
+        ))
+    hit_count = sum(1 for item in items if item.hit_limit_up)
+    hit_rate = round(hit_count / len(items), 4) if items else 0.0
+    misses = [item for item in items if not item.hit_limit_up]
+    weak_categories: dict[str, int] = {}
+    weak_themes: dict[str, int] = {}
+    for item in misses:
+        weak_categories[item.category or "未分类"] = weak_categories.get(item.category or "未分类", 0) + 1
+        weak_themes[item.theme or "未识别题材"] = weak_themes.get(item.theme or "未识别题材", 0) + 1
+    diagnosis: list[str] = []
+    adjustments: list[str] = []
+    if hit_rate >= 0.30:
+        diagnosis.append("观察池涨停转化较好，说明主线、涨停结构和量价门槛有一定有效性。")
+        adjustments.append("维持当前权重，继续观察是否能在次日竞价和开盘阶段给出可执行买点。")
+    elif hit_rate >= 0.10:
+        diagnosis.append("观察池有少量涨停命中，但候选质量分层仍偏松。")
+        adjustments.append("下一批提高主线地位、封板质量、风险收益比和量价确认权重，降低非主线和炸板承接候选权重。")
+    else:
+        diagnosis.append("观察池涨停转化偏低，说明当前筛选可能过度依赖静态题材或昨日涨停事实。")
+        adjustments.append("下一批自动观察池将对低命中类别降权，并更重视当日资金承接、板块梯队完整度、分时均价上方确认。")
+    if weak_categories:
+        category, count = max(weak_categories.items(), key=lambda pair: pair[1])
+        diagnosis.append(f"未涨停样本最多的类别：{category}（{count}只），需要重点复盘该类入池理由是否过宽。")
+    if weak_themes:
+        theme, count = max(weak_themes.items(), key=lambda pair: pair[1])
+        diagnosis.append(f"未涨停样本最多的题材：{theme}（{count}只），需要检查是否已退潮或资金承接不足。")
+    calibration = WatchlistCalibrationOut(
+        source_snapshot_date=source_snapshot_date,
+        outcome_trade_date=outcome_trade_date,
+        total_count=len(items),
+        hit_count=hit_count,
+        hit_rate=hit_rate,
+        status="ok",
+        summary=f"上一批自动观察池 {len(items)} 只，今日涨停命中 {hit_count} 只，命中率 {hit_rate * 100:.1f}%。",
+        evidence=[
+            f"推荐快照日：{source_snapshot_date}",
+            f"结果验证日：{outcome_trade_date}",
+            f"结果源：{getattr(ladder, 'source', '')}",
+        ],
+        diagnosis=diagnosis,
+        adjustments=adjustments,
+        items=items,
+        updated_at=updated_at,
+    )
+    if persist:
+        _persist_watchlist_calibration(db, calibration)
+    return calibration
+
+
 def _expectation_revision_out(row: ExpectationRevision, scenarios: list[ExpectationScenario]) -> ExpectationRevisionOut:
     return ExpectationRevisionOut(
         id=row.id, expectation_snapshot_id=row.expectation_snapshot_id,
@@ -474,6 +747,7 @@ def _watchlist_recommendations(
     executor.shutdown(wait=False, cancel_futures=True)
     holding_codes = {row.code for row in db.query(Holding.code).all()}
     overrides = {row.code: row for row in db.query(WatchlistEntry).all()}
+    feedback_penalties = _watchlist_feedback_penalties(db)
     latest_auto_snapshot = max(
         (row.snapshot_date for row in overrides.values() if row.source == "auto" and row.snapshot_date),
         default="",
@@ -713,6 +987,10 @@ def _watchlist_recommendations(
         if row["code"] in holding_codes:
             score_value -= 15
             row["risks"].append("当前已持仓，应转入持仓执行而非新增观察")
+        category_penalty = feedback_penalties.get(str(row.get("category") or ""))
+        if category_penalty:
+            score_value -= category_penalty
+            row["risks"].append(f"盘后校准降权：该观察池类别近几批涨停转化偏低，扣{category_penalty}分")
         score = max(0, min(100, int(score_value)))
         tier = "重点观察" if score >= 70 and gate_passed and not any("风险警示" in risk for risk in row["risks"]) else "等待确认" if score >= 50 else "暂不纳入"
         outputs.append(WatchlistRecommendationOut(
@@ -942,6 +1220,46 @@ def refresh_watchlist_recommendations(db: Session = Depends(get_db)) -> list[Wat
     """Explicitly fetch market evidence and persist the next pool generation."""
     try:
         return _watchlist_recommendations(db, persist_rotation=True)
+    except Exception:
+        db.rollback()
+        raise
+
+
+@router.get("/watchlist-recommendations/calibration", response_model=WatchlistCalibrationOut)
+def latest_watchlist_calibration(
+    trade_date: str | None = None,
+    db: Session = Depends(get_db),
+) -> WatchlistCalibrationOut:
+    """Read the latest persisted hit-rate calibration without touching providers."""
+    saved = _read_watchlist_calibration(db, trade_date)
+    if saved is not None:
+        return saved
+    outcome_trade_date = trade_date or _completed_trading_days(1)[0]
+    return WatchlistCalibrationOut(
+        outcome_trade_date=outcome_trade_date,
+        status="missing",
+        summary="暂无自动观察池盘后命中校准结果。",
+        diagnosis=["等待收盘任务或手动刷新校准后生成。"],
+        adjustments=["生成后会显示上一批观察池的涨停命中率、未命中原因和下一轮降权方向。"],
+        updated_at=shanghai_now_naive(),
+    )
+
+
+@router.post("/watchlist-recommendations/calibration/refresh", response_model=WatchlistCalibrationOut)
+def refresh_watchlist_calibration(
+    trade_date: str | None = None,
+    db: Session = Depends(get_db),
+) -> WatchlistCalibrationOut:
+    """Evaluate the previous watchlist batch against the selected day's limit-up pool."""
+    try:
+        result = calibrate_watchlist_recommendations(
+            db,
+            outcome_trade_date=trade_date,
+            force_refresh=True,
+            persist=True,
+        )
+        db.commit()
+        return result
     except Exception:
         db.rollback()
         raise

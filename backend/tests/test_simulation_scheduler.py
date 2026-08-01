@@ -130,6 +130,25 @@ def test_shadow_scheduler_creates_one_dedicated_account_and_reuses_it(db_session
         check.close()
 
 
+def test_ai_trader_account_api_creates_20k_shadow_account(client, db_session):
+    first = client.post("/api/simulation/ai-trader/account")
+    second = client.post("/api/simulation/ai-trader/account")
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+    payload = first.json()
+    assert payload["id"] == second.json()["id"]
+    assert payload["account_type"] == "shadow"
+    assert payload["initial_cash"] == 20000
+    assert payload["cash"] == 20000
+
+    rows = db_session.query(SimulationAccount).filter(
+        SimulationAccount.automation_key == intraday_collector.SHADOW_ACCOUNT_AUTOMATION_KEY,
+    ).all()
+    assert len(rows) == 1
+    assert rows[0].id == payload["id"]
+
+
 def test_shadow_scheduler_never_opens_database_outside_continuous_auction(monkeypatch):
     monkeypatch.setattr(
         intraday_collector,

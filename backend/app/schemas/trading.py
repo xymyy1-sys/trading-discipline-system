@@ -796,6 +796,35 @@ class WatchlistRecommendationOut(BaseModel):
     updated_at: datetime | None = None
 
 
+class WatchlistCalibrationItemOut(BaseModel):
+    code: str
+    name: str = ""
+    recommended_score: int = 0
+    tier: str = ""
+    category: str = ""
+    theme: str = ""
+    hit_limit_up: bool = False
+    outcome_level: int = 0
+    outcome_note: str = ""
+    reasons: list[str] = Field(default_factory=list)
+    risks: list[str] = Field(default_factory=list)
+
+
+class WatchlistCalibrationOut(BaseModel):
+    source_snapshot_date: str = ""
+    outcome_trade_date: str
+    total_count: int = 0
+    hit_count: int = 0
+    hit_rate: float = 0
+    status: str = "missing"
+    summary: str = ""
+    evidence: list[str] = Field(default_factory=list)
+    diagnosis: list[str] = Field(default_factory=list)
+    adjustments: list[str] = Field(default_factory=list)
+    items: list[WatchlistCalibrationItemOut] = Field(default_factory=list)
+    updated_at: datetime | None = None
+
+
 class AccountRiskIn(BaseModel):
     opening_asset: float | None = None
     current_asset: float | None = None
@@ -942,14 +971,23 @@ class IntradayCollectorStatusOut(BaseModel):
     queue_depth: int = 0
     open_circuits: list[str] = Field(default_factory=list)
     failure_counts: dict[str, int] = Field(default_factory=dict)
+    market_regime_running: bool = False
+    market_regime_interval_seconds: int = 0
+    market_regime_last_success_at: datetime | None = None
+    market_regime_last_error: str = ""
     opportunity_radar_running: bool = False
     opportunity_radar_last_success_at: datetime | None = None
     opportunity_radar_last_error: str = ""
+    simulation_match_running: bool = False
+    simulation_match_last_success_at: datetime | None = None
+    simulation_match_last_error: str = ""
     simulation_shadow_running: bool = False
     simulation_shadow_last_success_at: datetime | None = None
     simulation_shadow_last_error: str = ""
     simulation_shadow_equity_last_success_at: datetime | None = None
     simulation_shadow_equity_last_error: str = ""
+    close_expectation_completed_date: str | None = None
+    close_shadow_equity_completed_date: str | None = None
     last_run: CollectionRunOut | None = None
 
 

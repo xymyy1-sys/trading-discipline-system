@@ -35,6 +35,7 @@ from app.services.simulation import (
     submit_order,
 )
 from app.services.simulation_calibration import simulation_calibration_proposal
+from app.services.simulation_shadow import get_or_create_ai_trader_account, run_shadow_experiments
 
 
 router = APIRouter(prefix="/simulation", tags=["simulation"])
@@ -45,6 +46,34 @@ def _account_or_404(db: Session, account_id: int) -> SimulationAccount:
     if account is None:
         raise HTTPException(status_code=404, detail="模拟账户不存在")
     return account
+
+
+@router.post("/ai-trader/account", response_model=SimulationAccountOut)
+def ensure_ai_trader_account(db: Session = Depends(get_db)) -> SimulationAccount:
+    """Create or return the dedicated 20k AI paper-trading account."""
+
+    return get_or_create_ai_trader_account(db)
+
+
+@router.post("/ai-trader/run")
+def run_ai_trader_once(db: Session = Depends(get_db)) -> dict:
+    """Manually trigger one forward-only AI paper-trading scan.
+
+    It uses the same audited shadow engine as the scheduler and therefore
+    respects trading-session gates, evidence freshness and T+1 sellability.
+    """
+
+    account = get_or_create_ai_trader_account(db)
+    result = run_shadow_experiments(db, account)
+    return {
+        "account_id": result.account_id,
+        "evaluated_at": result.evaluated_at,
+        "created_order_ids": result.order_ids,
+        "skipped_count": len(result.skipped),
+        "duplicate_count": len(result.duplicate_signal_keys),
+        "skipped": result.skipped,
+        "duplicate_signal_keys": result.duplicate_signal_keys,
+    }
 
 
 @router.post("/accounts", response_model=SimulationAccountOut)

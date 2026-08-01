@@ -33,9 +33,22 @@ def rotate_watchlist_and_generate_next_day_expectations(
     """
 
     from app.api.routes.stocks import (
+        calibrate_watchlist_recommendations,
         _watchlist_generation_completed,
         _watchlist_recommendations,
     )
+
+    try:
+        calibrate_watchlist_recommendations(
+            db,
+            outcome_trade_date=completed_trade_date,
+            force_refresh=False,
+            persist=True,
+        )
+    except Exception:
+        # Calibration is a feedback report.  It must never block the core
+        # nightly rotation and next-session expectation baselines.
+        db.rollback()
 
     if not _watchlist_generation_completed(db, completed_trade_date):
         _watchlist_recommendations(db, persist_rotation=True)

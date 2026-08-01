@@ -44,6 +44,26 @@ const recommendation = (code: string, name: string, updatedAt = '2026-07-23T15:0
   updated_at: updatedAt,
 })
 
+const calibration = () => ({
+  source_snapshot_date: '',
+  outcome_trade_date: '',
+  total_count: 0,
+  hit_count: 0,
+  hit_rate: 0,
+  status: 'missing',
+  summary: '等待收盘任务或手动刷新后生成校准结果。',
+  evidence: [],
+  diagnosis: [],
+  adjustments: [],
+  items: [],
+  updated_at: null,
+})
+
+const isRecommendationEndpoint = (url: unknown) => {
+  const value = String(url)
+  return value.includes('/api/watchlist-recommendations') && !value.includes('/calibration')
+}
+
 const watchlistEvents = (calls: [event: Event][]) => calls
   .map(([event]) => event)
   .filter((event): event is CustomEvent => event instanceof CustomEvent && event.type === 'watchlist-updated')
@@ -57,31 +77,39 @@ describe('自动观察池显式刷新', () => {
 
   test('首次进入只GET，点击重新分析后直接采用POST的持久化结果', async () => {
     const refreshed = [recommendation('600001', '测试标的')]
-    const fetchMock = vi.fn()
-      .mockResolvedValueOnce(response([]))
-      .mockResolvedValueOnce(response(refreshed))
+    const fetchMock = vi.fn((url: unknown, _init?: RequestInit) => {
+      const value = String(url)
+      if (value.includes('/calibration')) return Promise.resolve(response(calibration()))
+      if (value.endsWith('/api/watchlist-recommendations/refresh')) return Promise.resolve(response(refreshed))
+      return Promise.resolve(response([]))
+    })
     vi.stubGlobal('fetch', fetchMock)
 
     render(<CandidatePool />)
     const refreshButton = await screen.findByRole('button', { name: /重新分析/ })
 
-    expect(fetchMock).toHaveBeenCalledTimes(1)
-    expect(String(fetchMock.mock.calls[0][0])).toMatch(/\/api\/watchlist-recommendations$/)
-    expect(fetchMock.mock.calls[0][1]).toMatchObject({ cache: 'no-store' })
+    const firstRecommendationCalls = fetchMock.mock.calls.filter(([url]) => isRecommendationEndpoint(url))
+    expect(firstRecommendationCalls).toHaveLength(1)
+    expect(String(firstRecommendationCalls[0][0])).toMatch(/\/api\/watchlist-recommendations$/)
+    expect(firstRecommendationCalls[0][1]).toMatchObject({ cache: 'no-store' })
 
     fireEvent.click(refreshButton)
 
     expect(await screen.findByText(/测试标的/)).toBeInTheDocument()
-    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2))
-    expect(String(fetchMock.mock.calls[1][0])).toMatch(/\/api\/watchlist-recommendations\/refresh$/)
-    expect(fetchMock.mock.calls[1][1]).toMatchObject({ method: 'POST' })
+    await waitFor(() => expect(fetchMock.mock.calls.filter(([url]) => isRecommendationEndpoint(url))).toHaveLength(2))
+    const recommendationCalls = fetchMock.mock.calls.filter(([url]) => isRecommendationEndpoint(url))
+    expect(String(recommendationCalls[1][0])).toMatch(/\/api\/watchlist-recommendations\/refresh$/)
+    expect(recommendationCalls[1][1]).toMatchObject({ method: 'POST' })
   })
 
   test('刷新失败保留旧快照，且不派发刷新成功事件', async () => {
     const oldRows = [recommendation('600002', '旧观察标的', '2026-07-22T15:05:00')]
-    const fetchMock = vi.fn()
-      .mockResolvedValueOnce(response(oldRows))
-      .mockResolvedValueOnce(errorResponse(503, '收盘行情源暂不可用'))
+    const fetchMock = vi.fn((url: unknown) => {
+      const value = String(url)
+      if (value.includes('/calibration')) return Promise.resolve(response(calibration()))
+      if (value.endsWith('/api/watchlist-recommendations/refresh')) return Promise.resolve(errorResponse(503, '收盘行情源暂不可用'))
+      return Promise.resolve(response(oldRows))
+    })
     vi.stubGlobal('fetch', fetchMock)
     const dispatchSpy = vi.spyOn(window, 'dispatchEvent')
 
@@ -104,17 +132,21 @@ describe('自动观察池显式刷新', () => {
     const slowGet = new Promise<Response>(resolve => { resolveSlowGet = resolve })
     const oldRows = [recommendation('600003', '过期观察标的', '2026-07-22T15:05:00')]
     const refreshedRows = [recommendation('600004', '当日观察标的')]
-    const fetchMock = vi.fn()
-      .mockImplementationOnce(() => slowGet)
-      .mockResolvedValueOnce(response([]))
-      .mockResolvedValueOnce(response(refreshedRows))
+    let recommendationGetCount = 0
+    const fetchMock = vi.fn((url: unknown) => {
+      const value = String(url)
+      if (value.includes('/calibration')) return Promise.resolve(response(calibration()))
+      if (value.endsWith('/api/watchlist-recommendations/refresh')) return Promise.resolve(response(refreshedRows))
+      recommendationGetCount += 1
+      return recommendationGetCount === 1 ? slowGet : Promise.resolve(response([]))
+    })
     vi.stubGlobal('fetch', fetchMock)
     const dispatchSpy = vi.spyOn(window, 'dispatchEvent')
 
     // StrictMode 的重复副作用刻意制造两个GET交错：首个GET仍在途，第二个GET先完成。
     render(<StrictMode><CandidatePool /></StrictMode>)
     const refreshButton = await screen.findByRole('button', { name: /重新分析/ })
-    expect(fetchMock).toHaveBeenCalledTimes(2)
+    expect(fetchMock.mock.calls.filter(([url]) => isRecommendationEndpoint(url))).toHaveLength(2)
     fireEvent.click(refreshButton)
 
     expect(await screen.findByText(/当日观察标的/)).toBeInTheDocument()

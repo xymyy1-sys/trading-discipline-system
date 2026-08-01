@@ -163,6 +163,379 @@ function ModuleHeading({ title, subtitle, loading, onRefresh, extra }: { title: 
   return <header className="simulation-module-heading"><div><h3>{title}</h3><p>{subtitle}</p></div><div className="simulation-heading-actions">{extra}<button className="refresh-btn inline" type="button" onClick={onRefresh} disabled={loading}><RefreshCcw size={15} />{loading ? '读取中' : '刷新模拟数据'}</button></div></header>
 }
 
+type AiTraderRunResult = {
+  account_id: number
+  evaluated_at: string
+  created_order_ids: number[]
+  skipped_count: number
+  duplicate_count: number
+  skipped: Array<{ code: string; reason: string }>
+}
+
+type IntradayCollectorStatus = {
+  enabled: boolean
+  interval_seconds: number
+  running: boolean
+  last_success_at: string | null
+  last_error: string
+  market_regime_running: boolean
+  market_regime_interval_seconds: number
+  market_regime_last_success_at: string | null
+  market_regime_last_error: string
+  opportunity_radar_running: boolean
+  opportunity_radar_last_success_at: string | null
+  opportunity_radar_last_error: string
+  simulation_match_running: boolean
+  simulation_match_last_success_at: string | null
+  simulation_match_last_error: string
+  simulation_shadow_running: boolean
+  simulation_shadow_last_success_at: string | null
+  simulation_shadow_last_error: string
+  simulation_shadow_equity_last_success_at: string | null
+  simulation_shadow_equity_last_error: string
+  close_expectation_completed_date: string | null
+  close_shadow_equity_completed_date: string | null
+}
+
+export function SimulationAiTrader() {
+  const [account, setAccount] = useState<SimulationAccount | null>(null)
+  const [positions, setPositions] = useState<SimulationPosition[]>([])
+  const [orders, setOrders] = useState<SimulationOrder[]>([])
+  const [equities, setEquities] = useState<SimulationDailyEquity[]>([])
+  const [decisions, setDecisions] = useState<SimulationShadowDecision[]>([])
+  const [performance, setPerformance] = useState<SimulationPerformance | null>(null)
+  const [calibration, setCalibration] = useState<SimulationCalibrationProposal | null>(null)
+  const [collector, setCollector] = useState<IntradayCollectorStatus | null>(null)
+  const [loading, setLoading] = useState(false)
+  const [running, setRunning] = useState(false)
+  const [error, setError] = useState('')
+  const [message, setMessage] = useState('')
+
+  const load = useCallback(() => {
+    setLoading(true)
+    setError('')
+    simulationRequest<SimulationAccount>('/api/simulation/ai-trader/account', { method: 'POST' })
+      .then(row => {
+        setAccount(row)
+        localStorage.setItem(ACTIVE_ACCOUNT_KEY, String(row.id))
+        return Promise.all([
+          simulationRequest<SimulationPosition[]>(`/api/simulation/accounts/${row.id}/positions`),
+          simulationRequest<SimulationOrder[]>(`/api/simulation/accounts/${row.id}/orders?limit=200`),
+          simulationRequest<SimulationDailyEquity[]>(`/api/simulation/accounts/${row.id}/equity?limit=120`),
+          simulationRequest<SimulationShadowDecision[]>(`/api/simulation/accounts/${row.id}/shadow-decisions?limit=200`),
+          simulationRequest<SimulationPerformance>(`/api/simulation/accounts/${row.id}/performance`),
+          simulationRequest<SimulationCalibrationProposal>(`/api/simulation/accounts/${row.id}/calibration-proposal`).catch(() => null),
+          simulationRequest<IntradayCollectorStatus>('/api/intraday-collector/status'),
+        ])
+      })
+      .then(([positionRows, orderRows, equityRows, decisionRows, report, calibrationProposal, collectorStatus]) => {
+        setPositions(positionRows)
+        setOrders(orderRows)
+        setEquities(equityRows)
+        setDecisions(decisionRows)
+        setPerformance(report)
+        setCalibration(calibrationProposal)
+        setCollector(collectorStatus)
+      })
+      .catch(value => setError(value instanceof Error ? value.message : 'AI模拟交易员账本读取失败'))
+      .finally(() => setLoading(false))
+  }, [])
+  useEffect(() => load(), [load])
+
+  const runOnce = () => {
+    setRunning(true)
+    setMessage('正在按当前证据扫描一次虚拟交易机会……')
+    simulationRequest<AiTraderRunResult>('/api/simulation/ai-trader/run', { method: 'POST' })
+      .then(result => {
+        const created = result.created_order_ids.length
+        const skipped = result.skipped_count
+        const sampleReason = result.skipped?.[0]?.reason
+        setMessage(created ? `本次生成 ${created} 笔虚拟委托，重复信号 ${result.duplicate_count} 条。` : `本次没有生成新委托，跳过 ${skipped} 条。${sampleReason ? `首要原因：${sampleReason}` : ''}`)
+        load()
+      })
+      .catch(value => setMessage(value instanceof Error ? value.message : 'AI模拟交易员运行失败'))
+      .finally(() => setRunning(false))
+  }
+
+  const markEquity = () => {
+    if (!account) return
+    setMessage('正在用当前真实行情校准AI模拟账户权益……')
+    simulationRequest<SimulationDailyEquity>(`/api/simulation/accounts/${account.id}/equity/mark`, { method: 'POST' })
+      .then(row => { setMessage(`权益已校准：${displayTime(row.captured_at)}。`); load() })
+      .catch(value => setMessage(value instanceof Error ? value.message : 'AI模拟账户权益校准失败'))
+  }
+
+  const latest = equities[0]
+  const marketValue = latest?.market_value ?? positions.reduce((sum, item) => sum + item.market_value, 0)
+  const totalEquity = latest?.total_equity ?? (account ? account.cash + marketValue : null)
+  const tradeDate = latest?.trade_date || decisions[0]?.trade_date || orders[0]?.trade_date || ''
+  const todayDecisions = decisions.filter(item => !tradeDate || item.trade_date === tradeDate)
+  const todayOrders = orders.filter(item => !tradeDate || item.trade_date === tradeDate)
+  const createdOrders = todayOrders.filter(item => item.client_note.includes('shadow:') || item.decision_evidence_snapshot_id)
+  const skippedReasons = todayDecisions.filter(item => item.status.toUpperCase() === 'SKIPPED').slice(0, 6)
+  const sampleEnough = (performance?.closed_trade_count ?? 0) >= 20
+  const policy = sampleEnough
+    ? `已有 ${performance?.closed_trade_count ?? 0} 笔闭环样本，后续重点看回撤是否收敛、盈亏比是否稳定。`
+    : `当前闭环样本 ${performance?.closed_trade_count ?? 0} 笔，不足以外推真实收益；AI交易员只允许小仓位前向采样。`
+
+  return <section className="simulation-page ai-trader-page">
+    <SimulationNotice dataAsOf={latest?.captured_at || account?.updated_at} />
+    <ModuleHeading
+      title="AI模拟交易员 · 2万元前向实盘"
+      subtitle="Codex只做虚拟买卖：后台定时获取数据、自动筛选与生成委托、记录跳过原因，并用每日盈亏反向校准策略。"
+      loading={loading}
+      onRefresh={load}
+      extra={<>
+        <button className="refresh-btn inline" type="button" onClick={runOnce} disabled={running || loading}><FlaskConical size={15} />{running ? '扫描中' : '备用调试：扫描一次'}</button>
+        <button className="refresh-btn inline" type="button" onClick={markEquity} disabled={!account || loading}><BarChart3 size={15} />备用调试：校准权益</button>
+      </>}
+    />
+    {message && <p className="simulation-form-message">{message}</p>}
+    {error ? <ModuleState loading={loading} error={error} onRefresh={load} /> : <div className="ai-trader-grid">
+      <section className="ai-trader-hero panel">
+        <div>
+          <span>专属虚拟账户</span>
+          <h4>{account?.name || '正在创建AI模拟账户'}</h4>
+          <p>虚拟本金固定为 {money(account?.initial_cash ?? 20000)}。不用你手动触发：后端按交易时段循环采集、撮合、决策和收盘复盘；这里不会连接券商，也不会读取或改动真实账户资金。</p>
+        </div>
+        <strong>{money(totalEquity)}</strong>
+        <small>账本日：{tradeDate || '等待首个交易日'} · 账户 #{account?.id ?? '--'}</small>
+      </section>
+      <AiTraderAutomationPanel status={collector} />
+      <div className="simulation-kpi-grid ai-trader-kpis">
+        <SimulationMetric label="虚拟总资产" value={money(totalEquity)} detail={latest ? percent(latest.return_pct, true) : '等待收盘校准'} tone={(latest?.total_pnl ?? 0) >= 0 ? 'up' : 'down'} />
+        <SimulationMetric label="可用资金" value={money(account?.cash)} />
+        <SimulationMetric label="持仓市值" value={money(marketValue)} />
+        <SimulationMetric label="今日盈亏" value={money(latest?.daily_pnl)} tone={(latest?.daily_pnl ?? 0) >= 0 ? 'up' : 'down'} />
+        <SimulationMetric label="累计盈亏" value={money(latest?.total_pnl ?? (totalEquity == null || !account ? null : totalEquity - account.initial_cash))} tone={(latest?.total_pnl ?? 0) >= 0 ? 'up' : 'down'} />
+        <SimulationMetric label="最大回撤" value={latest ? percent(Math.abs(latest.drawdown_pct)) : '--'} tone="down" />
+        <SimulationMetric label="闭环胜率" value={performance ? percent(performance.win_rate) : '--'} detail={`${performance?.closed_trade_count ?? 0}笔闭环`} />
+        <SimulationMetric label="盈亏比" value={performance ? numberValue(performance.profit_loss_ratio) : '--'} />
+      </div>
+      <AiTraderFeedbackPanel decisions={todayDecisions} orders={todayOrders} performance={performance} calibration={calibration} />
+      <section className="simulation-section panel">
+        <div className="simulation-section-title"><h4><History size={17} />今日AI操作</h4><span>{createdOrders.length}笔委托 / {todayDecisions.length}条信号</span></div>
+        <div className="ai-trader-actions">
+          {todayOrders.slice(0, 10).map(order => <article key={order.id} className={`tone-${statusTone(order.status)}`}>
+            <div><b>{order.name || order.code}</b><small>{order.code} · {strategyLabel(order.strategy_source)}</small></div>
+            <strong>{order.side === 'BUY' ? '虚拟买入' : '虚拟卖出'} {order.quantity}股</strong>
+            <span>{statusLabel(order.status)} · {order.order_type === 'LIMIT' ? numberValue(order.limit_price) : '市价撮合'}</span>
+            <p>{order.reject_reason || order.client_note.replace(/^shadow:[^;]+;rule=[^;]+;reason=/, '') || '等待撮合器给出成交或拒绝原因。'}</p>
+            <small>{displayTime(order.submitted_at)}</small>
+          </article>)}
+          {!todayOrders.length && <p className="plain-text">今日还没有虚拟委托。正常情况下不需要手动触发；若处于交易时段但仍无委托，通常说明证据闸门没有放行，AI交易员选择空仓等待。</p>}
+        </div>
+      </section>
+      <section className="simulation-section panel">
+        <div className="simulation-section-title"><h4><ShieldAlert size={17} />为什么没有交易 / 跳过原因</h4><span>{skippedReasons.length}条</span></div>
+        <div className="ai-trader-skip-list">
+          {skippedReasons.map(item => <article key={item.id}><b>{item.name || item.code}</b><span>{strategyLabel(item.strategy_source)} · {displayTime(item.evaluated_at)}</span><p>{item.reason}</p><small>{parseJsonList(item.evidence_json).slice(0, 3).join('；') || '证据闸门跳过，未生成虚拟委托。'}</small></article>)}
+          {!skippedReasons.length && <p className="plain-text">暂无跳过记录。没有记录不代表必须交易，等待系统出现可验证信号。</p>}
+        </div>
+      </section>
+      <section className="simulation-section panel">
+        <div className="simulation-section-title"><h4><WalletCards size={17} />当前虚拟持仓</h4><span>{positions.length}只</span></div>
+        <div className="simulation-table-wrap"><table className="simulation-table"><thead><tr><th>标的</th><th>数量/可用</th><th>成本/现价</th><th>市值</th><th>浮盈亏</th><th>更新时间</th></tr></thead><tbody>{positions.map(item => <tr key={item.id}><td><b>{item.name}</b><small>{item.code}</small></td><td>{item.quantity.toLocaleString()}<small>可用 {item.available_quantity.toLocaleString()}</small></td><td>{numberValue(item.average_cost)}<small>现 {numberValue(item.market_price)}</small></td><td>{money(item.market_value)}</td><td className={item.unrealized_pnl >= 0 ? 'num-up' : 'num-down'}>{money(item.unrealized_pnl)}</td><td>{displayTime(item.updated_at)}</td></tr>)}{!positions.length && <tr><td colSpan={6}>当前AI模拟账户空仓。空仓也是一个策略动作：说明没有满足证据闸门的机会。</td></tr>}</tbody></table></div>
+      </section>
+      <section className="ai-trader-review panel">
+        <h4>每日复盘与下一步修正</h4>
+        <p>{policy}</p>
+        <ul>
+          <li>买入来源：只允许来自打板预案、预期×量价确认、持仓执行状态机三类可审计信号。</li>
+          <li>卖出来源：只允许来自预期证伪、量价转弱、利润保护或硬止损，不因为单一外围/情绪指标机械清仓。</li>
+          <li>复盘口径：每日收盘后校准权益，统计胜率、盈亏比、回撤和跳过原因，逐步收紧无效信号。</li>
+        </ul>
+      </section>
+    </div>}
+  </section>
+}
+
+type AiTraderStrategyGrade = {
+  score: number
+  label: string
+  tone: 'pending' | 'ok' | 'warning' | 'danger'
+  reasons: string[]
+}
+
+function gradeAiTraderStrategy(performance: SimulationPerformance | null): AiTraderStrategyGrade {
+  const samples = performance?.closed_trade_count ?? 0
+  if (!performance || samples === 0) {
+    return {
+      score: 50,
+      label: '前向观察期',
+      tone: 'pending',
+      reasons: ['尚无完整买入—卖出闭环，当前评分只代表规则完整度，不代表收益能力。'],
+    }
+  }
+  const winContribution = Math.min(24, Math.max(0, performance.win_rate) * 0.32)
+  const ratioContribution = Math.min(18, Math.max(0, performance.profit_loss_ratio - 0.7) * 12)
+  const drawdownPenalty = Math.min(30, Math.abs(performance.maximum_drawdown_pct) * 1.5)
+  const sampleContribution = Math.min(8, samples * 0.4)
+  let score = Math.round(42 + winContribution + ratioContribution + sampleContribution - drawdownPenalty)
+  score = Math.max(0, Math.min(samples < 20 ? 68 : 100, score))
+  const label = samples < 20 ? '样本积累期' : score >= 75 ? '可继续前向验证' : score >= 60 ? '中性优化' : '需要收紧'
+  const tone = score >= 75 ? 'ok' : score >= 55 ? 'warning' : 'danger'
+  return {
+    score,
+    label,
+    tone,
+    reasons: [
+      `闭环样本 ${samples} 笔，胜率 ${percent(performance.win_rate)}，盈亏比 ${numberValue(performance.profit_loss_ratio)}。`,
+      `历史最大回撤 ${percent(Math.abs(performance.maximum_drawdown_pct))}；评分会惩罚大回撤，并对不足20笔的样本封顶。`,
+    ],
+  }
+}
+
+function cleanShadowReason(order: SimulationOrder) {
+  return order.reject_reason || order.client_note.replace(/^shadow:[^;]+;rule=[^;]+;reason=/, '') || '等待成交或拒绝结果。'
+}
+
+function AiTraderFeedbackPanel({
+  decisions,
+  orders,
+  performance,
+  calibration,
+}: {
+  decisions: SimulationShadowDecision[]
+  orders: SimulationOrder[]
+  performance: SimulationPerformance | null
+  calibration: SimulationCalibrationProposal | null
+}) {
+  const grade = gradeAiTraderStrategy(performance)
+  const selected = decisions.filter(item => item.status.toUpperCase() === 'ORDER_CREATED').slice(0, 4)
+  const buyOrders = orders.filter(item => item.side === 'BUY').slice(0, 3)
+  const sellOrders = orders.filter(item => item.side === 'SELL').slice(0, 3)
+  const leadingSlice = [...(performance?.by_strategy ?? [])].sort((left, right) => right.total_realized_pnl - left.total_realized_pnl)[0]
+  const optimization = calibration?.candidates.slice(0, 3) ?? []
+  return <section className={`ai-trader-feedback panel tone-${grade.tone}`}>
+    <header>
+      <div>
+        <h4><BarChart3 size={18} />策略日记与反馈闭环</h4>
+        <p>把当时可见证据、虚拟决策、成交结果和后续校准写在同一页，避免只看盈亏倒推理由。</p>
+      </div>
+      <div className="ai-trader-grade"><span>当前策略评分</span><strong>{grade.score}</strong><small>{grade.label}</small></div>
+    </header>
+    <div className="ai-trader-feedback-grid">
+      <article>
+        <h5>当前交易策略</h5>
+        <strong>证据闸门＋小仓位前向验证</strong>
+        <p>先用市场环境、主线题材、资金方向和预期×量价筛选，再由打板预案、预期量价或持仓状态机产生可审计信号；证据不足时允许空仓。</p>
+        {leadingSlice && <small>当前表现相对最好：{strategyLabel(leadingSlice.key)} · 已实现 {money(leadingSlice.total_realized_pnl)}</small>}
+        {grade.reasons.map(reason => <small key={reason}>{reason}</small>)}
+      </article>
+      <article>
+        <h5>今日选股与放行理由</h5>
+        {selected.length ? selected.map(item => <div className="ai-trader-journal-row" key={item.id}>
+          <b>{item.name || item.code}</b><span>{strategyLabel(item.strategy_source)}</span><p>{item.reason}</p>
+          <small>{parseJsonList(item.evidence_json).slice(0, 3).join('；') || '已保存决策证据快照。'}</small>
+        </div>) : <p>今日没有标的通过证据闸门。系统仍会记录候选被跳过的原因，并把空仓视为一次纪律决策。</p>}
+      </article>
+      <article>
+        <h5>买入与卖出理由</h5>
+        {buyOrders.map(order => <div className="ai-trader-journal-row" key={`buy-${order.id}`}><b>{order.name || order.code} · 虚拟买入</b><p>{cleanShadowReason(order)}</p><small>{statusLabel(order.status)} · {displayTime(order.submitted_at)}</small></div>)}
+        {sellOrders.map(order => <div className="ai-trader-journal-row" key={`sell-${order.id}`}><b>{order.name || order.code} · 虚拟卖出</b><p>{cleanShadowReason(order)}</p><small>{statusLabel(order.status)} · {displayTime(order.submitted_at)}</small></div>)}
+        {!buyOrders.length && !sellOrders.length && <p>今日尚无虚拟买卖。出现委托后，这里会分别记录买入理由、卖出理由、执行状态和时间。</p>}
+      </article>
+      <article>
+        <h5>复盘与策略修正原因</h5>
+        {optimization.length ? optimization.map(item => <div className="ai-trader-journal-row" key={`${item.target}-${item.field}`}>
+          <b>{item.direction === 'tighten' ? '建议收紧' : item.direction === 'loosen' ? '建议放宽' : '维持规则'} · {item.target}</b>
+          <p>{item.suggestion}</p><small>{item.reason} · {item.support_metric} · 样本 {item.sample_count}</small>
+        </div>) : <p>{calibration?.summary || '当前样本尚不足以形成调参候选，继续保留原规则并积累前向样本。'}</p>}
+        <small>所有修正先形成候选并保留原因；不会因为少量偶然盈亏自动改写真实交易规则。</small>
+      </article>
+    </div>
+  </section>
+}
+
+function automationStepTone(active: boolean, error?: string, time?: string | null): 'running' | 'error' | 'ok' | 'idle' {
+  if (active) return 'running'
+  if (error) return 'error'
+  if (time) return 'ok'
+  return 'idle'
+}
+
+function automationStatusLabel(active: boolean, error?: string, time?: string | null): string {
+  const tone = automationStepTone(active, error, time)
+  if (tone === 'running') return '运行中'
+  if (tone === 'error') return '异常'
+  if (tone === 'ok') return '最近成功'
+  return '等待首次运行'
+}
+
+function AiTraderAutomationPanel({ status }: { status: IntradayCollectorStatus | null }) {
+  const enabled = status?.enabled ?? false
+  const cadence = status?.interval_seconds ? `${status.interval_seconds}秒` : '约60秒'
+  const steps = [
+    {
+      title: '盘中行情与证据采集',
+      desc: `交易时段自动采集持仓、候选股、量价证据，默认节奏 ${cadence}。`,
+      active: Boolean(status?.running),
+      time: status?.last_success_at,
+      error: status?.last_error,
+    },
+    {
+      title: '市场环境与资金雷达',
+      desc: `全市场赚钱效应、量能、板块资金和外围证据低频更新。`,
+      active: Boolean(status?.market_regime_running),
+      time: status?.market_regime_last_success_at,
+      error: status?.market_regime_last_error,
+    },
+    {
+      title: '资讯/机会雷达',
+      desc: '盘中捕捉行业要闻、板块突发和机会事件，供虚拟策略引用。',
+      active: Boolean(status?.opportunity_radar_running),
+      time: status?.opportunity_radar_last_success_at,
+      error: status?.opportunity_radar_last_error,
+    },
+    {
+      title: '虚拟委托撮合',
+      desc: '先撮合上一轮虚拟委托，再允许新信号进入，避免同一根K线自买自卖。',
+      active: Boolean(status?.simulation_match_running),
+      time: status?.simulation_match_last_success_at,
+      error: status?.simulation_match_last_error,
+    },
+    {
+      title: 'AI虚拟决策扫描',
+      desc: '按证据闸门自动选股、分仓、买卖或选择空仓等待，并记录跳过原因。',
+      active: Boolean(status?.simulation_shadow_running),
+      time: status?.simulation_shadow_last_success_at,
+      error: status?.simulation_shadow_last_error,
+    },
+    {
+      title: '收盘复盘与次日剧本',
+      desc: `收盘后校准虚拟权益、轮换自动观察池并生成次日预期。${status?.close_expectation_completed_date ? `最近剧本日 ${status.close_expectation_completed_date}。` : ''}`,
+      active: false,
+      time: status?.simulation_shadow_equity_last_success_at,
+      error: status?.simulation_shadow_equity_last_error,
+    },
+  ]
+
+  return <section className="ai-trader-automation panel">
+    <header>
+      <div>
+        <h4>无人值守运行链路</h4>
+        <p>你不用手动点按钮。只要后端服务在运行，系统会按交易时段自动完成“取数 → 判断 → 虚拟下单 → 撮合 → 收盘复盘”。</p>
+      </div>
+      <span className={`ai-trader-automation-badge ${enabled ? 'is-on' : 'is-off'}`}>{enabled ? '定时任务已启用' : '定时任务未启用'}</span>
+    </header>
+    <div className="ai-trader-automation-steps">
+      {steps.map(step => {
+        const tone = automationStepTone(step.active, step.error, step.time)
+        return <article key={step.title} className={`tone-${tone}`}>
+          <div>
+            <strong>{step.title}</strong>
+            <span>{automationStatusLabel(step.active, step.error, step.time)}</span>
+          </div>
+          <p>{step.desc}</p>
+          <small>{step.error ? `错误：${step.error}` : `最近成功：${displayTime(step.time || undefined)}`}</small>
+        </article>
+      })}
+    </div>
+    <p className="ai-trader-automation-note">手动“扫描一次/校准权益”只用于排查数据源或临时补跑，不是正常交易流程的一部分。</p>
+  </section>
+}
+
 export function SimulationAccountOverview() {
   const { accounts, activeId, selectAccount, loadAccounts, loadingAccounts, accountError } = useSimulationAccounts()
   const [account, setAccount] = useState<SimulationAccount | null>(null)

@@ -13,9 +13,22 @@ type Recommendation = {
   entry_reason: string; observation_days: number; converted: boolean;
 }
 
+type WatchlistCalibrationItem = {
+  code: string; name: string; recommended_score: number; tier: string; category: string; theme: string;
+  hit_limit_up: boolean; outcome_level: number; outcome_note: string; reasons: string[]; risks: string[];
+}
+
+type WatchlistCalibration = {
+  source_snapshot_date: string; outcome_trade_date: string; total_count: number; hit_count: number; hit_rate: number;
+  status: string; summary: string; evidence: string[]; diagnosis: string[]; adjustments: string[];
+  items: WatchlistCalibrationItem[]; updated_at: string | null;
+}
+
 export default function CandidatePool() {
   const [recommendations, setRecommendations] = useState<Recommendation[]>([])
+  const [calibration, setCalibration] = useState<WatchlistCalibration | null>(null)
   const [loading, setLoading] = useState(false)
+  const [calibrationLoading, setCalibrationLoading] = useState(false)
   const [error, setError] = useState('')
   const [manual, setManual] = useState({ code: '', name: '' })
   const [notice, setNotice] = useState('')
@@ -24,6 +37,22 @@ export default function CandidatePool() {
   const snapshotDate = (rows: Recommendation[]) => {
     const values = rows.map(item => item.updated_at || '').filter(Boolean).sort()
     return values.length ? values[values.length - 1].slice(0, 10) : '最近一次'
+  }
+  const loadCalibration = (refresh = false) => {
+    setCalibrationLoading(true)
+    fetch(
+      `${API_BASE}/api/watchlist-recommendations/calibration${refresh ? '/refresh' : ''}`,
+      refresh ? { method: 'POST' } : { cache: 'no-store' },
+    )
+      .then(async r => {
+        if (!r.ok) throw new Error(await r.text())
+        return r.json()
+      })
+      .then(data => setCalibration(data))
+      .catch(() => {
+        if (refresh) setError('盘后命中校准刷新失败：请稍后再试或检查涨停天梯数据源')
+      })
+      .finally(() => setCalibrationLoading(false))
   }
   const load = (selectionChanged = false) => {
     const requestId = ++requestSequence.current
@@ -78,7 +107,10 @@ export default function CandidatePool() {
         if (requestId === requestSequence.current) setLoading(false)
       })
   }
-  useEffect(load, [])
+  useEffect(() => {
+    load()
+    loadCalibration()
+  }, [])
   const addManual = () => {
     const code = manual.code.trim()
     if (!/^\d{6}$/.test(code)) { setError('请输入6位股票代码'); return }
@@ -119,6 +151,11 @@ export default function CandidatePool() {
   return <section className="candidate-pool">
     <header className="pos-header"><div><h2>自动观察池</h2><p>从主线题材核心股和涨停梯队中自动发现，不再只给已有持仓打分。</p></div><button className="refresh-btn inline" onClick={refresh} disabled={loading}><RefreshCcw size={14} />{loading ? '分析中' : '重新分析'}</button></header>
     <div className="watchlist-editor panel"><input value={manual.code} onChange={e => setManual(value => ({ ...value, code: e.target.value.replace(/\D/g, '').slice(0, 6) }))} placeholder="6位股票代码"/><input value={manual.name} onChange={e => setManual(value => ({ ...value, name: e.target.value }))} placeholder="股票名称（可选）"/><button type="button" className="grade-btn" onClick={addManual} disabled={loading}><Plus size={14}/>加入观察池</button><span>系统每日盘后按当日数据换届10只；剔除后当日不递补，手动加入永久保留。</span></div>
+    <WatchlistCalibrationPanel
+      data={calibration}
+      loading={calibrationLoading}
+      onRefresh={() => loadCalibration(true)}
+    />
     <p className="entry-discipline-banner">纪律底线：没有盘前计划、交易模式不匹配、直线冲高未回踩，任意一项成立都禁止下单。宁可错过，不做模式外交易。</p>
     {notice && <p className="refresh-note">{notice}</p>}
     {error && <p className="error-msg">{error}；这不是“暂无数据”，请检查网络或行情源。</p>}
@@ -142,4 +179,57 @@ export default function CandidatePool() {
     </article>)}</div>
     {!loading && !recommendations.length && !error && <p className="plain-text">当前主线、封板结构与盘中量价没有产生合格的新观察标的，不用为了凑数量强行入池。</p>}
   </section>
+}
+
+function WatchlistCalibrationPanel({
+  data,
+  loading,
+  onRefresh,
+}: {
+  data: WatchlistCalibration | null
+  loading: boolean
+  onRefresh: () => void
+}) {
+  const hitRate = data ? `${(data.hit_rate * 100).toFixed(1)}%` : '--'
+  const hits = data ? `${data.hit_count}/${data.total_count}` : '--'
+  const sampleItems = data?.items?.slice(0, 6) ?? []
+  return (
+    <section className={`watchlist-calibration panel status-${data?.status ?? 'missing'}`}>
+      <header>
+        <div>
+          <h3>盘后命中校准</h3>
+          <p>复盘上一批自动观察池，验证今日涨停命中率；命中偏低时自动形成下一轮降权依据。</p>
+        </div>
+        <button type="button" className="refresh-btn inline" onClick={onRefresh} disabled={loading}>
+          <RefreshCcw size={14} />{loading ? '校准中' : '刷新校准'}
+        </button>
+      </header>
+      <div className="watchlist-calibration-metrics">
+        <span>推荐批次 <strong>{data?.source_snapshot_date || '--'}</strong></span>
+        <span>验证日 <strong>{data?.outcome_trade_date || '--'}</strong></span>
+        <span>涨停命中 <strong>{hits}</strong></span>
+        <span>命中率 <strong>{hitRate}</strong></span>
+      </div>
+      <p className="watchlist-calibration-summary">{data?.summary || '等待收盘任务或手动刷新后生成校准结果。'}</p>
+      <div className="watchlist-calibration-body">
+        <div>
+          <b>问题诊断</b>
+          {(data?.diagnosis?.length ? data.diagnosis : ['暂无诊断，等待校准样本。']).slice(0, 4).map(item => <p key={item}>{item}</p>)}
+        </div>
+        <div>
+          <b>下一轮修正</b>
+          {(data?.adjustments?.length ? data.adjustments : ['校准后会反馈到观察池评分。']).slice(0, 4).map(item => <p key={item}>{item}</p>)}
+        </div>
+      </div>
+      {!!sampleItems.length && (
+        <div className="watchlist-calibration-items">
+          {sampleItems.map(item => (
+            <span className={item.hit_limit_up ? 'hit' : 'miss'} key={item.code}>
+              {item.name || item.code}：{item.hit_limit_up ? `${item.outcome_level}板命中` : '未涨停'}
+            </span>
+          ))}
+        </div>
+      )}
+    </section>
+  )
 }

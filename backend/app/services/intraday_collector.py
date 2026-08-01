@@ -9,8 +9,6 @@ import time as clock
 from datetime import datetime, time, timedelta
 from zoneinfo import ZoneInfo
 
-from sqlalchemy.exc import IntegrityError
-
 from app.api.helpers.decision import current_expectation_stage
 from app.api.helpers.quotes import _normalize_code
 from app.api.helpers.reflexivity import build_consensus_high_open_fade
@@ -41,7 +39,14 @@ from app.services.recommendation_outcomes import (
 )
 from app.services.sector_expansion import SectorExpansionRadarService
 from app.services.simulation import process_open_orders
-from app.services.simulation_shadow import mark_shadow_equity_after_close, run_shadow_experiments
+from app.services.simulation_shadow import (
+    AI_TRADER_ACCOUNT_NAME,
+    AI_TRADER_AUTOMATION_KEY,
+    AI_TRADER_INITIAL_CASH,
+    get_or_create_ai_trader_account,
+    mark_shadow_equity_after_close,
+    run_shadow_experiments,
+)
 from app.services.sector_evidence_history import persist_global_evidence_snapshot
 from app.services.trading_calendar import (
     is_a_share_trading_day,
@@ -95,9 +100,9 @@ opportunity_market_provider = MarketDataProvider()
 opportunity_radar_service = OpportunityRadarService()
 opportunity_sector_expansion_service = SectorExpansionRadarService()
 
-SHADOW_ACCOUNT_AUTOMATION_KEY = "system-shadow-forward-v1"
-SHADOW_ACCOUNT_NAME = "系统影子验证账户"
-SHADOW_ACCOUNT_INITIAL_CASH = 1_000_000
+SHADOW_ACCOUNT_AUTOMATION_KEY = AI_TRADER_AUTOMATION_KEY
+SHADOW_ACCOUNT_NAME = AI_TRADER_ACCOUNT_NAME
+SHADOW_ACCOUNT_INITIAL_CASH = AI_TRADER_INITIAL_CASH
 
 
 def _latest_completed_close_date(now: datetime | None = None) -> str:
@@ -405,34 +410,7 @@ def run_simulation_matching_once(*, now: datetime | None = None) -> dict[str, ob
 
 
 def _get_or_create_shadow_account(db) -> SimulationAccount:
-    row = db.query(SimulationAccount).filter(
-        SimulationAccount.automation_key == SHADOW_ACCOUNT_AUTOMATION_KEY,
-    ).first()
-    if row is not None:
-        return row
-    row = SimulationAccount(
-        name=SHADOW_ACCOUNT_NAME,
-        initial_cash=SHADOW_ACCOUNT_INITIAL_CASH,
-        cash=SHADOW_ACCOUNT_INITIAL_CASH,
-        account_type="shadow",
-        automation_key=SHADOW_ACCOUNT_AUTOMATION_KEY,
-        status="active",
-    )
-    db.add(row)
-    try:
-        db.commit()
-        db.refresh(row)
-        return row
-    except IntegrityError:
-        # Multiple API workers may race on the first minute after deployment.
-        # The unique automation key makes the operation idempotent.
-        db.rollback()
-        existing = db.query(SimulationAccount).filter(
-            SimulationAccount.automation_key == SHADOW_ACCOUNT_AUTOMATION_KEY,
-        ).first()
-        if existing is None:
-            raise
-        return existing
+    return get_or_create_ai_trader_account(db)
 
 
 def run_simulation_shadow_once(*, now: datetime | None = None) -> dict[str, object]:
@@ -1304,6 +1282,8 @@ def collector_status() -> dict[str, object]:
         "simulation_shadow_last_error": _simulation_shadow_last_error,
         "simulation_shadow_equity_last_success_at": _simulation_shadow_equity_last_success_at,
         "simulation_shadow_equity_last_error": _simulation_shadow_equity_last_error,
+        "close_expectation_completed_date": _close_expectation_date,
+        "close_shadow_equity_completed_date": _close_shadow_equity_date,
         "queue_depth": _queue_depth,
         "open_circuits": [key for key, until in _circuit_until.items() if until > clock.time()],
         "failure_counts": dict(_failure_counts),

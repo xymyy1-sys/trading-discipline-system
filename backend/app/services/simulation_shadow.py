@@ -41,6 +41,9 @@ from app.services.simulation import (
 
 logger = logging.getLogger(__name__)
 RULE_VERSION = "shadow-v1"
+AI_TRADER_AUTOMATION_KEY = "codex-ai-paper-trader-v1"
+AI_TRADER_ACCOUNT_NAME = "Codex AI模拟交易员（2万元）"
+AI_TRADER_INITIAL_CASH = 20_000
 MAX_SIGNAL_AGE_SECONDS = 15 * 60
 MAX_EXPECTATION_AGE_SECONDS = 6 * 60 * 60
 MAX_PLAN_AGE_SECONDS = 36 * 60 * 60
@@ -87,6 +90,59 @@ class ShadowEquityResult:
     evaluated_at: datetime
     equity_ids: list[int] = field(default_factory=list)
     skipped: list[dict[str, str]] = field(default_factory=list)
+
+
+def get_or_create_ai_trader_account(db: Session) -> SimulationAccount:
+    """Return the dedicated 20k forward-only paper trading account.
+
+    The account is intentionally separated by ``automation_key`` so the user's
+    manual simulation experiments do not contaminate the AI trader's daily
+    record.  Existing accounts are never reset: once the forward test starts,
+    preserving its PnL path is more important than matching a nominal balance.
+    """
+
+    row = db.query(SimulationAccount).filter(
+        SimulationAccount.automation_key == AI_TRADER_AUTOMATION_KEY,
+    ).first()
+    if row is not None:
+        changed = False
+        if row.name != AI_TRADER_ACCOUNT_NAME:
+            row.name = AI_TRADER_ACCOUNT_NAME
+            changed = True
+        if row.account_type != "shadow":
+            row.account_type = "shadow"
+            changed = True
+        if row.status != "active":
+            row.status = "active"
+            changed = True
+        if changed:
+            db.add(row)
+            db.commit()
+            db.refresh(row)
+        return row
+    row = SimulationAccount(
+        name=AI_TRADER_ACCOUNT_NAME,
+        initial_cash=AI_TRADER_INITIAL_CASH,
+        cash=AI_TRADER_INITIAL_CASH,
+        account_type="shadow",
+        automation_key=AI_TRADER_AUTOMATION_KEY,
+        status="active",
+    )
+    db.add(row)
+    try:
+        db.commit()
+        db.refresh(row)
+        return row
+    except IntegrityError:
+        # Multiple API workers may race on the first minute after deployment.
+        # The unique automation key makes the operation idempotent.
+        db.rollback()
+        existing = db.query(SimulationAccount).filter(
+            SimulationAccount.automation_key == AI_TRADER_AUTOMATION_KEY,
+        ).first()
+        if existing is None:
+            raise
+        return existing
 
 
 def _local(value: datetime | None) -> datetime | None:

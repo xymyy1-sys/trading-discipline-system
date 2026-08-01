@@ -92,10 +92,15 @@ export default function LimitUpLadder() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ ...stock, level, max_position_ratio: strategy?.role.max_position_ratio ?? 0 }),
     })
-      .then(r => r.json())
-      .then(() => {
+      .then(async r => {
+        if (!r.ok) throw new Error(await r.text())
+        return r.json()
+      })
+      .then(plan => {
+        window.dispatchEvent(new CustomEvent('next-day-plans-updated', { detail: { mode: 'limit', plan } }))
         window.dispatchEvent(new CustomEvent('workspace-module', { detail: 'plans' }))
       })
+      .catch(() => setError('生成预案失败：后端未保存成功，请稍后重试'))
       .finally(() => setCreatingCode(null))
   }
 
