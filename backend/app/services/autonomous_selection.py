@@ -29,6 +29,8 @@ NOTIFICATION_CAPTURE_TYPE = "ai_trader_notification"
 AUTOMATION_KEY = "codex-ai-paper-trader-v1"
 MAX_SELECTION_AGE = timedelta(minutes=12)
 MAX_SELECTED = 12
+MAX_EXPLORATION_SELECTED = 50
+EXPLORATION_MIN_SCORE = 68
 REFERENCE_BONUSES = {"抓涨停": 6.0, "断板反包": 5.0}
 
 
@@ -375,6 +377,14 @@ def refresh_autonomous_selection(
         source_feedback=source_feedback,
         minimum_score=float(gate["minimum_score"]),
     )
+    exploration_items = rank_full_market_rows(
+        rows,
+        feedback=_feedback_by_code(db),
+        reference_signals=reference_signals,
+        source_feedback=source_feedback,
+        minimum_score=EXPLORATION_MIN_SCORE,
+        limit=MAX_EXPLORATION_SELECTED,
+    )
     payload = {
         "trade_date": trade_date,
         "source": source,
@@ -383,6 +393,13 @@ def refresh_autonomous_selection(
         "candidate_count": len(items),
         "gate": gate,
         "items": items,
+        "exploration_items": exploration_items,
+        "exploration_policy": {
+            "minimum_score": EXPLORATION_MIN_SCORE,
+            "maximum_daily_entries": 1,
+            "position_ratio": 0.10,
+            "purpose": "正常策略未成交时取得前向探索样本；单独标记，不伪装成正式信号",
+        },
         "reference_sources": reference_status,
         "source_feedback": source_feedback,
         "method": "全A股→流动性→非极端活跃→VWAP承接→订单流估算→行业去重→真实交易反馈微调",
@@ -415,7 +432,20 @@ def autonomous_selection_targets(db: Session, trade_date: str) -> list[tuple[str
     payload = latest_autonomous_selection(db, trade_date=trade_date, max_age=MAX_SELECTION_AGE)
     if not payload:
         return []
-    return [(_normalize_code(str(item.get("code") or "")), str(item.get("name") or "")) for item in payload.get("items", []) if item.get("code")]
+    # Minute evidence must also cover the bounded exploration universe.  If the
+    # normal market gate is closed, ``items`` can be empty; collecting only that
+    # list would make the fallback rule impossible to verify and it would stay
+    # permanently in cash.  Keep the extra workload bounded and de-duplicated.
+    targets: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    combined = list(payload.get("items") or []) + list(payload.get("exploration_items") or [])[:20]
+    for item in combined:
+        code = _normalize_code(str(item.get("code") or ""))
+        if not code or code in seen:
+            continue
+        seen.add(code)
+        targets.append((code, str(item.get("name") or "")))
+    return targets
 
 
 def merge_autonomous_candidates_into_watchlist(db: Session, snapshot_date: str, max_replacements: int = 3) -> int:

@@ -1,4 +1,5 @@
-from app.services.autonomous_selection import rank_full_market_rows
+from app.services import autonomous_selection
+from app.services.autonomous_selection import autonomous_selection_targets, rank_full_market_rows
 
 
 def quote(
@@ -64,3 +65,20 @@ def test_existing_screens_are_bounded_traceable_evidence_not_a_direct_buy_signal
     assert result[0]["source_tags"] == ["断板反包", "抓涨停"]
     assert sum(item["base"] + item["learned"] for item in result[0]["source_contributions"]) == 12
     assert any("不单独触发买入" in reason for reason in result[0]["reasons"])
+
+
+def test_minute_targets_include_bounded_deduplicated_exploration_universe(monkeypatch):
+    payload = {
+        "items": [{"code": "600001", "name": "正式候选"}],
+        "exploration_items": [
+            {"code": "600001", "name": "重复候选"},
+            *({"code": f"000{index:03d}", "name": f"探索{index}"} for index in range(1, 25)),
+        ],
+    }
+    monkeypatch.setattr(autonomous_selection, "latest_autonomous_selection", lambda *args, **kwargs: payload)
+
+    targets = autonomous_selection_targets(object(), "2026-08-04")
+
+    assert targets[0] == ("600001", "正式候选")
+    assert len(targets) == 20  # 1 formal + first 20 exploration rows - one duplicate
+    assert len({code for code, _ in targets}) == len(targets)

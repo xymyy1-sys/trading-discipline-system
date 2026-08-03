@@ -49,6 +49,9 @@ MAX_SIGNAL_AGE_SECONDS = 15 * 60
 MAX_EXPECTATION_AGE_SECONDS = 6 * 60 * 60
 MAX_PLAN_AGE_SECONDS = 36 * 60 * 60
 MAX_QUOTE_AGE_SECONDS = 2 * 60
+EXPLORATION_START = time(10, 0)
+EXPLORATION_END = time(14, 30)
+EXPLORATION_POSITION_RATIO = 0.10
 
 
 @dataclass(frozen=True)
@@ -277,6 +280,26 @@ def _negative_volume(row: VolumePriceSnapshot | None) -> bool:
     return pattern_confirmed or numeric_confirmed
 
 
+def _exploration_volume(row: VolumePriceSnapshot | None) -> bool:
+    """A softer but still real-data confirmation used for one daily sample."""
+    if row is None or not _quality_ok(row.data_quality) or not row.vwap_reliable:
+        return False
+    pattern = str(row.pattern or "").upper()
+    forbidden = (
+        "BROKEN", "BREAKDOWN", "DISTRIBUTION", "FAIL", "WEAKNESS",
+        "跌破", "放量下跌", "量价转弱", "资金流出加速", "冲高回落", "诱多",
+    )
+    if any(token in pattern for token in forbidden):
+        return False
+    if float(row.price_vs_vwap or 0) < -0.3:
+        return False
+    buy = float(row.active_buy_amount or 0)
+    sell = float(row.active_sell_amount or 0)
+    flow_not_hostile = buy <= 0 or sell <= 0 or buy >= sell * 0.85
+    momentum_not_negative = float(row.volume_acceleration or 0) >= 0 or float(row.attack_efficiency or 0) >= 0
+    return flow_not_hostile and momentum_not_negative
+
+
 def _execution_candidate(row: PositionExecutionState) -> ShadowCandidate | None:
     action = str(row.recommended_action or "").strip()
     state = str(row.state or "").upper()
@@ -483,18 +506,24 @@ def _autonomous_candidates(
     if not payload:
         return []
     gate = payload.get("gate") or {}
-    if not bool(gate.get("allow_entry")):
-        return []
     try:
         captured_at = datetime.fromisoformat(str(payload.get("captured_at") or ""))
     except (TypeError, ValueError):
         return []
-    maximum = min(max(int(gate.get("max_entries") or 0), 0), 3)
+    account = db.query(SimulationAccount).filter(
+        SimulationAccount.automation_key == AI_TRADER_AUTOMATION_KEY,
+    ).first()
+    available_cash = float(account.cash or 0) if account else 0.0
+    maximum = min(max(int(gate.get("max_entries") or 0), 0), 3) if bool(gate.get("allow_entry")) else 0
     result: list[ShadowCandidate] = []
     for item in list(payload.get("items") or []):
         if len(result) >= maximum:
             break
         code = _normalize_code(str(item.get("code") or ""))
+        # A-share orders require at least one 100-share lot.  Do not let
+        # unaffordable high-priced names consume the three candidate slots.
+        if float(item.get("price") or 0) * 100 > available_cash * 0.08:
+            continue
         volume = volumes.get(code)
         confirmed = _positive_volume(volume)
         score = float(item.get("score") or 0)
@@ -529,6 +558,64 @@ def _autonomous_candidates(
                 SourceDependency("分钟量价快照", getattr(volume, "captured_at", None), MAX_SIGNAL_AGE_SECONDS),
             ),
         ))
+
+    ready_normal = any(candidate.ready for candidate in result)
+    current_time = evaluated_at.time()
+    if ready_normal or not (EXPLORATION_START <= current_time <= EXPLORATION_END) or account is None:
+        return result
+    has_position = db.query(SimulationPosition.id).filter(
+        SimulationPosition.account_id == account.id,
+        SimulationPosition.quantity > 0,
+    ).first() is not None
+    has_open_buy = db.query(SimulationOrder.id).filter(
+        SimulationOrder.account_id == account.id,
+        SimulationOrder.side == "BUY",
+        SimulationOrder.status.in_(("PENDING", "OPEN", "PROCESSING")),
+    ).first() is not None
+    sampled_today = db.query(SimulationShadowDecision.id).filter(
+        SimulationShadowDecision.account_id == account.id,
+        SimulationShadowDecision.trade_date == evaluated_at.date().isoformat(),
+        SimulationShadowDecision.source_kind == "autonomous_exploration_sample",
+    ).first() is not None
+    if has_position or has_open_buy or sampled_today:
+        return result
+
+    for item in list(payload.get("exploration_items") or []):
+        code = _normalize_code(str(item.get("code") or ""))
+        price = float(item.get("price") or 0)
+        if price <= 0 or price * 100 > available_cash * EXPLORATION_POSITION_RATIO:
+            continue
+        volume = volumes.get(code)
+        if not _exploration_volume(volume):
+            continue
+        reasons = tuple(str(value) for value in item.get("reasons") or [] if str(value).strip())
+        risks = tuple(str(value) for value in item.get("risks") or [] if str(value).strip())
+        source_tags = tuple(str(value) for value in item.get("source_tags") or [] if str(value).strip())
+        result.append(ShadowCandidate(
+            strategy_source="expectation_volume_price",
+            source_kind="autonomous_exploration_sample",
+            source_id=int(payload.get("snapshot_id") or 0) or None,
+            source_version=f"explore:{evaluated_at.date().isoformat()}:{code}:v{getattr(volume, 'id', 0)}",
+            source_at=max(value for value in (captured_at, _local(getattr(volume, "captured_at", None))) if value is not None),
+            code=code,
+            name=str(item.get("name") or ""),
+            intent="ENTER",
+            side="BUY",
+            ratio=EXPLORATION_POSITION_RATIO,
+            ready=True,
+            reason=f"每日探索样本：全A评分{float(item.get('score') or 0):.1f}分，正常策略尚未成交，使用10%以内仓位验证",
+            evidence=reasons + risks + tuple(f"来源标签={value}" for value in source_tags) + (
+                "样本类型=探索；与正式策略分开审计",
+                f"市场闸门={gate.get('reason') or '缺失'}",
+                f"量价形态={getattr(volume, 'pattern', '中性确认')}",
+                f"失效条件={item.get('invalidation') or '跌破分时均价且主动卖出增强'}",
+            ),
+            dependencies=(
+                SourceDependency("全A探索候选快照", captured_at, MAX_SIGNAL_AGE_SECONDS),
+                SourceDependency("探索分钟量价快照", getattr(volume, "captured_at", None), MAX_SIGNAL_AGE_SECONDS),
+            ),
+        ))
+        break
     return result
 
 
