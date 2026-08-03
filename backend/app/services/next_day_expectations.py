@@ -62,6 +62,16 @@ def rotate_watchlist_and_generate_next_day_expectations(
             include_watchlist=False,
         )
         return False
+    # Keep the pool at its existing size: replace at most three low-ranked
+    # automatic names with independently scanned candidates whose ranking is
+    # also adjusted by completed forward-paper results. Manual names remain
+    # untouched and intraday user deletions are never refilled here.
+    try:
+        from app.services.autonomous_selection import merge_autonomous_candidates_into_watchlist
+
+        merge_autonomous_candidates_into_watchlist(db, completed_trade_date)
+    except Exception:
+        db.rollback()
     generate_next_day_expectations(db, completed_trade_date=completed_trade_date)
     return True
 

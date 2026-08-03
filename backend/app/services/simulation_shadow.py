@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime, time
+from datetime import datetime, time, timedelta
 import hashlib
 import json
 import logging
@@ -37,6 +37,7 @@ from app.services.simulation import (
     mark_to_market,
     submit_order,
 )
+from app.services.autonomous_selection import latest_autonomous_selection
 
 
 logger = logging.getLogger(__name__)
@@ -455,20 +456,79 @@ def _limit_up_candidate(
         reason="触及涨停区且量价确认，生成影子打板委托" if ready else "打板预案尚未同时满足触板与真实量价确认",
         evidence=evidence,
         dependencies=(
-            SourceDependency(
-                "当日打板预案",
-                plan.updated_at,
-                MAX_PLAN_AGE_SECONDS,
-                require_current_date=False,
-            ),
-            SourceDependency(
-                "量价快照",
-                getattr(volume, "captured_at", None),
-                MAX_SIGNAL_AGE_SECONDS,
-            ),
+            SourceDependency("当日打板预案", plan.updated_at, MAX_PLAN_AGE_SECONDS, require_current_date=False),
+            SourceDependency("量价快照", getattr(volume, "captured_at", None), MAX_SIGNAL_AGE_SECONDS),
             SourceDependency("实时行情", quote_at, MAX_QUOTE_AGE_SECONDS),
         ),
     )
+
+
+def _autonomous_candidates(
+    db: Session,
+    evaluated_at: datetime,
+    volumes: dict[str, VolumePriceSnapshot],
+) -> list[ShadowCandidate]:
+    """Promote a bounded number of all-market candidates after volume proof.
+
+    The independent scan is broader than every product pool, but it remains a
+    discovery layer.  A fresh real minute snapshot and an open market-risk gate
+    are mandatory before a paper order can be created.
+    """
+
+    payload = latest_autonomous_selection(
+        db,
+        trade_date=evaluated_at.date().isoformat(),
+        max_age=timedelta(seconds=MAX_SIGNAL_AGE_SECONDS),
+    )
+    if not payload:
+        return []
+    gate = payload.get("gate") or {}
+    if not bool(gate.get("allow_entry")):
+        return []
+    try:
+        captured_at = datetime.fromisoformat(str(payload.get("captured_at") or ""))
+    except (TypeError, ValueError):
+        return []
+    maximum = min(max(int(gate.get("max_entries") or 0), 0), 3)
+    result: list[ShadowCandidate] = []
+    for item in list(payload.get("items") or []):
+        if len(result) >= maximum:
+            break
+        code = _normalize_code(str(item.get("code") or ""))
+        volume = volumes.get(code)
+        confirmed = _positive_volume(volume)
+        score = float(item.get("score") or 0)
+        reasons = tuple(str(value) for value in item.get("reasons") or [] if str(value).strip())
+        risks = tuple(str(value) for value in item.get("risks") or [] if str(value).strip())
+        result.append(ShadowCandidate(
+            strategy_source="expectation_volume_price",
+            source_kind="autonomous_universe_selection",
+            source_id=int(payload.get("snapshot_id") or 0) or None,
+            source_version=f"a{payload.get('snapshot_id', 0)}:v{getattr(volume, 'id', 0)}",
+            source_at=max(
+                value for value in (captured_at, _local(getattr(volume, "captured_at", None))) if value is not None
+            ),
+            code=code,
+            name=str(item.get("name") or ""),
+            intent="ENTER",
+            side="BUY",
+            ratio=0.08,
+            ready=confirmed,
+            reason=(
+                f"全A独立评分{score:.1f}分，{item.get('style') or '量价候选'}，且获得真实分钟量价确认"
+                if confirmed
+                else f"全A独立评分{score:.1f}分，但尚未获得真实分钟量价确认"
+            ),
+            evidence=reasons + risks + (
+                f"市场闸门={gate.get('reason') or '缺失'}",
+                f"失效条件={item.get('invalidation') or '跌破分时均价并放量转弱'}",
+            ),
+            dependencies=(
+                SourceDependency("全A独立选股快照", captured_at, MAX_SIGNAL_AGE_SECONDS),
+                SourceDependency("分钟量价快照", getattr(volume, "captured_at", None), MAX_SIGNAL_AGE_SECONDS),
+            ),
+        ))
+    return result
 
 
 def _signal_key(account_id: int, candidate: ShadowCandidate, trade_date: str) -> str:
@@ -611,6 +671,7 @@ def _discover_candidates(
     for code, plan in _latest_by_code(plans).items():
         quote_cache[code] = quote_loader(code) or {}
         candidates.append(_limit_up_candidate(plan, volumes.get(code), quote_cache[code]))
+    candidates.extend(_autonomous_candidates(db, evaluated_at, volumes))
     # Exits must reserve the simulated holding before any same-run entry signal.
     candidates.sort(key=lambda item: (0 if item.side == "SELL" else 1, item.code, item.strategy_source))
     return candidates, quote_cache

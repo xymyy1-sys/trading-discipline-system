@@ -172,6 +172,33 @@ type AiTraderRunResult = {
   skipped: Array<{ code: string; reason: string }>
 }
 
+type AutonomousCandidate = {
+  rank: number
+  code: string
+  name: string
+  industry: string
+  score: number
+  style: string
+  change_pct: number
+  volume_ratio: number
+  turnover_rate: number
+  price_vs_vwap: number
+  reasons: string[]
+  risks: string[]
+  next_plan: string
+}
+
+type AutonomousSelection = {
+  trade_date: string
+  captured_at?: string
+  total_scanned: number
+  candidate_count: number
+  scope_note: string
+  method?: string
+  gate: { allow_entry: boolean; reason: string; max_entries?: number }
+  items: AutonomousCandidate[]
+}
+
 type IntradayCollectorStatus = {
   enabled: boolean
   interval_seconds: number
@@ -206,6 +233,7 @@ export function SimulationAiTrader() {
   const [performance, setPerformance] = useState<SimulationPerformance | null>(null)
   const [calibration, setCalibration] = useState<SimulationCalibrationProposal | null>(null)
   const [collector, setCollector] = useState<IntradayCollectorStatus | null>(null)
+  const [selection, setSelection] = useState<AutonomousSelection | null>(null)
   const [loading, setLoading] = useState(false)
   const [running, setRunning] = useState(false)
   const [error, setError] = useState('')
@@ -226,9 +254,10 @@ export function SimulationAiTrader() {
           simulationRequest<SimulationPerformance>(`/api/simulation/accounts/${row.id}/performance`),
           simulationRequest<SimulationCalibrationProposal>(`/api/simulation/accounts/${row.id}/calibration-proposal`).catch(() => null),
           simulationRequest<IntradayCollectorStatus>('/api/intraday-collector/status'),
+          simulationRequest<AutonomousSelection>('/api/simulation/ai-trader/candidates'),
         ])
       })
-      .then(([positionRows, orderRows, equityRows, decisionRows, report, calibrationProposal, collectorStatus]) => {
+      .then(([positionRows, orderRows, equityRows, decisionRows, report, calibrationProposal, collectorStatus, selectionRows]) => {
         setPositions(positionRows)
         setOrders(orderRows)
         setEquities(equityRows)
@@ -236,6 +265,7 @@ export function SimulationAiTrader() {
         setPerformance(report)
         setCalibration(calibrationProposal)
         setCollector(collectorStatus)
+        setSelection(selectionRows)
       })
       .catch(value => setError(value instanceof Error ? value.message : 'AI模拟交易员账本读取失败'))
       .finally(() => setLoading(false))
@@ -302,6 +332,25 @@ export function SimulationAiTrader() {
         <small>账本日：{tradeDate || '等待首个交易日'} · 账户 #{account?.id ?? '--'}</small>
       </section>
       <AiTraderAutomationPanel status={collector} />
+      <section className="simulation-section panel">
+        <div className="simulation-section-title">
+          <div><h4>全市场独立选股与买入闸门</h4><small>{selection?.scope_note || '等待全A实时行情扫描。'}</small></div>
+          <span>{selection?.total_scanned?.toLocaleString() || 0}只扫描 / {selection?.candidate_count || 0}只候选</span>
+        </div>
+        <p className={selection?.gate.allow_entry ? 'plain-text' : 'simulation-unfilled'}>
+          <b>{selection?.gate.allow_entry ? '允许小仓验证' : '当前禁止新开仓'}：</b>{selection?.gate.reason || '等待市场状态证据'}
+        </p>
+        <div className="ai-trader-skip-list">
+          {(selection?.items || []).slice(0, 12).map(item => <article key={item.code}>
+            <b>#{item.rank} {item.name}（{item.code}）· {item.score.toFixed(1)}分</b>
+            <span>{item.industry} · {item.style} · 涨幅{item.change_pct > 0 ? '+' : ''}{item.change_pct.toFixed(2)}%</span>
+            <p>{item.reasons.join('；')}</p>
+            <small>量比{item.volume_ratio.toFixed(2)} · 换手{item.turnover_rate.toFixed(2)}% · 相对分时均价{item.price_vs_vwap > 0 ? '+' : ''}{item.price_vs_vwap.toFixed(2)}%{item.risks.length ? ` · 风险：${item.risks.join('；')}` : ''}</small>
+          </article>)}
+          {!selection?.items?.length && <p className="plain-text">尚无全市场独立候选。这里与观察池、涨停池、抓涨停和断板反包完全解耦。</p>}
+        </div>
+        <footer>{selection?.method || '候选仍需分钟量价确认；候选不等于买入，不为成交而降低纪律。'}</footer>
+      </section>
       <div className="simulation-kpi-grid ai-trader-kpis">
         <SimulationMetric label="虚拟总资产" value={money(totalEquity)} detail={latest ? percent(latest.return_pct, true) : '等待收盘校准'} tone={(latest?.total_pnl ?? 0) >= 0 ? 'up' : 'down'} />
         <SimulationMetric label="可用资金" value={money(account?.cash)} />

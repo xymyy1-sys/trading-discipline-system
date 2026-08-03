@@ -29,6 +29,10 @@ from app.models.trading import (
 )
 from app.schemas.trading import MarketRegimeOut
 from app.services.global_market import global_market_service
+from app.services.autonomous_selection import (
+    autonomous_selection_targets,
+    refresh_autonomous_selection,
+)
 from app.services.intraday_evidence_engine import collect_holding_evidence, collect_tracked_stock_evidence
 from app.services.market_data import MarketDataProvider
 from app.services.market_regime import get_market_regime
@@ -968,6 +972,12 @@ def _run_intraday_collection_once_locked(trigger: str = "manual") -> IntradayCol
         ).all():
             if row.code not in holding_codes:
                 tracked[row.code] = (row.name, "打板预案")
+        # The AI trader owns an independent all-A discovery layer.  Its best
+        # candidates must receive the same real minute evidence as product
+        # pools before they are eligible for any paper order.
+        for code, name in autonomous_selection_targets(db, started.date().isoformat()):
+            if code not in holding_codes:
+                tracked.setdefault(code, (name, "AI全市场独立选股"))
         # Continue collecting a bounded set of unresolved signals even after a
         # position is sold.  The result ledger otherwise cannot distinguish an
         # avoided decline from a sale immediately before a rebound.
@@ -1156,6 +1166,13 @@ async def _collector_iteration() -> None:
         # failures must never interrupt the real evidence sampling path.
         try:
             await asyncio.to_thread(run_simulation_matching_once)
+            from app.services.simulation_notifications import notify_ai_trader_fills
+
+            notify_db = SessionLocal()
+            try:
+                await asyncio.to_thread(notify_ai_trader_fills, notify_db)
+            finally:
+                notify_db.close()
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -1197,7 +1214,19 @@ async def _collector_iteration() -> None:
         and _close_shadow_equity_date != now.date().isoformat()
     ):
         result = await asyncio.to_thread(run_simulation_shadow_equity_once, now=now)
-        _record_close_shadow_equity_completion(result, now.date().isoformat())
+        if _record_close_shadow_equity_completion(result, now.date().isoformat()):
+            from app.services.simulation_notifications import notify_ai_trader_close_review
+
+            notify_db = SessionLocal()
+            try:
+                await asyncio.to_thread(
+                    notify_ai_trader_close_review,
+                    notify_db,
+                    now.date().isoformat(),
+                    now=now,
+                )
+            finally:
+                notify_db.close()
 
 
 async def _collector_loop() -> None:
@@ -1219,6 +1248,15 @@ async def _market_regime_loop() -> None:
     while True:
         if COLLECTOR_ENABLED and _is_market_regime_watch_time():
             await asyncio.to_thread(run_market_regime_collection_once, "scheduler")
+            db = SessionLocal()
+            try:
+                await asyncio.to_thread(refresh_autonomous_selection, db)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                db.rollback()
+            finally:
+                db.close()
         await asyncio.sleep(MARKET_REGIME_INTERVAL_SECONDS)
 
 

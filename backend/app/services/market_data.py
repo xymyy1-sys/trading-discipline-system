@@ -2375,7 +2375,9 @@ class MarketDataProvider:
             # ValueError.  Security code (f12) is stable for the whole request.
             "fid": "f12",
             "fs": "m:0+t:6,m:0+t:80,m:1+t:2,m:1+t:23,m:0+t:81+s:2048",
-            "fields": "f12,f13,f14,f2,f3,f5,f6,f8,f10,f124",
+            # f100=行业，f62/f184=东方财富订单流方向估算。后两项不是
+            # 账户真实流水，只作为候选排序证据，绝不能单独生成交易动作。
+            "fields": "f12,f13,f14,f2,f3,f5,f6,f8,f10,f62,f100,f124,f184",
         }
         payload, host = _get_json_from_hosts("/api/qt/clist/get", params, timeout=10)
         data = payload.get("data") or {}

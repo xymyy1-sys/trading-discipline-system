@@ -36,6 +36,7 @@ from app.services.simulation import (
 )
 from app.services.simulation_calibration import simulation_calibration_proposal
 from app.services.simulation_shadow import get_or_create_ai_trader_account, run_shadow_experiments
+from app.services.autonomous_selection import latest_autonomous_selection, refresh_autonomous_selection
 
 
 router = APIRouter(prefix="/simulation", tags=["simulation"])
@@ -73,6 +74,27 @@ def run_ai_trader_once(db: Session = Depends(get_db)) -> dict:
         "duplicate_count": len(result.duplicate_signal_keys),
         "skipped": result.skipped,
         "duplicate_signal_keys": result.duplicate_signal_keys,
+    }
+
+
+@router.get("/ai-trader/candidates")
+def ai_trader_candidates(
+    refresh: bool = False,
+    db: Session = Depends(get_db),
+) -> dict:
+    """Expose the independent all-A discovery list and its market gate."""
+    if refresh:
+        return refresh_autonomous_selection(db, force=True)
+    payload = latest_autonomous_selection(db)
+    if payload is not None:
+        return payload
+    return {
+        "trade_date": "",
+        "total_scanned": 0,
+        "candidate_count": 0,
+        "gate": {"allow_entry": False, "reason": "等待交易时段生成全A独立扫描"},
+        "items": [],
+        "scope_note": "候选范围为全A实时行情，不依赖观察池或涨停类模块。",
     }
 
 
