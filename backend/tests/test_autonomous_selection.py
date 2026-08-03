@@ -51,3 +51,16 @@ def test_rank_diversifies_industry_and_applies_small_forward_feedback():
     )
     assert sum(item["industry"] == "测试行业" for item in result) <= 2
     assert any(item["code"] == "000001" and item["feedback_adjustment"] == 5 for item in result)
+
+
+def test_existing_screens_are_bounded_traceable_evidence_not_a_direct_buy_signal():
+    rows = [quote("600001", "多源候选", change=-4.0, volume_ratio=0.6, turnover=2.0)]
+    result = rank_full_market_rows(
+        rows,
+        reference_signals={"600001": ["断板反包", "抓涨停"]},
+        source_feedback={"断板反包": {"score_adjustment": 2}, "抓涨停": {"score_adjustment": -1}},
+        minimum_score=30,
+    )
+    assert result[0]["source_tags"] == ["断板反包", "抓涨停"]
+    assert sum(item["base"] + item["learned"] for item in result[0]["source_contributions"]) == 12
+    assert any("不单独触发买入" in reason for reason in result[0]["reasons"])

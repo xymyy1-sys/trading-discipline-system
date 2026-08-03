@@ -186,6 +186,8 @@ type AutonomousCandidate = {
   reasons: string[]
   risks: string[]
   next_plan: string
+  source_tags: string[]
+  source_contributions: Array<{ source: string; base: number; learned: number }>
 }
 
 type AutonomousSelection = {
@@ -197,6 +199,8 @@ type AutonomousSelection = {
   method?: string
   gate: { allow_entry: boolean; reason: string; max_entries?: number }
   items: AutonomousCandidate[]
+  reference_sources?: Record<string, { status: string; matched_count: number }>
+  source_feedback?: Record<string, { sample_count: number; mean_return_pct: number; score_adjustment: number }>
 }
 
 type IntradayCollectorStatus = {
@@ -334,7 +338,7 @@ export function SimulationAiTrader() {
       <AiTraderAutomationPanel status={collector} />
       <section className="simulation-section panel">
         <div className="simulation-section-title">
-          <div><h4>全市场独立选股与买入闸门</h4><small>{selection?.scope_note || '等待全A实时行情扫描。'}</small></div>
+          <div><h4>全市场多源选股与买入闸门</h4><small>{selection?.scope_note || '等待全A实时行情扫描。'}</small></div>
           <span>{selection?.total_scanned?.toLocaleString() || 0}只扫描 / {selection?.candidate_count || 0}只候选</span>
         </div>
         <p className={selection?.gate.allow_entry ? 'plain-text' : 'simulation-unfilled'}>
@@ -344,11 +348,13 @@ export function SimulationAiTrader() {
           {(selection?.items || []).slice(0, 12).map(item => <article key={item.code}>
             <b>#{item.rank} {item.name}（{item.code}）· {item.score.toFixed(1)}分</b>
             <span>{item.industry} · {item.style} · 涨幅{item.change_pct > 0 ? '+' : ''}{item.change_pct.toFixed(2)}%</span>
+            {!!item.source_tags?.length && <span>来源共振：{item.source_tags.join(' + ')}</span>}
             <p>{item.reasons.join('；')}</p>
             <small>量比{item.volume_ratio.toFixed(2)} · 换手{item.turnover_rate.toFixed(2)}% · 相对分时均价{item.price_vs_vwap > 0 ? '+' : ''}{item.price_vs_vwap.toFixed(2)}%{item.risks.length ? ` · 风险：${item.risks.join('；')}` : ''}</small>
           </article>)}
-          {!selection?.items?.length && <p className="plain-text">尚无全市场独立候选。这里与观察池、涨停池、抓涨停和断板反包完全解耦。</p>}
+          {!selection?.items?.length && <p className="plain-text">尚无全市场候选。系统仍会扫描全A；抓涨停、断板反包等模块只提供辅助证据，不会为了成交而降低门槛。</p>}
         </div>
+        <p className="plain-text">来源反馈：{Object.entries(selection?.source_feedback || {}).map(([name, value]) => `${name} ${value.sample_count}笔 / 均值${value.mean_return_pct >= 0 ? '+' : ''}${value.mean_return_pct.toFixed(2)}% / 调分${value.score_adjustment >= 0 ? '+' : ''}${value.score_adjustment.toFixed(1)}`).join('；') || '尚无足够闭环成交，暂不自动调整来源权重。'}</p>
         <footer>{selection?.method || '候选仍需分钟量价确认；候选不等于买入，不为成交而降低纪律。'}</footer>
       </section>
       <div className="simulation-kpi-grid ai-trader-kpis">

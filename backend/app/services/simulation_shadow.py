@@ -500,6 +500,7 @@ def _autonomous_candidates(
         score = float(item.get("score") or 0)
         reasons = tuple(str(value) for value in item.get("reasons") or [] if str(value).strip())
         risks = tuple(str(value) for value in item.get("risks") or [] if str(value).strip())
+        source_tags = tuple(str(value) for value in item.get("source_tags") or [] if str(value).strip())
         result.append(ShadowCandidate(
             strategy_source="expectation_volume_price",
             source_kind="autonomous_universe_selection",
@@ -519,7 +520,7 @@ def _autonomous_candidates(
                 if confirmed
                 else f"全A独立评分{score:.1f}分，但尚未获得真实分钟量价确认"
             ),
-            evidence=reasons + risks + (
+            evidence=reasons + risks + tuple(f"来源标签={value}" for value in source_tags) + (
                 f"市场闸门={gate.get('reason') or '缺失'}",
                 f"失效条件={item.get('invalidation') or '跌破分时均价并放量转弱'}",
             ),
