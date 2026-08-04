@@ -79,6 +79,8 @@ class ShadowCandidate:
     reason: str
     evidence: tuple[str, ...] = ()
     dependencies: tuple[SourceDependency, ...] = ()
+    invalidation_price: float = 0.0
+    risk_budget_ratio: float = 0.03
 
 
 @dataclass
@@ -374,6 +376,7 @@ def _execution_candidate(row: PositionExecutionState) -> ShadowCandidate | None:
             reason="持仓执行状态给出明确退出/减仓信号" if _quality_ok(row.data_quality) else "持仓执行信号不是实时可信数据",
             evidence=evidence + (f"执行状态={state}", f"动作={action}"),
             dependencies=state_dependency,
+            invalidation_price=max(float(row.hard_stop_price or 0), float(row.structure_stop_price or 0)),
         )
     if entry_signal and not prohibited_entry:
         add_ratio = float(row.recommended_position_ratio or 0)
@@ -393,6 +396,7 @@ def _execution_candidate(row: PositionExecutionState) -> ShadowCandidate | None:
             reason="持仓执行状态给出明确加仓确认" if _quality_ok(row.data_quality) else "持仓执行信号不是实时可信数据",
             evidence=evidence + (f"执行状态={state}", f"动作={action}"),
             dependencies=state_dependency,
+            invalidation_price=max(float(row.hard_stop_price or 0), float(row.structure_stop_price or 0)),
         )
     return None
 
@@ -447,6 +451,7 @@ def _expectation_candidate(
             reason=f"正预期差与真实量价确认共振，按{position_tier}{entry_ratio:.0%}执行" if confirmed else "正预期差尚未获得真实量价确认",
             evidence=evidence + (f"预期差={expectation.expectation_gap_score}", f"仓位等级={position_tier}"),
             dependencies=dependencies,
+            invalidation_price=float(getattr(volume, "vwap", 0) or 0) * 0.99,
         )
     confirmed = _negative_volume(volume)
     return ShadowCandidate(
@@ -512,6 +517,7 @@ def _limit_up_candidate(
             SourceDependency("量价快照", getattr(volume, "captured_at", None), MAX_SIGNAL_AGE_SECONDS),
             SourceDependency("实时行情", quote_at, MAX_QUOTE_AGE_SECONDS),
         ),
+        invalidation_price=float(getattr(volume, "vwap", 0) or 0) * 0.99,
     )
 
 
@@ -587,6 +593,7 @@ def _autonomous_candidates(
                 SourceDependency("全A独立选股快照", captured_at, MAX_SIGNAL_AGE_SECONDS),
                 SourceDependency("分钟量价快照", getattr(volume, "captured_at", None), MAX_SIGNAL_AGE_SECONDS),
             ),
+            invalidation_price=float(getattr(volume, "vwap", 0) or 0) * 0.99,
         ))
 
     ready_normal = any(candidate.ready for candidate in result)
@@ -644,6 +651,8 @@ def _autonomous_candidates(
                 SourceDependency("全A探索候选快照", captured_at, MAX_SIGNAL_AGE_SECONDS),
                 SourceDependency("探索分钟量价快照", getattr(volume, "captured_at", None), MAX_SIGNAL_AGE_SECONDS),
             ),
+            invalidation_price=float(getattr(volume, "vwap", 0) or 0) * 0.99,
+            risk_budget_ratio=0.02,
         ))
         break
     return result
@@ -727,6 +736,34 @@ def _has_open_order(db: Session, account_id: int, code: str, side: str) -> bool:
 def _entry_quantity(account: SimulationAccount, price: float, ratio: float) -> int:
     budget = max(float(account.cash or 0), 0) * min(max(ratio, 0.01), MAX_ENTRY_POSITION_RATIO)
     return max(int(math.floor(budget / max(price, 0.01) / 100) * 100), 0)
+
+
+def _risk_adjusted_entry_ratio(
+    price: float,
+    conviction_ratio: float,
+    invalidation_price: float,
+    risk_budget_ratio: float,
+) -> tuple[float, float, bool]:
+    """Cap conviction sizing by the loss at the frozen invalidation price.
+
+    When a strategy cannot provide a numeric invalidation level we assume an
+    8% adverse move rather than pretending the trade has no downside.  This
+    keeps high-conviction sizing meaningful while bounding one-trade damage.
+    """
+    inferred = not (price > 0 and 0 < invalidation_price < price)
+    stop_distance_ratio = (
+        (price - invalidation_price) / price
+        if not inferred
+        else 0.08
+    )
+    stop_distance_ratio = min(max(stop_distance_ratio, 0.01), 0.30)
+    risk_cap = min(max(risk_budget_ratio, 0.005), 0.05) / stop_distance_ratio
+    effective = min(
+        max(conviction_ratio, 0.01),
+        max(risk_cap, 0.01),
+        MAX_ENTRY_POSITION_RATIO,
+    )
+    return effective, stop_distance_ratio, inferred
 
 
 def _exit_quantity(position: SimulationPosition, ratio: float, trade_date: str) -> int:
@@ -858,7 +895,21 @@ def run_shadow_experiments(
                 db.commit()
                 result.skipped.append({"code": candidate.code, "reason": decision.reason})
                 continue
-            quantity = _entry_quantity(account, _safe_float(quote.get("price")), candidate.ratio)
+            entry_price = _safe_float(quote.get("price"))
+            effective_ratio, stop_distance_ratio, inferred_stop = _risk_adjusted_entry_ratio(
+                entry_price,
+                candidate.ratio,
+                candidate.invalidation_price,
+                candidate.risk_budget_ratio,
+            )
+            quantity = _entry_quantity(account, entry_price, effective_ratio)
+            sizing_reason = (
+                f"仓位按置信度上限{candidate.ratio:.0%}与单笔风险预算{candidate.risk_budget_ratio:.0%}共同计算，"
+                f"失效距离{stop_distance_ratio:.2%}，实际资金上限{effective_ratio:.0%}"
+                + ("（缺少有效数值止损，按8%保守距离估算）" if inferred_stop else f"（失效价{candidate.invalidation_price:.2f}）")
+            )
+            decision.reason = f"{candidate.reason}；{sizing_reason}"
+            decision.evidence_json = json.dumps(list(candidate.evidence) + [sizing_reason], ensure_ascii=False)
             if quantity <= 0:
                 decision.status = "SKIPPED"
                 decision.reason = "按仓位上限和当前价格计算不足一手，跳过信号"
@@ -887,7 +938,8 @@ def run_shadow_experiments(
                 continue
 
         decision.quantity = quantity
-        note = f"shadow:{decision.signal_key};rule={RULE_VERSION};reason={candidate.reason}"
+        order_reason = decision.reason or candidate.reason
+        note = f"shadow:{decision.signal_key};rule={RULE_VERSION};reason={order_reason}"
         order = submit_order(
             db,
             account,
@@ -907,7 +959,7 @@ def run_shadow_experiments(
         if decision is not None:
             decision.order_id = order.id
             decision.status = "ORDER_CREATED" if order.status in {"OPEN", "PENDING"} else "ORDER_REJECTED"
-            decision.reason = candidate.reason if order.status in {"OPEN", "PENDING"} else order.reject_reason
+            decision.reason = order_reason if order.status in {"OPEN", "PENDING"} else order.reject_reason
             db.add(decision)
             db.commit()
         result.order_ids.append(order.id)

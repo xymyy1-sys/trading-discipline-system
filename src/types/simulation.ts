@@ -161,6 +161,10 @@ export interface SimulationPerformance {
   total_realized_pnl: number
   profit_loss_ratio: number
   maximum_drawdown_pct: number
+  formal: SimulationPerformanceSlice
+  exploration: SimulationPerformanceSlice
+  unclassified: SimulationPerformanceSlice
+  by_experiment_class: SimulationPerformanceSlice[]
   by_strategy: SimulationPerformanceSlice[]
   by_market_regime: SimulationPerformanceSlice[]
   by_expectation_gap: SimulationPerformanceSlice[]

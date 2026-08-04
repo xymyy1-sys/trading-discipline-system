@@ -25,6 +25,7 @@ from app.models.trading import (
     SimulationFill,
     SimulationOrder,
     SimulationPosition,
+    SimulationShadowDecision,
     SimulationTradeLot,
     VolumePriceSnapshot,
 )
@@ -954,11 +955,32 @@ def performance_report(db: Session, account: SimulationAccount) -> dict[str, Any
         row.id: row for row in db.query(SimulationEvidenceSnapshot)
         .filter(SimulationEvidenceSnapshot.id.in_(evidence_ids or [0])).all()
     }
+    entry_order_ids = [int(row.entry_order_id) for row in closed_trades if row.entry_order_id]
+    decisions = {
+        int(row.order_id): row
+        for row in db.query(SimulationShadowDecision)
+        .filter(
+            SimulationShadowDecision.account_id == account.id,
+            SimulationShadowDecision.order_id.in_(entry_order_ids or [0]),
+        )
+        .order_by(SimulationShadowDecision.id.desc())
+        .all()
+        if row.order_id is not None
+    }
+    experiment_groups: dict[str, list[SimulationClosedTrade]] = defaultdict(list)
     by_strategy: dict[str, list[SimulationClosedTrade]] = defaultdict(list)
     by_regime: dict[str, list[SimulationClosedTrade]] = defaultdict(list)
     by_gap: dict[str, list[SimulationClosedTrade]] = defaultdict(list)
     for closed_trade in closed_trades:
         snapshot = evidence.get(closed_trade.entry_decision_evidence_snapshot_id)
+        decision = decisions.get(int(closed_trade.entry_order_id or 0))
+        if decision is None:
+            experiment_class = "unclassified"
+        elif decision.source_kind == "autonomous_exploration_sample":
+            experiment_class = "exploration"
+        else:
+            experiment_class = "formal"
+        experiment_groups[experiment_class].append(closed_trade)
         by_strategy[closed_trade.strategy_source or "unknown"].append(closed_trade)
         by_regime[(snapshot.market_regime if snapshot else "UNKNOWN") or "UNKNOWN"].append(closed_trade)
         by_gap[(snapshot.expectation_gap_band if snapshot else "unknown") or "unknown"].append(closed_trade)
@@ -977,6 +999,13 @@ def performance_report(db: Session, account: SimulationAccount) -> dict[str, Any
         "total_realized_pnl": overall["total_realized_pnl"],
         "profit_loss_ratio": overall["profit_loss_ratio"],
         "maximum_drawdown_pct": round(maximum_drawdown, 4),
+        "formal": _slice("formal", experiment_groups.get("formal", [])),
+        "exploration": _slice("exploration", experiment_groups.get("exploration", [])),
+        "unclassified": _slice("unclassified", experiment_groups.get("unclassified", [])),
+        "by_experiment_class": [
+            _slice(key, experiment_groups.get(key, []))
+            for key in ("formal", "exploration", "unclassified")
+        ],
         "by_strategy": [_slice(key, value) for key, value in sorted(by_strategy.items())],
         "by_market_regime": [_slice(key, value) for key, value in sorted(by_regime.items())],
         "by_expectation_gap": [_slice(key, value) for key, value in sorted(by_gap.items())],

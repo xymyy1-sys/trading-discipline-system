@@ -16,9 +16,24 @@ from app.services.simulation_shadow import (
     RULE_VERSION,
     _autonomous_position_ratio,
     _entry_quantity,
+    _risk_adjusted_entry_ratio,
     mark_shadow_equity_after_close,
     run_shadow_experiments,
 )
+
+
+def test_risk_budget_caps_high_conviction_position():
+    ratio, distance, inferred = _risk_adjusted_entry_ratio(10.0, 0.70, 9.0, 0.03)
+    assert round(ratio, 4) == 0.30
+    assert round(distance, 4) == 0.10
+    assert inferred is False
+
+
+def test_missing_stop_uses_conservative_distance():
+    ratio, distance, inferred = _risk_adjusted_entry_ratio(10.0, 0.70, 0.0, 0.03)
+    assert round(ratio, 4) == 0.375
+    assert distance == 0.08
+    assert inferred is True
 
 
 def _quote(price: float, when: datetime, **extra):

@@ -565,6 +565,9 @@ def test_partial_exits_create_one_closed_trade_attributed_to_entry_strategy(db_s
     assert report["sell_count"] == 1
     assert report["by_strategy"][0]["key"] == "limit_up"
     assert report["by_strategy"][0]["closed_trade_count"] == 1
+    assert report["unclassified"]["closed_trade_count"] == 1
+    assert report["formal"]["closed_trade_count"] == 0
+    assert report["exploration"]["closed_trade_count"] == 0
 
 
 def test_duplicate_evidence_content_hash_is_reproducible(db_session):

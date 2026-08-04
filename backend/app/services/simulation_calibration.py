@@ -45,11 +45,12 @@ _SOURCE_REQUIREMENTS: dict[str, tuple[tuple[str, str, str, str, int], ...]] = {
         ("volume_price_json", "volume_price_snapshot_id", "volume_price_captured_at", "captured_at", 15 * 60),
     ),
 }
-_SHADOW_SOURCE_KIND = {
-    "expectation_volume_price": "expectation_volume_pair",
-    "holding_execution": "position_execution_state",
-    "limit_up": "limit_up_plan_confirmation",
+_FORMAL_SHADOW_SOURCE_KINDS = {
+    "expectation_volume_price": {"expectation_volume_pair", "autonomous_universe_selection"},
+    "holding_execution": {"position_execution_state"},
+    "limit_up": {"limit_up_plan_confirmation"},
 }
+_EXPLORATION_SOURCE_KINDS = {"autonomous_exploration_sample"}
 
 
 def _quality_is_usable(value: str | None) -> bool:
@@ -195,7 +196,7 @@ def _shadow_provenance_reason(
     strategy = str(row.strategy_source or "")
     if decision.strategy_source != strategy:
         return "自动影子策略来源不匹配"
-    if decision.source_kind != _SHADOW_SOURCE_KIND.get(strategy):
+    if decision.source_kind not in _FORMAL_SHADOW_SOURCE_KINDS.get(strategy, set()):
         return "自动影子信号类型与策略不匹配"
     if _normalized_code(decision.code) != _normalized_code(row.code):
         return "自动影子决策标的不匹配"
@@ -340,10 +341,14 @@ def simulation_calibration_proposal(
         if not candidate_generation_allowed:
             exclusion_counts["手工账户仅展示统计，不进入自动规则校准"] += 1
             continue
+        shadow_decision = shadow_decisions.get(int(row.entry_order_id or 0))
+        if shadow_decision is not None and shadow_decision.source_kind in _EXPLORATION_SOURCE_KINDS:
+            exclusion_counts["探索交易仅独立统计，不参与正式策略校准"] += 1
+            continue
         provenance_reason = _shadow_provenance_reason(
             row,
             snapshot,
-            shadow_decisions.get(int(row.entry_order_id or 0)),
+            shadow_decision,
         )
         if provenance_reason is not None:
             exclusion_counts[provenance_reason] += 1

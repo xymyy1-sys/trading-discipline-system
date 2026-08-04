@@ -210,6 +210,10 @@ class SimulationPerformanceOut(BaseModel):
     total_realized_pnl: float
     profit_loss_ratio: float
     maximum_drawdown_pct: float
+    formal: SimulationPerformanceSlice
+    exploration: SimulationPerformanceSlice
+    unclassified: SimulationPerformanceSlice
+    by_experiment_class: list[SimulationPerformanceSlice]
     by_strategy: list[SimulationPerformanceSlice]
     by_market_regime: list[SimulationPerformanceSlice]
     by_expectation_gap: list[SimulationPerformanceSlice]

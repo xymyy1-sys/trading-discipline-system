@@ -309,10 +309,11 @@ export function SimulationAiTrader() {
   const todayOrders = orders.filter(item => !tradeDate || item.trade_date === tradeDate)
   const createdOrders = todayOrders.filter(item => item.client_note.includes('shadow:') || item.decision_evidence_snapshot_id)
   const skippedReasons = todayDecisions.filter(item => item.status.toUpperCase() === 'SKIPPED').slice(0, 6)
-  const sampleEnough = (performance?.closed_trade_count ?? 0) >= 20
+  const formalPerformance = performance?.formal
+  const sampleEnough = (formalPerformance?.closed_trade_count ?? 0) >= 20
   const policy = sampleEnough
-    ? `已有 ${performance?.closed_trade_count ?? 0} 笔闭环样本，后续重点看回撤是否收敛、盈亏比是否稳定。`
-    : `当前闭环样本 ${performance?.closed_trade_count ?? 0} 笔，不足以外推真实收益；AI交易员只允许小仓位前向采样。`
+    ? `已有 ${formalPerformance?.closed_trade_count ?? 0} 笔正式策略闭环样本，后续重点看回撤是否收敛、盈亏比是否稳定。`
+    : `当前正式策略闭环样本 ${formalPerformance?.closed_trade_count ?? 0} 笔，探索样本 ${performance?.exploration.closed_trade_count ?? 0} 笔；两者严格分账，探索结果不参与正式参数校准。`
 
   return <section className="simulation-page ai-trader-page">
     <SimulationNotice dataAsOf={latest?.captured_at || account?.updated_at} />
@@ -367,8 +368,8 @@ export function SimulationAiTrader() {
         <SimulationMetric label="今日盈亏" value={money(latest?.daily_pnl)} tone={(latest?.daily_pnl ?? 0) >= 0 ? 'up' : 'down'} />
         <SimulationMetric label="累计盈亏" value={money(latest?.total_pnl ?? (totalEquity == null || !account ? null : totalEquity - account.initial_cash))} tone={(latest?.total_pnl ?? 0) >= 0 ? 'up' : 'down'} />
         <SimulationMetric label="最大回撤" value={latest ? percent(Math.abs(latest.drawdown_pct)) : '--'} tone="down" />
-        <SimulationMetric label="闭环胜率" value={performance ? percent(performance.win_rate) : '--'} detail={`${performance?.closed_trade_count ?? 0}笔闭环`} />
-        <SimulationMetric label="盈亏比" value={performance ? numberValue(performance.profit_loss_ratio) : '--'} />
+        <SimulationMetric label="正式策略胜率" value={formalPerformance ? percent(formalPerformance.win_rate) : '--'} detail={`${formalPerformance?.closed_trade_count ?? 0}笔正式 / ${performance?.exploration.closed_trade_count ?? 0}笔探索`} />
+        <SimulationMetric label="正式策略盈亏比" value={formalPerformance ? numberValue(formalPerformance.profit_loss_ratio) : '--'} />
       </div>
       <AiTraderFeedbackPanel decisions={todayDecisions} orders={todayOrders} performance={performance} calibration={calibration} />
       <section className="simulation-section panel">
@@ -416,7 +417,8 @@ type AiTraderStrategyGrade = {
 }
 
 function gradeAiTraderStrategy(performance: SimulationPerformance | null): AiTraderStrategyGrade {
-  const samples = performance?.closed_trade_count ?? 0
+  const formal = performance?.formal
+  const samples = formal?.closed_trade_count ?? 0
   if (!performance || samples === 0) {
     return {
       score: 50,
@@ -425,8 +427,8 @@ function gradeAiTraderStrategy(performance: SimulationPerformance | null): AiTra
       reasons: ['尚无完整买入—卖出闭环，当前评分只代表规则完整度，不代表收益能力。'],
     }
   }
-  const winContribution = Math.min(24, Math.max(0, performance.win_rate) * 0.32)
-  const ratioContribution = Math.min(18, Math.max(0, performance.profit_loss_ratio - 0.7) * 12)
+  const winContribution = Math.min(24, Math.max(0, formal?.win_rate ?? 0) * 0.32)
+  const ratioContribution = Math.min(18, Math.max(0, (formal?.profit_loss_ratio ?? 0) - 0.7) * 12)
   const drawdownPenalty = Math.min(30, Math.abs(performance.maximum_drawdown_pct) * 1.5)
   const sampleContribution = Math.min(8, samples * 0.4)
   let score = Math.round(42 + winContribution + ratioContribution + sampleContribution - drawdownPenalty)
@@ -438,7 +440,7 @@ function gradeAiTraderStrategy(performance: SimulationPerformance | null): AiTra
     label,
     tone,
     reasons: [
-      `闭环样本 ${samples} 笔，胜率 ${percent(performance.win_rate)}，盈亏比 ${numberValue(performance.profit_loss_ratio)}。`,
+      `正式闭环 ${samples} 笔，胜率 ${percent(formal?.win_rate)}，盈亏比 ${numberValue(formal?.profit_loss_ratio)}；探索样本 ${performance.exploration.closed_trade_count} 笔不参与评分。`,
       `历史最大回撤 ${percent(Math.abs(performance.maximum_drawdown_pct))}；评分会惩罚大回撤，并对不足20笔的样本封顶。`,
     ],
   }
