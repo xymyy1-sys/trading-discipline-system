@@ -35,6 +35,9 @@ from app.schemas.simulation import SimulationAccountCreate, SimulationOrderCreat
 QuoteLoader = Callable[[str], dict[str, Any]]
 MAX_MATCH_QUOTE_AGE_SECONDS = 120
 MAX_FUTURE_CLOCK_SKEW_SECONDS = 5
+AUTOMATED_ACCOUNT_TYPES = {"shadow", "automation", "automated"}
+BASE_MARKET_SLIPPAGE_BPS = 3.0
+MAX_DEPTH_IMPACT_BPS = 20.0
 
 
 def _local_now() -> datetime:
@@ -376,6 +379,55 @@ def _commission(account: SimulationAccount, gross: float) -> float:
     return round(max(account.minimum_commission, gross * account.commission_rate), 2)
 
 
+def _execution_price(
+    account: SimulationAccount,
+    order: SimulationOrder,
+    quote: dict[str, Any],
+    reference_price: float,
+) -> tuple[float | None, str]:
+    """Return a conservative executable price for automated paper orders.
+
+    Manual simulation keeps its historical last-price convention. Automated
+    accounts cross the visible best quote and pay a small base/participation
+    impact. A limit order remains pending when that executable price violates
+    its limit, rather than receiving an optimistic fill.
+    """
+    if str(account.account_type or "").lower() not in AUTOMATED_ACCOUNT_TYPES:
+        return reference_price, "手工模拟按下一分钟真实行情价撮合"
+    if order.side == "BUY":
+        touch = _safe_float(
+            quote.get("ask1_price") or quote.get("ask_price") or quote.get("sell1_price")
+        )
+        visible = _safe_float(
+            quote.get("ask1_volume") or quote.get("ask_volume") or quote.get("sell_volume")
+        )
+        touch_price = max(reference_price, touch) if touch > 0 else reference_price
+        direction = 1
+    else:
+        touch = _safe_float(
+            quote.get("bid1_price") or quote.get("bid_price") or quote.get("buy1_price")
+        )
+        visible = _safe_float(
+            quote.get("bid1_volume") or quote.get("bid_volume") or quote.get("buy_volume")
+        )
+        touch_price = min(reference_price, touch) if touch > 0 else reference_price
+        direction = -1
+    participation = min(order.quantity / visible, 2.0) if visible > 0 else 1.0
+    impact_bps = BASE_MARKET_SLIPPAGE_BPS + min(participation * 10.0, MAX_DEPTH_IMPACT_BPS)
+    executable = _tick(touch_price * (1 + direction * impact_bps / 10_000))
+    if order.order_type == "LIMIT":
+        violates_limit = (
+            order.side == "BUY" and executable > order.limit_price + 0.005
+        ) or (
+            order.side == "SELL" and executable < order.limit_price - 0.005
+        )
+        if violates_limit:
+            return None, f"盘口与冲击成本后的可成交价{executable:.2f}未满足限价{order.limit_price:.2f}"
+    return executable, (
+        f"自动模拟按下一分钟真实行情与盘口触价撮合，计入{impact_bps:.1f}基点滑点/冲击成本"
+    )
+
+
 def _open_trade_lots(db: Session, account_id: int, code: str) -> list[SimulationTradeLot]:
     return (
         db.query(SimulationTradeLot)
@@ -604,6 +656,16 @@ def _evaluate_order(
             order.reject_reason = ""
             return order
 
+    execution_price, fill_model = _execution_price(account, order, quote, price)
+    if execution_price is None:
+        order.status = "OPEN"
+        order.reject_reason = fill_model
+        return order
+    if upper > 0 and execution_price >= upper - 0.005 and order.side == "BUY":
+        return _reject(order, f"滑点后触及涨停价 {upper:.2f}，模拟盘保守按不可成交处理", evaluated_at)
+    if lower > 0 and execution_price <= lower + 0.005 and order.side == "SELL":
+        return _reject(order, f"滑点后触及跌停价 {lower:.2f}，模拟盘保守按不可成交处理", evaluated_at)
+    price = execution_price
     gross = round(price * order.quantity, 2)
     commission = _commission(account, gross)
     transfer_fee = round(gross * account.transfer_fee_rate, 2)
@@ -653,6 +715,8 @@ def _evaluate_order(
     order.filled_quantity = order.quantity
     order.average_fill_price = price
     order.reject_reason = ""
+    if fill_model not in order.client_note:
+        order.client_note = f"{order.client_note};fill_model={fill_model}"[:1000]
     fill = SimulationFill(
         order_id=order.id,
         account_id=account.id,

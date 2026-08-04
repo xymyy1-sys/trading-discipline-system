@@ -72,6 +72,36 @@ def test_simulation_account_api(client):
     assert listed.json()[0]["name"] == "纪律模拟盘"
 
 
+def test_automated_account_pays_visible_spread_and_impact(db_session):
+    account = create_account(db_session, SimulationAccountCreate(initial_cash=100000))
+    account.account_type = "shadow"
+    account.automation_key = f"slippage-test-{account.id}"
+    db_session.add(account)
+    db_session.commit()
+    submitted = datetime(2026, 7, 15, 10, 0)
+    order = submit_order(
+        db_session,
+        account,
+        _payload("BUY"),
+        now=submitted,
+        quote_loader=lambda _: _quote(10, when=submitted),
+    )
+    filled = _process(
+        db_session,
+        account,
+        submitted + timedelta(minutes=1),
+        _quote(
+            10,
+            when=submitted + timedelta(minutes=1),
+            ask1_price=10.02,
+            ask1_volume=100,
+        ),
+    )
+    assert filled.status == "FILLED"
+    assert filled.average_fill_price == 10.03
+    assert "滑点/冲击成本" in filled.client_note
+
+
 def test_submission_outside_continuous_auction_is_rejected_but_keeps_evidence(db_session):
     account = create_account(db_session, SimulationAccountCreate(initial_cash=100000))
     before_open = datetime(2026, 7, 15, 9, 20)
