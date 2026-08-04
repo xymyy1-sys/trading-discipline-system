@@ -122,11 +122,16 @@ def test_minute_targets_include_bounded_deduplicated_exploration_universe(monkey
             {"code": "600001", "name": "重复候选"},
             *({"code": f"000{index:03d}", "name": f"探索{index}"} for index in range(1, 25)),
         ],
+        "sector_core_watch_items": [
+            {"code": "600001", "name": "重复核心"},
+            {"code": "601398", "name": "强板块核心", "sector": "银行", "status": "量价跟踪"},
+        ],
     }
     monkeypatch.setattr(autonomous_selection, "latest_autonomous_selection", lambda *args, **kwargs: payload)
 
     targets = autonomous_selection_targets(object(), "2026-08-04")
 
     assert targets[0] == ("600001", "正式候选")
-    assert len(targets) == 20  # 1 formal + first 20 exploration rows - one duplicate
+    assert ("601398", "强板块核心") in targets
+    assert len(targets) == 21  # 1 formal + first 20 exploration rows - one duplicate + one core
     assert len({code for code, _ in targets}) == len(targets)

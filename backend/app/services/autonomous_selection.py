@@ -354,7 +354,8 @@ def _sector_coverage_audit(
             elif not (-1.5 <= deviation <= 3.2):
                 reasons.append(f"相对分时均价{deviation:+.2f}%不满足承接/防追高条件")
             if not reasons:
-                reasons.append("综合评分或行业去重后未进入前排")
+                status = "量价跟踪"
+                reasons.append("已纳入分钟量价跟踪；综合评分或行业去重尚未进入交易候选")
         first = contexts[0] if contexts else {}
         details.append({
             "code": code,
@@ -372,7 +373,7 @@ def _sector_coverage_audit(
         status_counts[item["status"]] = status_counts.get(item["status"], 0) + 1
     return {
         "strong_sector_core_count": len(details),
-        "covered_count": sum(1 for item in details if item["status"] in {"正式候选", "探索候选"}),
+        "covered_count": sum(1 for item in details if item["status"] in {"正式候选", "探索候选", "量价跟踪"}),
         "status_counts": status_counts,
         "items": details,
         "note": "板块强度只用于补全候选发现；未通过个股预期、分钟量价和防追高验证的核心股不会下单。",
@@ -650,6 +651,7 @@ def refresh_autonomous_selection(
         minimum_score=EXPLORATION_MIN_SCORE,
         limit=MAX_EXPLORATION_SELECTED,
     )
+    coverage_audit = _sector_coverage_audit(rows, sector_signals, items, exploration_items)
     payload = {
         "trade_date": trade_date,
         "source": source,
@@ -668,7 +670,11 @@ def refresh_autonomous_selection(
         "reference_sources": reference_status,
         "source_feedback": source_feedback,
         "strong_sector_core": sector_core_status,
-        "sector_coverage_audit": _sector_coverage_audit(rows, sector_signals, items, exploration_items),
+        "sector_coverage_audit": coverage_audit,
+        "sector_core_watch_items": [
+            {"code": item["code"], "name": item["name"], "sector": item["sector"], "status": item["status"]}
+            for item in coverage_audit["items"]
+        ],
         "missed_opportunity_audit": _missed_opportunity_audit(db, trade_date, rows),
         "method": "全A股→强板块主板核心覆盖→流动性→非极端活跃→VWAP承接→订单流估算→行业去重→真实交易反馈微调",
         "scope_note": "候选范围为东方财富全A实时行情，并补充行业/概念强板块的沪深主板容量、资金与强度核心；所有板块标签、观察池、抓涨停和断板反包都只用于发现与归因，不能直接触发买入。",
@@ -700,13 +706,19 @@ def autonomous_selection_targets(db: Session, trade_date: str) -> list[tuple[str
     payload = latest_autonomous_selection(db, trade_date=trade_date, max_age=MAX_SELECTION_AGE)
     if not payload:
         return []
-    # Minute evidence must also cover the bounded exploration universe.  If the
+    # Minute evidence must also cover the bounded exploration universe and
+    # strong-board main-board cores.  The latter are tracking targets only;
+    # their presence here can never create an order by itself.  If the
     # normal market gate is closed, ``items`` can be empty; collecting only that
     # list would make the fallback rule impossible to verify and it would stay
     # permanently in cash.  Keep the extra workload bounded and de-duplicated.
     targets: list[tuple[str, str]] = []
     seen: set[str] = set()
-    combined = list(payload.get("items") or []) + list(payload.get("exploration_items") or [])[:20]
+    combined = (
+        list(payload.get("items") or [])
+        + list(payload.get("exploration_items") or [])[:20]
+        + list(payload.get("sector_core_watch_items") or [])[:24]
+    )
     for item in combined:
         code = _normalize_code(str(item.get("code") or ""))
         if not code or code in seen:
