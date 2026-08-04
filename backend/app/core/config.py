@@ -41,6 +41,12 @@ class Settings(BaseSettings):
     dingtalk_webhook_file: str = Field(default="", validation_alias="DINGTALK_WEBHOOK_FILE")
     dingtalk_secret: str = Field(default="", validation_alias="DINGTALK_SECRET")
     dingtalk_secret_file: str = Field(default="", validation_alias="DINGTALK_SECRET_FILE")
+    dingtalk_stream_enabled: bool = Field(default=False, validation_alias="DINGTALK_STREAM_ENABLED")
+    dingtalk_stream_client_id: str = Field(default="", validation_alias="DINGTALK_STREAM_CLIENT_ID")
+    dingtalk_stream_client_secret: str = Field(default="", validation_alias="DINGTALK_STREAM_CLIENT_SECRET")
+    dingtalk_stream_client_secret_file: str = Field(default="", validation_alias="DINGTALK_STREAM_CLIENT_SECRET_FILE")
+    dingtalk_stream_allowed_users: str = Field(default="", validation_alias="DINGTALK_STREAM_ALLOWED_USERS")
+    dingtalk_stream_allow_admin: bool = Field(default=True, validation_alias="DINGTALK_STREAM_ALLOW_ADMIN")
 
     def model_post_init(self, __context: object) -> None:
         for value_field, file_field in (
@@ -50,6 +56,7 @@ class Settings(BaseSettings):
             ("ai_api_key", "ai_api_key_file"),
             ("dingtalk_webhook", "dingtalk_webhook_file"),
             ("dingtalk_secret", "dingtalk_secret_file"),
+            ("dingtalk_stream_client_secret", "dingtalk_stream_client_secret_file"),
         ):
             secret_path = str(getattr(self, file_field, "") or "").strip()
             if secret_path:

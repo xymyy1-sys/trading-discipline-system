@@ -28,6 +28,12 @@ services:
       DINGTALK_WEBHOOK_FILE: ${DINGTALK_WEBHOOK_FILE:-}
       DINGTALK_SECRET: ${DINGTALK_SECRET:-}
       DINGTALK_SECRET_FILE: ${DINGTALK_SECRET_FILE:-}
+      DINGTALK_STREAM_ENABLED: ${DINGTALK_STREAM_ENABLED:-false}
+      DINGTALK_STREAM_CLIENT_ID: ${DINGTALK_STREAM_CLIENT_ID:-}
+      DINGTALK_STREAM_CLIENT_SECRET: ${DINGTALK_STREAM_CLIENT_SECRET:-}
+      DINGTALK_STREAM_CLIENT_SECRET_FILE: ${DINGTALK_STREAM_CLIENT_SECRET_FILE:-}
+      DINGTALK_STREAM_ALLOWED_USERS: ${DINGTALK_STREAM_ALLOWED_USERS:-}
+      DINGTALK_STREAM_ALLOW_ADMIN: ${DINGTALK_STREAM_ALLOW_ADMIN:-true}
       HTTP_PROXY: ${OUTBOUND_HTTP_PROXY:-}
       HTTPS_PROXY: ${OUTBOUND_HTTP_PROXY:-}
       NO_PROXY: localhost,127.0.0.1,backend,frontend
@@ -49,6 +55,36 @@ services:
       timeout: 5s
       retries: 3
       start_period: 20s
+
+  dingtalk-bot:
+    build:
+      context: ./backend
+    command: ["python", "-m", "app.services.dingtalk_stream_bot"]
+    environment:
+      DATABASE_URL: sqlite:///./data/trading_discipline.db
+      TZ: Asia/Shanghai
+      AI_API_KEY: ${AI_API_KEY:-}
+      AI_API_KEY_FILE: ${AI_API_KEY_FILE:-}
+      AI_MODEL: ${AI_MODEL:-deepseek-reasoner}
+      AI_BASE_URL: ${AI_BASE_URL:-https://api.deepseek.com}
+      AI_PROVIDER: ${AI_PROVIDER:-deepseek}
+      DINGTALK_STREAM_ENABLED: ${DINGTALK_STREAM_ENABLED:-false}
+      DINGTALK_STREAM_CLIENT_ID: ${DINGTALK_STREAM_CLIENT_ID:-}
+      DINGTALK_STREAM_CLIENT_SECRET: ${DINGTALK_STREAM_CLIENT_SECRET:-}
+      DINGTALK_STREAM_CLIENT_SECRET_FILE: ${DINGTALK_STREAM_CLIENT_SECRET_FILE:-}
+      DINGTALK_STREAM_ALLOWED_USERS: ${DINGTALK_STREAM_ALLOWED_USERS:-}
+      DINGTALK_STREAM_ALLOW_ADMIN: ${DINGTALK_STREAM_ALLOW_ADMIN:-true}
+      HTTP_PROXY: ${OUTBOUND_HTTP_PROXY:-}
+      HTTPS_PROXY: ${OUTBOUND_HTTP_PROXY:-}
+      NO_PROXY: localhost,127.0.0.1,backend,frontend
+    volumes:
+      - "${BACKEND_DATA_PATH:-backend-data}:/app/data"
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
 
   frontend:
     build:

@@ -17,6 +17,9 @@ def dingtalk_status() -> dict[str, object]:
         "enabled": settings.dingtalk_enabled,
         "configured": bool(settings.dingtalk_webhook),
         "signed": bool(settings.dingtalk_secret),
+        "stream_enabled": settings.dingtalk_stream_enabled,
+        "stream_configured": bool(settings.dingtalk_stream_client_id and settings.dingtalk_stream_client_secret),
+        "stream_access": "允许名单或群管理员" if settings.dingtalk_stream_allow_admin else "仅允许名单",
     }
 
 
