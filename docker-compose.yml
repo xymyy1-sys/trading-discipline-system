@@ -74,10 +74,13 @@ services:
       DINGTALK_STREAM_CLIENT_SECRET_FILE: ${DINGTALK_STREAM_CLIENT_SECRET_FILE:-}
       DINGTALK_STREAM_ALLOWED_USERS: ${DINGTALK_STREAM_ALLOWED_USERS:-}
       DINGTALK_STREAM_ALLOW_ADMIN: ${DINGTALK_STREAM_ALLOW_ADMIN:-true}
-      # DingTalk Stream must connect directly. The host-side market-data proxy
-      # is not guaranteed to be available from this container and otherwise
-      # prevents the WebSocket from ever opening.
-      NO_PROXY: localhost,127.0.0.1,backend,frontend,.dingtalk.com
+      # The Stream gateway may need the host-side proxy. Keep this independent
+      # from the market-data proxy so a stale proxy cannot silently break chat.
+      HTTP_PROXY: ${DINGTALK_STREAM_PROXY:-}
+      HTTPS_PROXY: ${DINGTALK_STREAM_PROXY:-}
+      NO_PROXY: localhost,127.0.0.1,backend,frontend
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     volumes:
       - "${BACKEND_DATA_PATH:-backend-data}:/app/data"
     restart: unless-stopped
