@@ -11,7 +11,14 @@ from app.api.helpers.decision import (
     expectation_evidence_coverage,
 )
 from app.core.trading_clock import shanghai_now_naive, shanghai_today
-from app.models.trading import ExpectationSnapshot, Holding, NextDayPlan, VolumePriceSnapshot
+from app.models.trading import (
+    ExpectationSnapshot,
+    Holding,
+    NextDayPlan,
+    SimulationAccount,
+    SimulationPosition,
+    VolumePriceSnapshot,
+)
 from app.services.trading_calendar import next_a_share_trading_day
 
 
@@ -92,6 +99,23 @@ def generate_next_day_expectations(
     targets: dict[str, dict] = {}
     for holding in db.query(Holding).all():
         targets[holding.code] = {"name": holding.name, "hint": holding.position_type or "持仓股", "evidence": ["来源：当前持仓"]}
+    shadow_account_ids = [
+        row[0] for row in db.query(SimulationAccount.id).filter(
+            SimulationAccount.status == "active",
+            SimulationAccount.account_type == "shadow",
+            SimulationAccount.automation_key.is_not(None),
+        ).all()
+    ]
+    if shadow_account_ids:
+        for position in db.query(SimulationPosition).filter(
+            SimulationPosition.account_id.in_(shadow_account_ids),
+            SimulationPosition.quantity > 0,
+        ).all():
+            targets.setdefault(position.code, {
+                "name": position.name,
+                "hint": "AI模拟持仓",
+                "evidence": ["来源：AI前向模拟持仓；次日按竞价、开盘5分钟和VWAP逐级验证"],
+            })
     if include_watchlist:
         for plan in db.query(NextDayPlan).filter(NextDayPlan.plan_type == "limit_up_auction").all():
             targets.setdefault(plan.code, {

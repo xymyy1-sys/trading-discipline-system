@@ -25,6 +25,7 @@ from app.models.trading import (
     NextDayPlan,
     SimulationAccount,
     SimulationOrder,
+    SimulationPosition,
     WatchlistEntry,
 )
 from app.schemas.trading import MarketRegimeOut
@@ -978,6 +979,23 @@ def _run_intraday_collection_once_locked(trigger: str = "manual") -> IntradayCol
         for code, name in autonomous_selection_targets(db, started.date().isoformat()):
             if code not in holding_codes:
                 tracked.setdefault(code, (name, "AI全市场独立选股"))
+        # Open automated-paper positions are first-class evidence targets too.
+        # Without this, a filled name that later drops out of candidate pools
+        # can miss its closing quote and suppress the entire close review.
+        shadow_account_ids = [
+            row[0] for row in db.query(SimulationAccount.id).filter(
+                SimulationAccount.status == "active",
+                SimulationAccount.account_type == "shadow",
+                SimulationAccount.automation_key.is_not(None),
+            ).all()
+        ]
+        if shadow_account_ids:
+            for row in db.query(SimulationPosition).filter(
+                SimulationPosition.account_id.in_(shadow_account_ids),
+                SimulationPosition.quantity > 0,
+            ).all():
+                if row.code not in holding_codes:
+                    tracked[row.code] = (row.name, "AI模拟持仓")
         # Continue collecting a bounded set of unresolved signals even after a
         # position is sold.  The result ledger otherwise cannot distinguish an
         # avoided decline from a sale immediately before a rebound.
@@ -1214,19 +1232,23 @@ async def _collector_iteration() -> None:
         and _close_shadow_equity_date != now.date().isoformat()
     ):
         result = await asyncio.to_thread(run_simulation_shadow_equity_once, now=now)
-        if _record_close_shadow_equity_completion(result, now.date().isoformat()):
-            from app.services.simulation_notifications import notify_ai_trader_close_review
+        _record_close_shadow_equity_completion(result, now.date().isoformat())
+        # The dedicated AI account review must not be held hostage by another
+        # shadow/test account that lacks a closing quote.  The notifier itself
+        # verifies that the AI account has a same-day equity row and is
+        # idempotent, so retries remain safe.
+        from app.services.simulation_notifications import notify_ai_trader_close_review
 
-            notify_db = SessionLocal()
-            try:
-                await asyncio.to_thread(
-                    notify_ai_trader_close_review,
-                    notify_db,
-                    now.date().isoformat(),
-                    now=now,
-                )
-            finally:
-                notify_db.close()
+        notify_db = SessionLocal()
+        try:
+            await asyncio.to_thread(
+                notify_ai_trader_close_review,
+                notify_db,
+                now.date().isoformat(),
+                now=now,
+            )
+        finally:
+            notify_db.close()
 
 
 async def _collector_loop() -> None:

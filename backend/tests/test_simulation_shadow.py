@@ -16,10 +16,21 @@ from app.services.simulation_shadow import (
     RULE_VERSION,
     _autonomous_position_ratio,
     _entry_quantity,
+    _is_ai_trader_supported_code,
     _risk_adjusted_entry_ratio,
     mark_shadow_equity_after_close,
     run_shadow_experiments,
 )
+
+
+def test_ai_trader_scope_only_allows_shanghai_shenzhen_main_boards():
+    assert _is_ai_trader_supported_code("600584") is True
+    assert _is_ai_trader_supported_code("000725") is True
+    assert _is_ai_trader_supported_code("002371") is True
+    assert _is_ai_trader_supported_code("300697") is False
+    assert _is_ai_trader_supported_code("688981") is False
+    assert _is_ai_trader_supported_code("920001") is False
+    assert _is_ai_trader_supported_code("588710") is False
 
 
 def test_risk_budget_caps_high_conviction_position():

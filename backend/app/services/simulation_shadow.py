@@ -38,7 +38,7 @@ from app.services.simulation import (
     submit_order,
 )
 from app.services.autonomous_selection import latest_autonomous_selection
-from app.services.simulation_risk import account_risk_guard
+from app.services.simulation_risk import SimulationRiskGuard, account_risk_guard
 
 
 logger = logging.getLogger(__name__)
@@ -54,6 +54,17 @@ EXPLORATION_START = time(10, 0)
 EXPLORATION_END = time(14, 30)
 EXPLORATION_POSITION_RATIO = 0.50
 MAX_ENTRY_POSITION_RATIO = 0.85
+
+
+def _is_ai_trader_supported_code(code: str) -> bool:
+    """AI trader only trades Shanghai/Shenzhen main-board A shares.
+
+    This deliberately excludes ChiNext (300/301), STAR (688/689), Beijing
+    Stock Exchange and funds/ETFs.  The gate is repeated at order generation
+    time so a stale candidate snapshot can never bypass it.
+    """
+    normalized = _normalize_code(code)
+    return bool(re.fullmatch(r"(?:600|601|603|605|000|001|002|003)\d{3}", normalized))
 
 
 @dataclass(frozen=True)
@@ -860,10 +871,51 @@ def run_shadow_experiments(
         result.skipped.append({"code": "*", "reason": "当前没有可验证的明确策略信号"})
         return result
 
-    risk_guard = account_risk_guard(db, account, evaluated_at)
+    # Revalue open positions before evaluating the intraday loss/drawdown guard.
+    # A stale or missing holding quote freezes new entries; exits remain allowed.
+    has_position = db.query(SimulationPosition.id).filter(
+        SimulationPosition.account_id == account.id,
+        SimulationPosition.quantity > 0,
+    ).first() is not None
+    valuation_error = ""
+    if has_position:
+        def _strict_risk_quote(code: str) -> dict[str, Any]:
+            quote = quote_cache.get(code)
+            if quote is None:
+                quote = quote_loader(code) or {}
+                quote_cache[code] = quote
+            quality = _quote_data_quality(quote, evaluated_at)
+            if quality != "realtime":
+                raise ValueError(f"{code} quote quality is {quality}")
+            return quote
+
+        try:
+            mark_to_market(db, account, now=evaluated_at, quote_loader=_strict_risk_quote)
+        except Exception as exc:  # pragma: no cover - provider-specific failure
+            db.rollback()
+            valuation_error = str(exc)
+            logger.warning("shadow intraday valuation failed: %s", exc)
+    if valuation_error:
+        risk_guard = SimulationRiskGuard(
+            state="DATA_GAP_STOP",
+            position_multiplier=0.0,
+            block_new_entries=True,
+            reason="持仓权益实时校准失败，当前冻结所有新买入，只允许退出持仓。",
+            drawdown_pct=0.0,
+            daily_loss_pct=0.0,
+            consecutive_formal_losses=0,
+        )
+    else:
+        risk_guard = account_risk_guard(db, account, evaluated_at)
 
     trade_date = evaluated_at.date().isoformat()
     for candidate in candidates:
+        if candidate.side == "BUY" and not _is_ai_trader_supported_code(candidate.code):
+            result.skipped.append({
+                "code": candidate.code,
+                "reason": "AI模拟交易范围仅限沪深主板A股，已排除创业板、科创板、北交所及基金。",
+            })
+            continue
         if candidate.side == "BUY" and risk_guard.position_multiplier < 1:
             candidate = replace(
                 candidate,
@@ -1022,13 +1074,48 @@ def mark_shadow_equity_after_close(
         invalid: list[str] = []
         for position in positions:
             quote = quote_loader(position.code) or {}
-            cache[position.code] = quote
             quote_at = _quote_time(quote)
             local_quote_at = _local(quote_at)
             close_window_ok = bool(
                 local_quote_at is not None
                 and time(14, 55) <= local_quote_at.time() <= time(15, 5)
             )
+            if not (
+                local_quote_at is not None
+                and local_quote_at <= evaluated_at
+                and local_quote_at.date() == trade_date
+                and close_window_ok
+                and _safe_float(quote.get("price")) > 0
+            ):
+                stored = (
+                    db.query(VolumePriceSnapshot)
+                    .filter(
+                        VolumePriceSnapshot.trade_date == trade_date.isoformat(),
+                        VolumePriceSnapshot.code.in_([
+                            position.code,
+                            position.code.zfill(6),
+                            position.code.lstrip("0"),
+                        ]),
+                        VolumePriceSnapshot.captured_at <= evaluated_at,
+                    )
+                    .order_by(VolumePriceSnapshot.captured_at.desc(), VolumePriceSnapshot.id.desc())
+                    .first()
+                )
+                if stored is not None and time(14, 55) <= _local(stored.captured_at).time() <= time(15, 5):
+                    quote = {
+                        "name": stored.name or position.name,
+                        "price": stored.price,
+                        "prev_close": stored.prev_close,
+                        "open": stored.open_price,
+                        "high": stored.high_price,
+                        "low": stored.low_price,
+                        "provider_event_at": stored.captured_at,
+                        "note": f"收盘权益采用当日已落库盘中证据（{stored.data_source}）",
+                    }
+                    quote_at = _quote_time(quote)
+                    local_quote_at = _local(quote_at)
+                    close_window_ok = True
+            cache[position.code] = quote
             if (
                 local_quote_at is None
                 or local_quote_at > evaluated_at
