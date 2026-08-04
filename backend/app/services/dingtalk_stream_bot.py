@@ -70,14 +70,24 @@ class TradingChatbotHandler(dingtalk_stream.AsyncChatbotHandler):
         response = self.reply_markdown(title, content[:12000], incoming)
         if response is None:
             LOGGER.error("DingTalk reply failed for message_id=%s", incoming.message_id)
+        else:
+            LOGGER.info("DingTalk reply sent for message_id=%s", incoming.message_id)
 
     def process(self, callback_message: dingtalk_stream.CallbackMessage) -> None:
         incoming = dingtalk_stream.ChatbotMessage.from_dict(callback_message.data)
+        authorized = is_sender_authorized(incoming, self.allowed, self.allow_admin)
+        LOGGER.info(
+            "DingTalk message received message_id=%s type=%s conversation_type=%s authorized=%s",
+            incoming.message_id,
+            incoming.message_type,
+            incoming.conversation_type,
+            authorized,
+        )
         if incoming.message_type not in {"text", "richText"}:
             self._reply(incoming, "暂不支持该消息类型", "目前只处理文字问题，请发送“帮助”查看用法。")
             return
         question = clean_question(" ".join(incoming.get_text_list() or []))
-        if not is_sender_authorized(incoming, self.allowed, self.allow_admin):
+        if not authorized:
             identity = incoming.sender_staff_id or incoming.sender_id or "未知"
             self._reply(
                 incoming,
