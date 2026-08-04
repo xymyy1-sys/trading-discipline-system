@@ -25,6 +25,7 @@ from app.schemas.simulation import (
     SimulationPerformanceOut,
     SimulationPositionOut,
     SimulationShadowDecisionOut,
+    SimulationValidationOut,
 )
 from app.services.simulation import (
     cancel_order,
@@ -35,6 +36,7 @@ from app.services.simulation import (
     submit_order,
 )
 from app.services.simulation_calibration import simulation_calibration_proposal
+from app.services.simulation_validation import validation_report
 from app.services.simulation_shadow import get_or_create_ai_trader_account, run_shadow_experiments
 from app.services.autonomous_selection import latest_autonomous_selection, refresh_autonomous_selection
 
@@ -222,6 +224,11 @@ def list_simulation_evidence(
 @router.get("/accounts/{account_id}/performance", response_model=SimulationPerformanceOut)
 def simulation_performance(account_id: int, db: Session = Depends(get_db)) -> dict:
     return performance_report(db, _account_or_404(db, account_id))
+
+
+@router.get("/accounts/{account_id}/validation", response_model=SimulationValidationOut)
+def simulation_validation(account_id: int, db: Session = Depends(get_db)) -> dict:
+    return validation_report(db, _account_or_404(db, account_id))
 
 
 @router.get(

@@ -214,3 +214,29 @@ export interface SimulationCalibrationProposal {
   requires_manual_confirmation: boolean
   auto_apply_allowed: false
 }
+
+export interface SimulationValidationFold {
+  fold: number
+  training_end_at: string
+  test_start_at: string
+  test_end_at: string
+  training: SimulationCalibrationMetric
+  out_of_sample: SimulationCalibrationMetric
+}
+
+export interface SimulationValidation {
+  account_id: number
+  generated_at: string
+  status: string
+  minimum_train_samples: number
+  test_fold_size: number
+  total_closed_samples: number
+  formal_point_in_time_samples: number
+  exploration_samples: number
+  excluded_samples: number
+  exclusion_reasons: string[]
+  formal_overall: SimulationCalibrationMetric
+  out_of_sample_overall: SimulationCalibrationMetric
+  folds: SimulationValidationFold[]
+  limitations: string[]
+}

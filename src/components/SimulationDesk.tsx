@@ -35,6 +35,7 @@ import type {
   SimulationPosition,
   SimulationShadowDecision,
   SimulationStrategyType,
+  SimulationValidation,
 } from '../types'
 
 const ACTIVE_ACCOUNT_KEY = 'simulation-account-id'
@@ -238,6 +239,7 @@ export function SimulationAiTrader() {
   const [decisions, setDecisions] = useState<SimulationShadowDecision[]>([])
   const [performance, setPerformance] = useState<SimulationPerformance | null>(null)
   const [calibration, setCalibration] = useState<SimulationCalibrationProposal | null>(null)
+  const [validation, setValidation] = useState<SimulationValidation | null>(null)
   const [collector, setCollector] = useState<IntradayCollectorStatus | null>(null)
   const [selection, setSelection] = useState<AutonomousSelection | null>(null)
   const [loading, setLoading] = useState(false)
@@ -259,17 +261,19 @@ export function SimulationAiTrader() {
           simulationRequest<SimulationShadowDecision[]>(`/api/simulation/accounts/${row.id}/shadow-decisions?limit=200`),
           simulationRequest<SimulationPerformance>(`/api/simulation/accounts/${row.id}/performance`),
           simulationRequest<SimulationCalibrationProposal>(`/api/simulation/accounts/${row.id}/calibration-proposal`).catch(() => null),
+          simulationRequest<SimulationValidation>(`/api/simulation/accounts/${row.id}/validation`).catch(() => null),
           simulationRequest<IntradayCollectorStatus>('/api/intraday-collector/status'),
           simulationRequest<AutonomousSelection>('/api/simulation/ai-trader/candidates'),
         ])
       })
-      .then(([positionRows, orderRows, equityRows, decisionRows, report, calibrationProposal, collectorStatus, selectionRows]) => {
+      .then(([positionRows, orderRows, equityRows, decisionRows, report, calibrationProposal, validationReport, collectorStatus, selectionRows]) => {
         setPositions(positionRows)
         setOrders(orderRows)
         setEquities(equityRows)
         setDecisions(decisionRows)
         setPerformance(report)
         setCalibration(calibrationProposal)
+        setValidation(validationReport)
         setCollector(collectorStatus)
         setSelection(selectionRows)
       })
@@ -372,6 +376,7 @@ export function SimulationAiTrader() {
         <SimulationMetric label="正式策略盈亏比" value={formalPerformance ? numberValue(formalPerformance.profit_loss_ratio) : '--'} />
       </div>
       <AiTraderFeedbackPanel decisions={todayDecisions} orders={todayOrders} performance={performance} calibration={calibration} />
+      <AiTraderValidationPanel validation={validation} />
       <section className="simulation-section panel">
         <div className="simulation-section-title"><h4><History size={17} />今日AI操作</h4><span>{createdOrders.length}笔委托 / {todayDecisions.length}条信号</span></div>
         <div className="ai-trader-actions">
@@ -406,6 +411,25 @@ export function SimulationAiTrader() {
         </ul>
       </section>
     </div>}
+  </section>
+}
+
+function AiTraderValidationPanel({ validation }: { validation: SimulationValidation | null }) {
+  if (!validation) return null
+  const ready = validation.status === 'ready'
+  return <section className={`simulation-section panel tone-${ready ? 'ok' : 'pending'}`}>
+    <div className="simulation-section-title">
+      <div><h4><ShieldAlert size={17} />逐时点样本外验证</h4><small>严格使用决策当时已冻结的数据，探索交易不进入正式成绩。</small></div>
+      <span>{ready ? '已有滚动测试窗' : '样本积累中'}</span>
+    </div>
+    <div className="simulation-kpi-grid">
+      <SimulationMetric label="正式逐时点样本" value={`${validation.formal_point_in_time_samples}笔`} detail={`门槛 ${validation.minimum_train_samples}笔训练`} />
+      <SimulationMetric label="探索样本" value={`${validation.exploration_samples}笔`} detail="独立分账" />
+      <SimulationMetric label="样本外胜率" value={validation.folds.length ? percent(validation.out_of_sample_overall.win_rate) : '--'} detail={`${validation.out_of_sample_overall.sample_count}笔`} />
+      <SimulationMetric label="样本外盈亏比" value={validation.folds.length ? numberValue(validation.out_of_sample_overall.profit_loss_ratio) : '--'} />
+    </div>
+    <p className="plain-text">滚动方式：前{validation.minimum_train_samples}笔只作训练基线，之后每{validation.test_fold_size}笔组成一个完全后置测试窗；当前{validation.folds.length}个测试窗，排除{validation.excluded_samples}笔不符合时点证据契约的样本。</p>
+    {!!validation.exclusion_reasons.length && <p className="simulation-sample-warning">排除依据：{validation.exclusion_reasons.join('；')}</p>}
   </section>
 }
 

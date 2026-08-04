@@ -264,6 +264,32 @@ class SimulationCalibrationProposalOut(BaseModel):
     auto_apply_allowed: Literal[False] = False
 
 
+class SimulationValidationFold(BaseModel):
+    fold: int
+    training_end_at: datetime
+    test_start_at: datetime
+    test_end_at: datetime
+    training: SimulationCalibrationMetric
+    out_of_sample: SimulationCalibrationMetric
+
+
+class SimulationValidationOut(BaseModel):
+    account_id: int
+    generated_at: datetime
+    status: str
+    minimum_train_samples: int
+    test_fold_size: int
+    total_closed_samples: int
+    formal_point_in_time_samples: int
+    exploration_samples: int
+    excluded_samples: int
+    exclusion_reasons: list[str] = Field(default_factory=list)
+    formal_overall: SimulationCalibrationMetric
+    out_of_sample_overall: SimulationCalibrationMetric
+    folds: list[SimulationValidationFold] = Field(default_factory=list)
+    limitations: list[str] = Field(default_factory=list)
+
+
 class SimulationShadowDecisionOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
