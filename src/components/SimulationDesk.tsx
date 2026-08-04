@@ -190,6 +190,18 @@ type AutonomousCandidate = {
   next_plan: string
   source_tags: string[]
   source_contributions: Array<{ source: string; base: number; learned: number }>
+  sector_contexts?: Array<{ sector: string; flow_type: string; sector_rank: number; sector_strength: number; role: string }>
+}
+
+type SectorCoverageItem = {
+  code: string
+  name: string
+  sector: string
+  role: string
+  status: string
+  reasons: string[]
+  captured_price?: number | null
+  captured_change_pct?: number | null
 }
 
 type AutonomousSelection = {
@@ -205,6 +217,9 @@ type AutonomousSelection = {
   exploration_policy?: { minimum_score: number; maximum_daily_entries: number; position_ratio: number; purpose: string }
   reference_sources?: Record<string, { status: string; matched_count: number }>
   source_feedback?: Record<string, { sample_count: number; mean_return_pct: number; score_adjustment: number }>
+  strong_sector_core?: { status: string; core_security_count: number; sectors: Array<{ name: string; flow_type: string; rank: number; strength: number; core_count: number; status: string }> }
+  sector_coverage_audit?: { strong_sector_core_count: number; covered_count: number; status_counts: Record<string, number>; items: SectorCoverageItem[]; note: string }
+  missed_opportunity_audit?: { sample_count: number; omitted_sample_count?: number; omitted_continued_rise_count?: number; omitted_pullback_count?: number; note: string }
 }
 
 type IntradayCollectorStatus = {
@@ -364,11 +379,27 @@ export function SimulationAiTrader() {
             <b>#{item.rank} {item.name}（{item.code}）· {item.score.toFixed(1)}分</b>
             <span>{item.industry} · {item.style} · 涨幅{item.change_pct > 0 ? '+' : ''}{item.change_pct.toFixed(2)}%</span>
             {!!item.source_tags?.length && <span>来源共振：{item.source_tags.join(' + ')}</span>}
+            {!!item.sector_contexts?.length && <span>强板块定位：{item.sector_contexts.map(value => `${value.sector}第${value.sector_rank}位·${value.role}`).join('；')}</span>}
             <p>{item.reasons.join('；')}</p>
             <small>量比{item.volume_ratio.toFixed(2)} · 换手{item.turnover_rate.toFixed(2)}% · 相对分时均价{item.price_vs_vwap > 0 ? '+' : ''}{item.price_vs_vwap.toFixed(2)}%{item.risks.length ? ` · 风险：${item.risks.join('；')}` : ''}</small>
           </article>)}
           {!selection?.items?.length && <p className="plain-text">尚无全市场候选。系统仍会扫描全A；抓涨停、断板反包等模块只提供辅助证据，不会为了成交而降低门槛。</p>}
         </div>
+        {selection?.sector_coverage_audit && <div className="ai-trader-skip-list">
+          <article>
+            <b>强板块主板核心股覆盖审计</b>
+            <span>{selection.sector_coverage_audit.strong_sector_core_count}只核心 / 已覆盖{selection.sector_coverage_audit.covered_count}只</span>
+            <p>{selection.sector_coverage_audit.note}</p>
+            <small>{Object.entries(selection.sector_coverage_audit.status_counts).map(([name, count]) => `${name}${count}只`).join(' · ') || '等待强板块成分股证据'}</small>
+          </article>
+          {selection.sector_coverage_audit.items.filter(item => item.status !== '正式候选').slice(0, 8).map(item => <article key={`coverage-${item.code}`}>
+            <b>{item.name || item.code}（{item.code}）· {item.status}</b>
+            <span>{item.sector || '板块待核验'} · {item.role || '核心身份待核验'}</span>
+            <p>{item.reasons.join('；') || '已经进入候选覆盖。'}</p>
+            <small>{item.captured_change_pct == null ? '涨幅缺失' : `采样涨幅${item.captured_change_pct > 0 ? '+' : ''}${item.captured_change_pct.toFixed(2)}%`}</small>
+          </article>)}
+        </div>}
+        {!!selection?.missed_opportunity_audit?.sample_count && <p className="plain-text"><b>漏选机会成本：</b>已对照{selection.missed_opportunity_audit.omitted_sample_count || 0}只早盘未入选核心股，随后继续上涨≥2%的有{selection.missed_opportunity_audit.omitted_continued_rise_count || 0}只，随后回落≤-2%的有{selection.missed_opportunity_audit.omitted_pullback_count || 0}只。{selection.missed_opportunity_audit.note}</p>}
         <p className="plain-text">来源反馈：{Object.entries(selection?.source_feedback || {}).map(([name, value]) => `${name} ${value.sample_count}笔 / 均值${value.mean_return_pct >= 0 ? '+' : ''}${value.mean_return_pct.toFixed(2)}% / 调分${value.score_adjustment >= 0 ? '+' : ''}${value.score_adjustment.toFixed(1)}`).join('；') || '尚无足够闭环成交，暂不自动调整来源权重。'}</p>
         {selection?.exploration_policy && <p className="simulation-unfilled"><b>每日探索规则：</b>正常策略到10:00仍未成交时，最多选择1只数据完整且未出现负向量价结构的候选，以{(selection.exploration_policy.position_ratio * 100).toFixed(0)}%确认仓取得有统计意义的前向样本；正式策略按确信度使用进攻仓、确认仓或主攻仓，探索交易仍单独标记。</p>}
         <footer>{selection?.method || '候选仍需分钟量价确认；候选不等于买入，不为成交而降低纪律。'}</footer>
@@ -413,7 +444,7 @@ export function SimulationAiTrader() {
         <h4>每日复盘与下一步修正</h4>
         <p>{policy}</p>
         <ul>
-          <li>买入来源：只允许来自打板预案、预期×量价确认、持仓执行状态机三类可审计信号。</li>
+          <li>买入来源：允许来自打板预案、预期×量价确认和全市场多源候选，但都必须经过同一套分钟量价、风险收益比与防追高验证。</li>
           <li>卖出来源：只允许来自预期证伪、量价转弱、利润保护或硬止损，不因为单一外围/情绪指标机械清仓。</li>
           <li>复盘口径：每日收盘后校准权益，统计胜率、盈亏比、回撤和跳过原因，逐步收紧无效信号。</li>
         </ul>

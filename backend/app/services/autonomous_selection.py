@@ -31,7 +31,14 @@ MAX_SELECTION_AGE = timedelta(minutes=12)
 MAX_SELECTED = 12
 MAX_EXPLORATION_SELECTED = 50
 EXPLORATION_MIN_SCORE = 68
-REFERENCE_BONUSES = {"抓涨停": 6.0, "断板反包": 5.0}
+REFERENCE_BONUSES = {"抓涨停": 6.0, "断板反包": 5.0, "强板块核心": 8.0}
+
+
+def _is_supported_mainboard_code(code: str) -> bool:
+    """Return the user's explicitly allowed Shanghai/Shenzhen main-board scope."""
+
+    normalized = _normalize_code(code)
+    return normalized.startswith(("600", "601", "603", "605", "000", "001", "002", "003"))
 
 
 def _number(value: Any) -> float:
@@ -189,11 +196,257 @@ def _reference_signals(
     return signals, status
 
 
+def _strong_sector_core_signals(
+    provider: MarketDataProvider,
+    *,
+    sectors_per_type: int = 3,
+    cores_per_sector: int = 4,
+) -> tuple[dict[str, list[dict[str, Any]]], dict[str, Any]]:
+    """Discover liquid main-board cores inside objectively strong boards.
+
+    Board strength remains discovery evidence only.  The returned securities
+    still have to pass the independent quote score and later minute/VWAP gate.
+    Fetch failures are kept in the audit payload rather than silently turning
+    a partial universe into "no opportunity".
+    """
+
+    signals: dict[str, list[dict[str, Any]]] = {}
+    status: dict[str, Any] = {"status": "ok", "sectors": [], "errors": []}
+    for flow_type in ("行业资金流", "概念资金流"):
+        try:
+            boards = provider._fetch_direct_eastmoney_sector_flow_raw(flow_type, "今日")
+        except Exception as exc:
+            status["errors"].append({"flow_type": flow_type, "reason": exc.__class__.__name__})
+            continue
+        eligible = [
+            row for row in boards
+            if _number(row.get("change_pct")) >= 0.8
+            and _number(row.get("net_inflow")) > 0
+            and _number(row.get("strength")) >= 60
+            and str(row.get("board_code") or "").strip()
+        ]
+        eligible.sort(
+            key=lambda row: (
+                -_number(row.get("strength")),
+                -_number(row.get("change_pct")),
+                -_number(row.get("net_inflow")),
+            )
+        )
+        for sector_rank, board in enumerate(eligible[:sectors_per_type], start=1):
+            board_code = str(board.get("board_code") or "")
+            sector_name = str(board.get("name") or "未知板块")
+            sector_audit: dict[str, Any] = {
+                "flow_type": flow_type,
+                "rank": sector_rank,
+                "name": sector_name,
+                "board_code": board_code,
+                "strength": int(_number(board.get("strength"))),
+                "change_pct": round(_number(board.get("change_pct")), 3),
+                "estimated_net_inflow_yi": round(_number(board.get("net_inflow")), 3),
+                "core_count": 0,
+            }
+            try:
+                components = provider._fetch_sector_constituents_raw(board_code)
+            except Exception as exc:
+                sector_audit["status"] = "data_gap"
+                sector_audit["reason"] = exc.__class__.__name__
+                status["sectors"].append(sector_audit)
+                continue
+
+            candidates = [
+                row for row in components
+                if _is_supported_mainboard_code(str(row.get("code") or ""))
+                and "ST" not in str(row.get("name") or "").upper()
+                and "退" not in str(row.get("name") or "")
+                and _number(row.get("price")) > 0
+                and _number(row.get("amount")) >= 1.0
+                and row.get("theme_quote_eligible") is not False
+            ]
+            # A core is not synonymous with the fastest riser.  Take a small
+            # union of capacity, order-flow and price leaders so a large liquid
+            # bellwether cannot be displaced by an illiquid rear-row spike.
+            selected: list[tuple[dict[str, Any], str]] = []
+            seen: set[str] = set()
+            dimensions = (
+                ("容量核心", lambda row: _number(row.get("amount"))),
+                ("资金核心", lambda row: _number(row.get("main_inflow"))),
+                ("强度核心", lambda row: _number(row.get("change_pct"))),
+            )
+            for role, key in dimensions:
+                for component in sorted(candidates, key=key, reverse=True)[:2]:
+                    code = _normalize_code(str(component.get("code") or ""))
+                    if not code or code in seen:
+                        continue
+                    seen.add(code)
+                    selected.append((component, role))
+                    if len(selected) >= cores_per_sector:
+                        break
+                if len(selected) >= cores_per_sector:
+                    break
+            for component, role in selected:
+                code = _normalize_code(str(component.get("code") or ""))
+                signals.setdefault(code, []).append({
+                    "source": "强板块核心",
+                    "sector": sector_name,
+                    "flow_type": flow_type,
+                    "sector_rank": sector_rank,
+                    "sector_strength": sector_audit["strength"],
+                    "sector_change_pct": sector_audit["change_pct"],
+                    "sector_estimated_net_inflow_yi": sector_audit["estimated_net_inflow_yi"],
+                    "role": role,
+                    "component_change_pct": round(_number(component.get("change_pct")), 3),
+                    "component_amount_yi": round(_number(component.get("amount")), 3),
+                    "component_estimated_main_inflow_yi": round(_number(component.get("main_inflow")), 3),
+                })
+            sector_audit["status"] = "ok"
+            sector_audit["core_count"] = len(selected)
+            sector_audit["core_codes"] = [_normalize_code(str(item.get("code") or "")) for item, _ in selected]
+            status["sectors"].append(sector_audit)
+    if not status["sectors"]:
+        status["status"] = "data_gap"
+    elif status["errors"] or any(row.get("status") != "ok" for row in status["sectors"]):
+        status["status"] = "partial"
+    status["core_security_count"] = len(signals)
+    return signals, status
+
+
+def _sector_coverage_audit(
+    rows: Iterable[dict[str, Any]],
+    sector_signals: dict[str, list[dict[str, Any]]],
+    formal_items: list[dict[str, Any]],
+    exploration_items: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Explain which strong-board cores were covered and why others were not."""
+
+    raw_by_code = {_normalize_code(str(row.get("f12") or "")): row for row in rows}
+    formal_codes = {str(item.get("code") or "") for item in formal_items}
+    exploration_codes = {str(item.get("code") or "") for item in exploration_items}
+    details: list[dict[str, Any]] = []
+    for code, contexts in sector_signals.items():
+        raw = raw_by_code.get(code)
+        if code in formal_codes:
+            status, reasons = "正式候选", []
+        elif code in exploration_codes:
+            status, reasons = "探索候选", ["尚未达到正式策略分数或市场闸门要求"]
+        elif raw is None:
+            status, reasons = "行情缺口", ["全A实时行情中未匹配到该板块核心股"]
+        else:
+            status = "未入选"
+            price = _number(raw.get("f2"))
+            change = _number(raw.get("f3"))
+            volume_lots = _number(raw.get("f5"))
+            amount = _number(raw.get("f6"))
+            turnover = _number(raw.get("f8"))
+            volume_ratio = _number(raw.get("f10"))
+            average = amount / (volume_lots * 100) if volume_lots > 0 else 0
+            deviation = (price / average - 1) * 100 if price > 0 and average > 0 else None
+            reasons = []
+            if price <= 0 or volume_lots <= 0 or amount < 50_000_000:
+                reasons.append("价格、成交量或成交额证据不完整")
+            if not (-5 <= change <= 6):
+                reasons.append(f"涨幅{change:+.2f}%处于下跌刀口或追高区")
+            if not (0.4 <= turnover <= 16):
+                reasons.append(f"换手率{turnover:.2f}%不在可验证区间")
+            if not (0.5 <= volume_ratio <= 8):
+                reasons.append(f"量比{volume_ratio:.2f}不在可验证区间")
+            if deviation is None:
+                reasons.append("无法计算累计分时均价")
+            elif not (-1.5 <= deviation <= 3.2):
+                reasons.append(f"相对分时均价{deviation:+.2f}%不满足承接/防追高条件")
+            if not reasons:
+                reasons.append("综合评分或行业去重后未进入前排")
+        first = contexts[0] if contexts else {}
+        details.append({
+            "code": code,
+            "name": str((raw or {}).get("f14") or ""),
+            "sector": str(first.get("sector") or ""),
+            "role": str(first.get("role") or ""),
+            "status": status,
+            "reasons": reasons,
+            "captured_price": round(_number((raw or {}).get("f2")), 3) or None,
+            "captured_change_pct": round(_number((raw or {}).get("f3")), 3) if raw else None,
+            "contexts": contexts,
+        })
+    status_counts: dict[str, int] = {}
+    for item in details:
+        status_counts[item["status"]] = status_counts.get(item["status"], 0) + 1
+    return {
+        "strong_sector_core_count": len(details),
+        "covered_count": sum(1 for item in details if item["status"] in {"正式候选", "探索候选"}),
+        "status_counts": status_counts,
+        "items": details,
+        "note": "板块强度只用于补全候选发现；未通过个股预期、分钟量价和防追高验证的核心股不会下单。",
+    }
+
+
+def _missed_opportunity_audit(
+    db: Session,
+    trade_date: str,
+    rows: Iterable[dict[str, Any]],
+) -> dict[str, Any]:
+    """Compare the first same-day coverage decision with the latest quote.
+
+    This is an opportunity-cost audit, not permission to backfill a trade.
+    It lets calibration distinguish a healthy anti-chase rejection from a
+    systematic failure to cover a strong-board main-board leader.
+    """
+
+    first = (
+        db.query(DataCaptureSnapshot)
+        .filter(
+            DataCaptureSnapshot.data_type == CAPTURE_TYPE,
+            DataCaptureSnapshot.target_code == CAPTURE_TARGET,
+            DataCaptureSnapshot.trade_date == trade_date,
+            DataCaptureSnapshot.status == "ok",
+        )
+        .order_by(DataCaptureSnapshot.captured_at.asc(), DataCaptureSnapshot.id.asc())
+        .first()
+    )
+    if first is None:
+        return {"sample_count": 0, "items": [], "note": "等待同交易日下一次扫描形成机会成本对照。"}
+    try:
+        payload = json.loads(first.normalized_value_json or "{}")
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return {"sample_count": 0, "items": [], "note": "首个候选快照无法解析，未伪造机会成本。"}
+    initial = ((payload.get("sector_coverage_audit") or {}).get("items") or []) if isinstance(payload, dict) else []
+    current_by_code = {_normalize_code(str(row.get("f12") or "")): row for row in rows}
+    compared: list[dict[str, Any]] = []
+    for item in initial:
+        code = _normalize_code(str(item.get("code") or ""))
+        initial_price = _number(item.get("captured_price"))
+        current_price = _number((current_by_code.get(code) or {}).get("f2"))
+        if not code or initial_price <= 0 or current_price <= 0:
+            continue
+        move = (current_price / initial_price - 1) * 100
+        compared.append({
+            "code": code,
+            "name": str(item.get("name") or (current_by_code.get(code) or {}).get("f14") or ""),
+            "sector": str(item.get("sector") or ""),
+            "initial_status": str(item.get("status") or ""),
+            "initial_reasons": list(item.get("reasons") or []),
+            "initial_price": round(initial_price, 3),
+            "latest_price": round(current_price, 3),
+            "move_since_first_scan_pct": round(move, 3),
+            "interpretation": "漏选后继续上涨" if move >= 2 else "防追高有效/价格回落" if move <= -2 else "价格尚未显著脱离",
+        })
+    compared.sort(key=lambda item: -abs(float(item["move_since_first_scan_pct"])))
+    omitted = [item for item in compared if item["initial_status"] not in {"正式候选", "探索候选"}]
+    return {
+        "sample_count": len(compared),
+        "omitted_sample_count": len(omitted),
+        "omitted_continued_rise_count": sum(1 for item in omitted if item["move_since_first_scan_pct"] >= 2),
+        "omitted_pullback_count": sum(1 for item in omitted if item["move_since_first_scan_pct"] <= -2),
+        "items": compared[:20],
+        "note": "只比较当时可见快照与后续价格，不补录交易；收盘后进入策略校准样本。",
+    }
+
+
 def rank_full_market_rows(
     rows: Iterable[dict[str, Any]],
     *,
     feedback: dict[str, float] | None = None,
     reference_signals: dict[str, list[str]] | None = None,
+    sector_signals: dict[str, list[dict[str, Any]]] | None = None,
     source_feedback: dict[str, dict[str, float]] | None = None,
     minimum_score: float = 72,
     limit: int = MAX_SELECTED,
@@ -208,6 +461,7 @@ def rank_full_market_rows(
 
     feedback = feedback or {}
     reference_signals = reference_signals or {}
+    sector_signals = sector_signals or {}
     source_feedback = source_feedback or {}
     ranked: list[dict[str, Any]] = []
     for raw in rows:
@@ -223,7 +477,8 @@ def rank_full_market_rows(
         volume_ratio = _number(raw.get("f10"))
         main_flow = _number(raw.get("f62"))
         main_flow_pct = _number(raw.get("f184"))
-        source_tags = list(dict.fromkeys(reference_signals.get(code, [])))
+        sector_contexts = list(sector_signals.get(code, []))
+        source_tags = list(dict.fromkeys(reference_signals.get(code, []) + (["强板块核心"] if sector_contexts else [])))
         industry = str(raw.get("f100") or "未分类").strip() or "未分类"
         minimum_amount = 50_000_000 if source_tags else 80_000_000
         if price <= 0 or volume_lots <= 0 or amount < minimum_amount:
@@ -276,6 +531,12 @@ def rank_full_market_rows(
             reasons.append(f"大单方向估算{main_flow / 100_000_000:+.2f}亿（非账户真实流水）")
         for source_name in source_tags:
             reasons.append(f"{source_name}模块共振（候选证据，不单独触发买入）")
+        if sector_contexts:
+            context = sector_contexts[0]
+            reasons.append(
+                f"{context.get('sector') or '强板块'}第{context.get('sector_rank') or '-'}位的"
+                f"{context.get('role') or '主板核心'}；仍需个股量价确认"
+            )
         risks = []
         if change >= 4.5 or vwap_deviation >= 2:
             risks.append("接近追高区，必须等待回踩或下一采样继续确认")
@@ -299,6 +560,7 @@ def rank_full_market_rows(
             "feedback_adjustment": round(result_feedback, 2),
             "source_tags": source_tags,
             "source_contributions": source_contributions,
+            "sector_contexts": sector_contexts,
             "reasons": reasons,
             "risks": risks,
             "invalidation": "跌破累计分时均价且主动卖出增强，或市场风险闸门关闭",
@@ -367,6 +629,7 @@ def refresh_autonomous_selection(
     provider = MarketDataProvider()
     rows, source, provider_at, scanned = provider._fetch_limit_up_catcher_rows()
     reference_signals, reference_status = _reference_signals(rows, provider)
+    sector_signals, sector_core_status = _strong_sector_core_signals(provider)
     source_feedback = _source_feedback(db)
     regime = _latest_regime(db, trade_date)
     gate = _regime_gate(regime)
@@ -374,6 +637,7 @@ def refresh_autonomous_selection(
         rows,
         feedback=_feedback_by_code(db),
         reference_signals=reference_signals,
+        sector_signals=sector_signals,
         source_feedback=source_feedback,
         minimum_score=float(gate["minimum_score"]),
     )
@@ -381,6 +645,7 @@ def refresh_autonomous_selection(
         rows,
         feedback=_feedback_by_code(db),
         reference_signals=reference_signals,
+        sector_signals=sector_signals,
         source_feedback=source_feedback,
         minimum_score=EXPLORATION_MIN_SCORE,
         limit=MAX_EXPLORATION_SELECTED,
@@ -402,8 +667,11 @@ def refresh_autonomous_selection(
         },
         "reference_sources": reference_status,
         "source_feedback": source_feedback,
-        "method": "全A股→流动性→非极端活跃→VWAP承接→订单流估算→行业去重→真实交易反馈微调",
-        "scope_note": "候选范围为东方财富全A实时行情；观察池、抓涨停、断板反包等只作为加分和归因证据，任何单一模块都不能直接触发买入。",
+        "strong_sector_core": sector_core_status,
+        "sector_coverage_audit": _sector_coverage_audit(rows, sector_signals, items, exploration_items),
+        "missed_opportunity_audit": _missed_opportunity_audit(db, trade_date, rows),
+        "method": "全A股→强板块主板核心覆盖→流动性→非极端活跃→VWAP承接→订单流估算→行业去重→真实交易反馈微调",
+        "scope_note": "候选范围为东方财富全A实时行情，并补充行业/概念强板块的沪深主板容量、资金与强度核心；所有板块标签、观察池、抓涨停和断板反包都只用于发现与归因，不能直接触发买入。",
     }
     encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     row = DataCaptureSnapshot(

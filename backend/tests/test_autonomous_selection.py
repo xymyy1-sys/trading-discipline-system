@@ -1,5 +1,10 @@
 from app.services import autonomous_selection
-from app.services.autonomous_selection import autonomous_selection_targets, rank_full_market_rows
+from app.services.autonomous_selection import (
+    _sector_coverage_audit,
+    _strong_sector_core_signals,
+    autonomous_selection_targets,
+    rank_full_market_rows,
+)
 
 
 def quote(
@@ -65,6 +70,49 @@ def test_existing_screens_are_bounded_traceable_evidence_not_a_direct_buy_signal
     assert result[0]["source_tags"] == ["断板反包", "抓涨停"]
     assert sum(item["base"] + item["learned"] for item in result[0]["source_contributions"]) == 12
     assert any("不单独触发买入" in reason for reason in result[0]["reasons"])
+
+
+def test_strong_sector_core_expands_discovery_but_excludes_non_main_board():
+    class Provider:
+        def _fetch_direct_eastmoney_sector_flow_raw(self, flow_type, period):
+            return [{
+                "name": f"强{flow_type}", "board_code": f"BK{flow_type[:2]}",
+                "change_pct": 2.5, "net_inflow": 18.0, "strength": 85,
+            }]
+
+        def _fetch_sector_constituents_raw(self, board_code):
+            return [
+                {"code": "600001", "name": "容量龙头", "price": 10, "change_pct": 2, "amount": 20, "main_inflow": 3, "theme_quote_eligible": True},
+                {"code": "002001", "name": "资金核心", "price": 12, "change_pct": 3, "amount": 12, "main_inflow": 5, "theme_quote_eligible": True},
+                {"code": "300001", "name": "创业板标的", "price": 20, "change_pct": 8, "amount": 30, "main_inflow": 9, "theme_quote_eligible": True},
+            ]
+
+    signals, status = _strong_sector_core_signals(Provider())
+
+    assert "600001" in signals
+    assert "002001" in signals
+    assert "300001" not in signals
+    assert status["core_security_count"] == 2
+    assert all(item["source"] == "强板块核心" for item in signals["600001"])
+
+
+def test_sector_core_is_traceable_and_coverage_explains_omission():
+    rows = [
+        quote("600001", "量价合格"),
+        quote("600002", "过度追高", price=12, change=7.5),
+    ]
+    contexts = {
+        "600001": [{"source": "强板块核心", "sector": "半导体", "sector_rank": 1, "role": "容量核心"}],
+        "600002": [{"source": "强板块核心", "sector": "半导体", "sector_rank": 1, "role": "强度核心"}],
+    }
+    selected = rank_full_market_rows(rows, sector_signals=contexts, minimum_score=60)
+    audit = _sector_coverage_audit(rows, contexts, selected, [])
+
+    assert selected[0]["source_tags"] == ["强板块核心"]
+    assert selected[0]["sector_contexts"][0]["sector"] == "半导体"
+    omitted = next(item for item in audit["items"] if item["code"] == "600002")
+    assert omitted["status"] == "未入选"
+    assert any("追高区" in reason for reason in omitted["reasons"])
 
 
 def test_minute_targets_include_bounded_deduplicated_exploration_universe(monkeypatch):
