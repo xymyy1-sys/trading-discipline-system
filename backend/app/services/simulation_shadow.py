@@ -41,7 +41,7 @@ from app.services.autonomous_selection import latest_autonomous_selection
 
 
 logger = logging.getLogger(__name__)
-RULE_VERSION = "shadow-v1"
+RULE_VERSION = "shadow-v2-conviction"
 AI_TRADER_AUTOMATION_KEY = "codex-ai-paper-trader-v1"
 AI_TRADER_ACCOUNT_NAME = "Codex AI模拟交易员（2万元）"
 AI_TRADER_INITIAL_CASH = 20_000
@@ -51,7 +51,8 @@ MAX_PLAN_AGE_SECONDS = 36 * 60 * 60
 MAX_QUOTE_AGE_SECONDS = 2 * 60
 EXPLORATION_START = time(10, 0)
 EXPLORATION_END = time(14, 30)
-EXPLORATION_POSITION_RATIO = 0.10
+EXPLORATION_POSITION_RATIO = 0.50
+MAX_ENTRY_POSITION_RATIO = 0.85
 
 
 @dataclass(frozen=True)
@@ -300,6 +301,23 @@ def _exploration_volume(row: VolumePriceSnapshot | None) -> bool:
     return flow_not_hostile and momentum_not_negative
 
 
+def _autonomous_position_ratio(score: float, maximum_entries: int) -> tuple[float, str]:
+    """Translate conviction into a meaningful, portfolio-safe allocation.
+
+    A strong signal should not be reduced to a token 100-share trade.  At the
+    same time, a regime that allows several concurrent names must reserve room
+    for the other approved entries instead of overcommitting the same cash.
+    """
+    if score >= 90:
+        raw_ratio, tier = 0.70, "主攻仓"
+    elif score >= 82:
+        raw_ratio, tier = 0.50, "确认仓"
+    else:
+        raw_ratio, tier = 0.35, "进攻仓"
+    portfolio_slot = MAX_ENTRY_POSITION_RATIO / max(maximum_entries, 1)
+    return min(raw_ratio, portfolio_slot), tier
+
+
 def _execution_candidate(row: PositionExecutionState) -> ShadowCandidate | None:
     action = str(row.recommended_action or "").strip()
     state = str(row.state or "").upper()
@@ -358,6 +376,8 @@ def _execution_candidate(row: PositionExecutionState) -> ShadowCandidate | None:
             dependencies=state_dependency,
         )
     if entry_signal and not prohibited_entry:
+        add_ratio = float(row.recommended_position_ratio or 0)
+        add_ratio = min(max(add_ratio if add_ratio > 0 else 0.35, 0.20), 0.50)
         return ShadowCandidate(
             strategy_source="holding_execution",
             source_kind="position_execution_state",
@@ -368,7 +388,7 @@ def _execution_candidate(row: PositionExecutionState) -> ShadowCandidate | None:
             name=row.name,
             intent="ENTER",
             side="BUY",
-            ratio=0.1,
+            ratio=add_ratio,
             ready=readiness == "realtime",
             reason="持仓执行状态给出明确加仓确认" if _quality_ok(row.data_quality) else "持仓执行信号不是实时可信数据",
             evidence=evidence + (f"执行状态={state}", f"动作={action}"),
@@ -405,6 +425,13 @@ def _expectation_candidate(
         evidence += (f"量价形态={volume.pattern}",)
     if positive:
         confirmed = _positive_volume(volume)
+        gap_score = int(expectation.expectation_gap_score or 0)
+        if gap_score >= 18:
+            entry_ratio, position_tier = 0.65, "主攻仓"
+        elif gap_score >= 12:
+            entry_ratio, position_tier = 0.50, "确认仓"
+        else:
+            entry_ratio, position_tier = 0.35, "进攻仓"
         return ShadowCandidate(
             strategy_source="expectation_volume_price",
             source_kind="expectation_volume_pair",
@@ -415,10 +442,10 @@ def _expectation_candidate(
             name=expectation.name or getattr(volume, "name", ""),
             intent="ENTER",
             side="BUY",
-            ratio=0.1,
+            ratio=entry_ratio,
             ready=confirmed,
-            reason="正预期差与真实量价确认共振" if confirmed else "正预期差尚未获得真实量价确认",
-            evidence=evidence + (f"预期差={expectation.expectation_gap_score}",),
+            reason=f"正预期差与真实量价确认共振，按{position_tier}{entry_ratio:.0%}执行" if confirmed else "正预期差尚未获得真实量价确认",
+            evidence=evidence + (f"预期差={expectation.expectation_gap_score}", f"仓位等级={position_tier}"),
             dependencies=dependencies,
         )
     confirmed = _negative_volume(volume)
@@ -464,6 +491,8 @@ def _limit_up_candidate(
         f"量价形态={getattr(volume, 'pattern', '缺失')}",
     )
     auction_plan = _json_dict(plan.auction_plan)
+    configured_ratio = _safe_float(auction_plan.get("max_position_ratio"))
+    limit_up_ratio = min(configured_ratio, 0.50) if configured_ratio > 0 else 0.35
     return ShadowCandidate(
         strategy_source="limit_up",
         source_kind="limit_up_plan_confirmation",
@@ -474,7 +503,7 @@ def _limit_up_candidate(
         name=plan.name,
         intent="ENTER",
         side="BUY",
-        ratio=min(max(_safe_float(auction_plan.get("max_position_ratio")) or 0.1, 0.01), 0.2),
+        ratio=limit_up_ratio,
         ready=ready,
         reason="触及涨停区且量价确认，生成影子打板委托" if ready else "打板预案尚未同时满足触板与真实量价确认",
         evidence=evidence,
@@ -520,13 +549,14 @@ def _autonomous_candidates(
         if len(result) >= maximum:
             break
         code = _normalize_code(str(item.get("code") or ""))
+        score = float(item.get("score") or 0)
+        position_ratio, position_tier = _autonomous_position_ratio(score, maximum)
         # A-share orders require at least one 100-share lot.  Do not let
         # unaffordable high-priced names consume the three candidate slots.
-        if float(item.get("price") or 0) * 100 > available_cash * 0.08:
+        if float(item.get("price") or 0) * 100 > available_cash * position_ratio:
             continue
         volume = volumes.get(code)
         confirmed = _positive_volume(volume)
-        score = float(item.get("score") or 0)
         reasons = tuple(str(value) for value in item.get("reasons") or [] if str(value).strip())
         risks = tuple(str(value) for value in item.get("risks") or [] if str(value).strip())
         source_tags = tuple(str(value) for value in item.get("source_tags") or [] if str(value).strip())
@@ -542,10 +572,10 @@ def _autonomous_candidates(
             name=str(item.get("name") or ""),
             intent="ENTER",
             side="BUY",
-            ratio=0.08,
+            ratio=position_ratio,
             ready=confirmed,
             reason=(
-                f"全A独立评分{score:.1f}分，{item.get('style') or '量价候选'}，且获得真实分钟量价确认"
+                f"全A独立评分{score:.1f}分，{item.get('style') or '量价候选'}，真实分钟量价确认，按{position_tier}{position_ratio:.0%}执行"
                 if confirmed
                 else f"全A独立评分{score:.1f}分，但尚未获得真实分钟量价确认"
             ),
@@ -603,9 +633,9 @@ def _autonomous_candidates(
             side="BUY",
             ratio=EXPLORATION_POSITION_RATIO,
             ready=True,
-            reason=f"每日探索样本：全A评分{float(item.get('score') or 0):.1f}分，正常策略尚未成交，使用10%以内仓位验证",
+            reason=f"每日探索样本：全A评分{float(item.get('score') or 0):.1f}分，正常策略尚未成交，使用确认仓50%验证",
             evidence=reasons + risks + tuple(f"来源标签={value}" for value in source_tags) + (
-                "样本类型=探索；与正式策略分开审计",
+                "样本类型=探索；仓位等级=确认仓50%；与正式策略分开审计",
                 f"市场闸门={gate.get('reason') or '缺失'}",
                 f"量价形态={getattr(volume, 'pattern', '中性确认')}",
                 f"失效条件={item.get('invalidation') or '跌破分时均价且主动卖出增强'}",
@@ -695,7 +725,7 @@ def _has_open_order(db: Session, account_id: int, code: str, side: str) -> bool:
 
 
 def _entry_quantity(account: SimulationAccount, price: float, ratio: float) -> int:
-    budget = max(float(account.cash or 0), 0) * min(max(ratio, 0.01), 0.2)
+    budget = max(float(account.cash or 0), 0) * min(max(ratio, 0.01), MAX_ENTRY_POSITION_RATIO)
     return max(int(math.floor(budget / max(price, 0.01) / 100) * 100), 0)
 
 

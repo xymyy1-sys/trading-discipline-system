@@ -357,7 +357,7 @@ export function SimulationAiTrader() {
           {!selection?.items?.length && <p className="plain-text">尚无全市场候选。系统仍会扫描全A；抓涨停、断板反包等模块只提供辅助证据，不会为了成交而降低门槛。</p>}
         </div>
         <p className="plain-text">来源反馈：{Object.entries(selection?.source_feedback || {}).map(([name, value]) => `${name} ${value.sample_count}笔 / 均值${value.mean_return_pct >= 0 ? '+' : ''}${value.mean_return_pct.toFixed(2)}% / 调分${value.score_adjustment >= 0 ? '+' : ''}${value.score_adjustment.toFixed(1)}`).join('；') || '尚无足够闭环成交，暂不自动调整来源权重。'}</p>
-        {selection?.exploration_policy && <p className="simulation-unfilled"><b>每日探索规则：</b>正常策略到10:00仍未成交时，最多选择1只数据完整、可买一手且未出现负向量价结构的候选，以不超过{(selection.exploration_policy.position_ratio * 100).toFixed(0)}%仓位取得前向样本；探索交易单独标记，不冒充正式策略命中。</p>}
+        {selection?.exploration_policy && <p className="simulation-unfilled"><b>每日探索规则：</b>正常策略到10:00仍未成交时，最多选择1只数据完整且未出现负向量价结构的候选，以{(selection.exploration_policy.position_ratio * 100).toFixed(0)}%确认仓取得有统计意义的前向样本；正式策略按确信度使用进攻仓、确认仓或主攻仓，探索交易仍单独标记。</p>}
         <footer>{selection?.method || '候选仍需分钟量价确认；候选不等于买入，不为成交而降低纪律。'}</footer>
       </section>
       <div className="simulation-kpi-grid ai-trader-kpis">

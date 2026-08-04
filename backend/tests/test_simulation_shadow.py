@@ -14,6 +14,8 @@ from app.schemas.simulation import SimulationAccountCreate
 from app.services.simulation import create_account, process_open_orders
 from app.services.simulation_shadow import (
     RULE_VERSION,
+    _autonomous_position_ratio,
+    _entry_quantity,
     mark_shadow_equity_after_close,
     run_shadow_experiments,
 )
@@ -43,6 +45,18 @@ def _create_shadow_account(db_session, *, name: str):
     account.automation_key = f"test-shadow-{account.id}"
     db_session.commit()
     return account
+
+
+def test_conviction_sizing_uses_meaningful_capital_and_reserves_multi_name_capacity(db_session):
+    account = create_account(db_session, SimulationAccountCreate(initial_cash=20_000))
+    ratio, tier = _autonomous_position_ratio(91, 1)
+    assert (ratio, tier) == (0.70, "主攻仓")
+    assert _entry_quantity(account, 10, ratio) == 1400
+
+    diversified_ratio, diversified_tier = _autonomous_position_ratio(91, 3)
+    assert diversified_tier == "主攻仓"
+    assert round(diversified_ratio, 4) == round(0.85 / 3, 4)
+    assert _entry_quantity(account, 10, diversified_ratio) == 500
 
 
 def _positive_pair(db_session, now: datetime, code: str = "600001"):
@@ -93,7 +107,7 @@ def test_shadow_positive_expectation_creates_one_idempotent_order_and_freezes_ve
     order = db_session.get(SimulationOrder, first.order_ids[0])
     assert order.status == "OPEN"
     assert order.strategy_source == "expectation_volume_price"
-    assert order.quantity == 1000
+    assert order.quantity == 5000
     assert "shadow:" in order.client_note
 
     decision = db_session.query(SimulationShadowDecision).one()

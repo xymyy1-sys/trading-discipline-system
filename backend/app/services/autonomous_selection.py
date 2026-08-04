@@ -397,8 +397,8 @@ def refresh_autonomous_selection(
         "exploration_policy": {
             "minimum_score": EXPLORATION_MIN_SCORE,
             "maximum_daily_entries": 1,
-            "position_ratio": 0.10,
-            "purpose": "正常策略未成交时取得前向探索样本；单独标记，不伪装成正式信号",
+            "position_ratio": 0.50,
+            "purpose": "正常策略未成交时取得有统计意义的前向样本；单独标记，不伪装成正式信号",
         },
         "reference_sources": reference_status,
         "source_feedback": source_feedback,
