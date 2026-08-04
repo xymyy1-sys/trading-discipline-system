@@ -26,6 +26,7 @@ from app.schemas.simulation import (
     SimulationPositionOut,
     SimulationShadowDecisionOut,
     SimulationValidationOut,
+    SimulationRiskGuardOut,
 )
 from app.services.simulation import (
     cancel_order,
@@ -37,6 +38,8 @@ from app.services.simulation import (
 )
 from app.services.simulation_calibration import simulation_calibration_proposal
 from app.services.simulation_validation import validation_report
+from app.services.simulation_risk import account_risk_guard
+from app.core.trading_clock import shanghai_now_naive
 from app.services.simulation_shadow import get_or_create_ai_trader_account, run_shadow_experiments
 from app.services.autonomous_selection import latest_autonomous_selection, refresh_autonomous_selection
 
@@ -229,6 +232,11 @@ def simulation_performance(account_id: int, db: Session = Depends(get_db)) -> di
 @router.get("/accounts/{account_id}/validation", response_model=SimulationValidationOut)
 def simulation_validation(account_id: int, db: Session = Depends(get_db)) -> dict:
     return validation_report(db, _account_or_404(db, account_id))
+
+
+@router.get("/accounts/{account_id}/risk-guard", response_model=SimulationRiskGuardOut)
+def simulation_risk_guard(account_id: int, db: Session = Depends(get_db)):
+    return account_risk_guard(db, _account_or_404(db, account_id), shanghai_now_naive())
 
 
 @router.get(

@@ -240,3 +240,13 @@ export interface SimulationValidation {
   folds: SimulationValidationFold[]
   limitations: string[]
 }
+
+export interface SimulationRiskGuard {
+  state: string
+  position_multiplier: number
+  block_new_entries: boolean
+  reason: string
+  drawdown_pct: number
+  daily_loss_pct: number
+  consecutive_formal_losses: number
+}

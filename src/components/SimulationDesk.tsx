@@ -36,6 +36,7 @@ import type {
   SimulationShadowDecision,
   SimulationStrategyType,
   SimulationValidation,
+  SimulationRiskGuard,
 } from '../types'
 
 const ACTIVE_ACCOUNT_KEY = 'simulation-account-id'
@@ -240,6 +241,7 @@ export function SimulationAiTrader() {
   const [performance, setPerformance] = useState<SimulationPerformance | null>(null)
   const [calibration, setCalibration] = useState<SimulationCalibrationProposal | null>(null)
   const [validation, setValidation] = useState<SimulationValidation | null>(null)
+  const [riskGuard, setRiskGuard] = useState<SimulationRiskGuard | null>(null)
   const [collector, setCollector] = useState<IntradayCollectorStatus | null>(null)
   const [selection, setSelection] = useState<AutonomousSelection | null>(null)
   const [loading, setLoading] = useState(false)
@@ -262,11 +264,12 @@ export function SimulationAiTrader() {
           simulationRequest<SimulationPerformance>(`/api/simulation/accounts/${row.id}/performance`),
           simulationRequest<SimulationCalibrationProposal>(`/api/simulation/accounts/${row.id}/calibration-proposal`).catch(() => null),
           simulationRequest<SimulationValidation>(`/api/simulation/accounts/${row.id}/validation`).catch(() => null),
+          simulationRequest<SimulationRiskGuard>(`/api/simulation/accounts/${row.id}/risk-guard`).catch(() => null),
           simulationRequest<IntradayCollectorStatus>('/api/intraday-collector/status'),
           simulationRequest<AutonomousSelection>('/api/simulation/ai-trader/candidates'),
         ])
       })
-      .then(([positionRows, orderRows, equityRows, decisionRows, report, calibrationProposal, validationReport, collectorStatus, selectionRows]) => {
+      .then(([positionRows, orderRows, equityRows, decisionRows, report, calibrationProposal, validationReport, guard, collectorStatus, selectionRows]) => {
         setPositions(positionRows)
         setOrders(orderRows)
         setEquities(equityRows)
@@ -274,6 +277,7 @@ export function SimulationAiTrader() {
         setPerformance(report)
         setCalibration(calibrationProposal)
         setValidation(validationReport)
+        setRiskGuard(guard)
         setCollector(collectorStatus)
         setSelection(selectionRows)
       })
@@ -343,6 +347,10 @@ export function SimulationAiTrader() {
         <small>账本日：{tradeDate || '等待首个交易日'} · 账户 #{account?.id ?? '--'}</small>
       </section>
       <AiTraderAutomationPanel status={collector} />
+      {riskGuard && <section className={`simulation-section panel tone-${riskGuard.block_new_entries ? 'danger' : riskGuard.position_multiplier < 1 ? 'warning' : 'ok'}`}>
+        <div className="simulation-section-title"><div><h4><ShieldAlert size={17} />账户风险闸门</h4><small>{riskGuard.reason}</small></div><span>{riskGuard.block_new_entries ? '停止新开仓' : riskGuard.position_multiplier < 1 ? `仓位降至${(riskGuard.position_multiplier * 100).toFixed(0)}%` : '正常'}</span></div>
+        <p className="plain-text">当前回撤 {percent(riskGuard.drawdown_pct)} · 当日亏损 {percent(riskGuard.daily_loss_pct)} · 正式策略连续亏损 {riskGuard.consecutive_formal_losses} 笔。停机只冻结买入，卖出与风险退出始终保留。</p>
+      </section>}
       <section className="simulation-section panel">
         <div className="simulation-section-title">
           <div><h4>全市场多源选股与买入闸门</h4><small>{selection?.scope_note || '等待全A实时行情扫描。'}</small></div>

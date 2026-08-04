@@ -290,6 +290,16 @@ class SimulationValidationOut(BaseModel):
     limitations: list[str] = Field(default_factory=list)
 
 
+class SimulationRiskGuardOut(BaseModel):
+    state: str
+    position_multiplier: float
+    block_new_entries: bool
+    reason: str
+    drawdown_pct: float
+    daily_loss_pct: float
+    consecutive_formal_losses: int
+
+
 class SimulationShadowDecisionOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 

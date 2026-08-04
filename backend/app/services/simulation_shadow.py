@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, time, timedelta
 import hashlib
 import json
@@ -38,6 +38,7 @@ from app.services.simulation import (
     submit_order,
 )
 from app.services.autonomous_selection import latest_autonomous_selection
+from app.services.simulation_risk import account_risk_guard
 
 
 logger = logging.getLogger(__name__)
@@ -859,14 +860,29 @@ def run_shadow_experiments(
         result.skipped.append({"code": "*", "reason": "当前没有可验证的明确策略信号"})
         return result
 
+    risk_guard = account_risk_guard(db, account, evaluated_at)
+
     trade_date = evaluated_at.date().isoformat()
     for candidate in candidates:
+        if candidate.side == "BUY" and risk_guard.position_multiplier < 1:
+            candidate = replace(
+                candidate,
+                ratio=candidate.ratio * risk_guard.position_multiplier,
+                reason=f"{candidate.reason}；账户风控：{risk_guard.reason}",
+                evidence=candidate.evidence + (f"账户风控状态={risk_guard.state}", risk_guard.reason),
+            )
         decision, duplicate = _claim_decision(db, account, candidate, evaluated_at)
         if duplicate:
             if decision is not None:
                 result.duplicate_signal_keys.append(decision.signal_key)
             continue
         assert decision is not None
+        if candidate.side == "BUY" and risk_guard.block_new_entries:
+            decision.status = "SKIPPED"
+            decision.reason = risk_guard.reason
+            db.commit()
+            result.skipped.append({"code": candidate.code, "reason": decision.reason})
+            continue
         fresh, stale_reason = _dependencies_are_fresh(candidate, evaluated_at)
         if not fresh or not candidate.ready:
             decision.status = "SKIPPED"
