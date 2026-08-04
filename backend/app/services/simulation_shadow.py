@@ -1115,6 +1115,35 @@ def mark_shadow_equity_after_close(
                     quote_at = _quote_time(quote)
                     local_quote_at = _local(quote_at)
                     close_window_ok = True
+                else:
+                    try:
+                        from app.services.market_data import MarketDataProvider
+
+                        bars, source = MarketDataProvider()._fetch_break_repackage_daily_bars(
+                            position.code,
+                            trade_date.isoformat(),
+                            trade_date.isoformat(),
+                        )
+                        bar = next(
+                            (item for item in bars if item.get("trade_date") == trade_date.isoformat()),
+                            None,
+                        )
+                        if bar is not None and _safe_float(bar.get("close")) > 0:
+                            quote = {
+                                "name": position.name,
+                                "price": bar["close"],
+                                "prev_close": 0,
+                                "open": bar.get("open"),
+                                "high": bar.get("high"),
+                                "low": bar.get("low"),
+                                "provider_event_at": datetime.combine(trade_date, time(15, 0)),
+                                "note": f"收盘权益采用当日未复权日线收盘价（{source}）",
+                            }
+                            quote_at = _quote_time(quote)
+                            local_quote_at = _local(quote_at)
+                            close_window_ok = True
+                    except Exception as exc:
+                        logger.warning("close daily-bar fallback failed code=%s error=%s", position.code, exc)
             cache[position.code] = quote
             if (
                 local_quote_at is None
