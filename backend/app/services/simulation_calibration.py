@@ -46,7 +46,11 @@ _SOURCE_REQUIREMENTS: dict[str, tuple[tuple[str, str, str, str, int], ...]] = {
     ),
 }
 _FORMAL_SHADOW_SOURCE_KINDS = {
-    "expectation_volume_price": {"expectation_volume_pair", "autonomous_universe_selection"},
+    "expectation_volume_price": {
+        "expectation_volume_pair",
+        "pullback_reclaim_confirmation",
+        "autonomous_universe_selection",
+    },
     "holding_execution": {"position_execution_state"},
     "limit_up": {"limit_up_plan_confirmation"},
 }

@@ -22,6 +22,136 @@ from app.models.trading import (
 from app.services.trading_calendar import next_a_share_trading_day
 
 
+def generate_automatic_limit_up_plans(
+    db: Session,
+    *,
+    completed_trade_date: str,
+    maximum_plans: int = 12,
+) -> int:
+    """Turn the audited closing limit-up ladder into next-session plans.
+
+    Manual clicks remain available, but the paper trader must not depend on a
+    human remembering to create tomorrow's plan.  Every selected row keeps the
+    ladder/theme/identity provenance in ``auction_plan``; ineligible high-board
+    names are retained as observation plans with a zero position ceiling.
+    """
+    from app.api.helpers.plan_calc import _limit_up_next_day_plan
+    from app.schemas.trading import LimitUpPlanCreate
+    from app.services.market_data import MarketDataProvider, _is_valid_limit_up_ladder
+
+    provider = MarketDataProvider()
+    ladder = provider.limit_up_ladder(completed_trade_date, force_refresh=False)
+    if not _is_valid_limit_up_ladder(ladder) or ladder.trade_date != completed_trade_date:
+        return 0
+    atmosphere = provider.limit_up_atmosphere(completed_trade_date, force_refresh=False)
+    stocks = {
+        stock.code: stock
+        for group in ladder.groups
+        for stock in group.stocks
+    }
+    ranked: dict[str, tuple[int, int, float, object, object]] = {}
+    for theme in atmosphere.theme_ladders:
+        for role in theme.identity_roles:
+            # Eligible mainline identities sort first, then height and role
+            # score.  A high board with a zero cap remains useful as a
+            # next-morning observation plan but can never create an order.
+            key = (
+                1 if float(role.max_position_ratio or 0) > 0 else 0,
+                int(role.level or 0),
+                float(role.role_score or 0),
+                theme,
+                role,
+            )
+            previous = ranked.get(role.code)
+            if previous is None or key[:3] > previous[:3]:
+                ranked[role.code] = key
+    # Provider theme classification can be incomplete.  Never lose the true
+    # market/sector high board merely because it lacked a matched theme; it is
+    # included as a zero-cap observation plan and must earn eligibility live.
+    for stock in stocks.values():
+        ranked.setdefault(
+            stock.code,
+            (0, int(stock.consecutive_limit_days or 1), 0.0, None, None),
+        )
+    selected = sorted(
+        ranked.items(),
+        key=lambda item: item[1][:3],
+        reverse=True,
+    )[:max(1, maximum_plans)]
+    plan_date = next_trading_date(date.fromisoformat(completed_trade_date))
+    selected_codes: set[str] = set()
+    created = 0
+    for code, (_, _, _, theme, role) in selected:
+        stock = stocks.get(code)
+        if stock is None:
+            continue
+        selected_codes.add(code)
+        existing = db.query(NextDayPlan).filter(
+            NextDayPlan.plan_date == plan_date,
+            NextDayPlan.plan_type == "limit_up_auction",
+            NextDayPlan.code == code,
+        ).first()
+        if existing is not None:
+            existing_auction = json.loads(existing.auction_plan or "{}")
+            if existing_auction.get("auto_generated") is not True:
+                # A manually edited plan is authoritative for the same code
+                # and date.  Keep it in the selected set so rotation cannot
+                # delete it, but never overwrite the user's scenario.
+                continue
+        theme_name = str(getattr(theme, "name", "") or "")
+        concepts = list(stock.concepts or [])
+        if theme_name and theme_name not in concepts:
+            concepts.insert(0, theme_name)
+        role_cap = float(getattr(role, "max_position_ratio", 0) or 0)
+        roles = list(getattr(role, "roles", []) or [])
+        expectation = (
+            f"系统盘后自动预案：{stock.consecutive_limit_days}板；"
+            f"题材={theme_name or stock.industry or '待验证'}；"
+            f"身份={'/'.join(roles) or '高标观察'}。次日竞价与开盘承接不通过则自动失效。"
+        )
+        payload = LimitUpPlanCreate(
+            code=stock.code,
+            name=stock.name,
+            price=float(stock.price or 0),
+            level=max(1, int(stock.consecutive_limit_days or 1)),
+            industry=stock.industry,
+            concepts=concepts,
+            sealed_amount=float(stock.sealed_amount or 0),
+            amount=float(stock.amount or 0),
+            turnover=float(stock.turnover or 0),
+            break_count=int(stock.break_count or 0),
+            first_limit_time=stock.first_limit_time,
+            last_limit_time=stock.last_limit_time,
+            expectation=expectation,
+            max_position_ratio=role_cap,
+        )
+        plan = _limit_up_next_day_plan(payload, plan_date, existing)
+        auction = json.loads(plan.auction_plan or "{}")
+        auction.update({
+            "auto_generated": True,
+            "generation_source": "盘后真实涨停天梯+题材身份竞争",
+            "source_trade_date": completed_trade_date,
+            "source_ladder": ladder.source,
+            "source_atmosphere": atmosphere.source,
+        })
+        plan.auction_plan = json.dumps(auction, ensure_ascii=False)
+        if existing is None:
+            db.add(plan)
+        created += 1
+
+    # Rotate only plans previously owned by this automatic job.  User-created
+    # plans are never removed by the scheduler.
+    for stale in db.query(NextDayPlan).filter(
+        NextDayPlan.plan_date == plan_date,
+        NextDayPlan.plan_type == "limit_up_auction",
+    ).all():
+        payload = json.loads(stale.auction_plan or "{}")
+        if payload.get("auto_generated") is True and stale.code not in selected_codes:
+            db.delete(stale)
+    db.commit()
+    return created
+
+
 def next_trading_date(value: date | None = None, *, now: datetime | None = None) -> str:
     return next_a_share_trading_day(value or shanghai_today(now)).isoformat()
 
@@ -55,6 +185,17 @@ def rotate_watchlist_and_generate_next_day_expectations(
     except Exception:
         # Calibration is a feedback report.  It must never block the core
         # nightly rotation and next-session expectation baselines.
+        db.rollback()
+
+    # The closing limit-up ladder is an independent source.  Generate its
+    # next-session plans even when the automatic watchlist provider is late;
+    # otherwise a delayed watchlist would also leave the early board window
+    # without a plan on the following morning.
+    try:
+        generate_automatic_limit_up_plans(db, completed_trade_date=completed_trade_date)
+    except Exception:
+        # A temporarily unavailable ladder must not suppress holding scripts.
+        # The close scheduler will retry the automatic board plan later.
         db.rollback()
 
     if not _watchlist_generation_completed(db, completed_trade_date):

@@ -328,6 +328,11 @@ def test_zero_member_generation_marker_is_a_completed_batch(db_session, monkeypa
         "generate_next_day_expectations",
         lambda _db, *, completed_trade_date=None: calls.append(completed_trade_date) or 0,
     )
+    monkeypatch.setattr(
+        next_day_expectations,
+        "generate_automatic_limit_up_plans",
+        lambda _db, *, completed_trade_date=None: 0,
+    )
 
     assert next_day_expectations.rotate_watchlist_and_generate_next_day_expectations(
         db_session,

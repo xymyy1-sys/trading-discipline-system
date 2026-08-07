@@ -1014,6 +1014,35 @@ class SimulationAccount(Base):
     )
 
 
+class SimulationRuleRelease(Base):
+    """A versioned, bounded paper-trading rule candidate and its OOS audit."""
+
+    __tablename__ = "simulation_rule_releases"
+    __table_args__ = (
+        UniqueConstraint("account_id", "candidate_hash", name="uq_sim_rule_release_candidate"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    account_id: Mapped[int] = mapped_column(Integer, index=True)
+    rule_version: Mapped[str] = mapped_column(String(64), index=True)
+    baseline_rule_version: Mapped[str] = mapped_column(String(64), default="")
+    candidate_hash: Mapped[str] = mapped_column(String(64), index=True)
+    status: Mapped[str] = mapped_column(String(24), default="TRAINING", index=True)
+    parameters_json: Mapped[str] = mapped_column(Text, default="{}")
+    rationale_json: Mapped[str] = mapped_column(Text, default="[]")
+    baseline_closed_trade_id: Mapped[int] = mapped_column(Integer, default=0)
+    activation_closed_trade_id: Mapped[int] = mapped_column(Integer, default=0)
+    forward_control_samples: Mapped[int] = mapped_column(Integer, default=0)
+    forward_candidate_samples: Mapped[int] = mapped_column(Integer, default=0)
+    control_metrics_json: Mapped[str] = mapped_column(Text, default="{}")
+    candidate_metrics_json: Mapped[str] = mapped_column(Text, default="{}")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc), index=True)
+    validated_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    activated_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    rolled_back_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    rollback_reason: Mapped[str] = mapped_column(Text, default="")
+
+
 class SimulationEvidenceSnapshot(Base):
     __tablename__ = "simulation_evidence_snapshots"
     __table_args__ = (

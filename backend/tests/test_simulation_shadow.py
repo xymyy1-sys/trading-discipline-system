@@ -4,6 +4,7 @@ from types import SimpleNamespace
 
 from app.models.trading import (
     ExpectationSnapshot,
+    MarketRegimeSnapshot,
     NextDayPlan,
     PositionExecutionState,
     SimulationOrder,
@@ -14,6 +15,7 @@ from app.models.trading import (
 from app.schemas.simulation import SimulationAccountCreate
 from app.services.simulation import create_account, process_open_orders
 from app.services.simulation_shadow import (
+    AI_TRADER_AUTOMATION_KEY,
     RULE_VERSION,
     _autonomous_position_ratio,
     _entry_quantity,
@@ -25,6 +27,22 @@ from app.services.simulation_shadow import (
     mark_shadow_equity_after_close,
     run_shadow_experiments,
 )
+
+
+def _enable_ai_account(db_session, account, now: datetime):
+    account.account_type = "shadow"
+    account.automation_key = AI_TRADER_AUTOMATION_KEY
+    db_session.add_all([
+        account,
+        MarketRegimeSnapshot(
+            trade_date=now.date().isoformat(), captured_at=now - timedelta(seconds=20),
+            source="test", data_quality="realtime", coverage_ratio=1.0,
+            up_count=3000, down_count=1800, advance_ratio=0.62,
+            regime_code="HEALTHY_EXPANSION",
+        ),
+    ])
+    db_session.commit()
+    return account
 
 
 def test_frozen_hard_stop_exits_full_position_without_waiting_for_repair(db_session, monkeypatch):
@@ -508,6 +526,103 @@ def test_shadow_limit_up_requires_touch_and_volume_confirmation(db_session):
     assert order.quantity == 400
     # No same-bar fill is produced; later matching remains conservative at a sealed limit.
     assert order.status == "OPEN"
+
+
+def test_ai_limit_up_plan_can_enter_before_0950(db_session):
+    now = datetime(2026, 8, 10, 9, 35)
+    account = _enable_ai_account(
+        db_session,
+        create_account(db_session, SimulationAccountCreate(initial_cash=100000)),
+        now,
+    )
+    db_session.add_all([
+        NextDayPlan(
+            plan_date=now.date().isoformat(), plan_type="limit_up_auction",
+            code="600003", name="早盘打板", limit_up_price=11,
+            auction_plan='{"max_position_ratio": 0.10, "auto_generated": true}',
+            updated_at=now - timedelta(minutes=1),
+        ),
+        VolumePriceSnapshot(
+            trade_date=now.date().isoformat(), code="600003", name="早盘打板",
+            captured_at=now - timedelta(seconds=20), price=11, vwap=10.5,
+            vwap_reliable=True, price_vs_vwap=4.76, volume_acceleration=30,
+            pattern="放量上涨突破", data_quality="realtime", data_source="test",
+        ),
+    ])
+    db_session.commit()
+    result = run_shadow_experiments(
+        db_session, account, now=now,
+        quote_loader=lambda _: _quote(11, now, limit_up_price=11, ask1_volume=50000),
+    )
+    assert len(result.order_ids) == 1
+    assert db_session.get(SimulationOrder, result.order_ids[0]).strategy_source == "limit_up"
+
+
+def test_ai_pullback_reclaim_uses_two_stage_entry_and_blocks_third(db_session):
+    now = datetime(2026, 8, 10, 10, 5)
+    account = _enable_ai_account(
+        db_session,
+        create_account(db_session, SimulationAccountCreate(initial_cash=100000)),
+        now,
+    )
+    expectation = ExpectationSnapshot(
+        trade_date=now.date().isoformat(), code="600001", name="回踩样本",
+        stage="第一阶段确认", expectation_gap_score=12,
+        expectation_result="STRONGER_THAN_EXPECTED", state_transition="MATCHED_TO_STRONGER",
+        created_at=now - timedelta(minutes=2),
+    )
+
+    def add_volume(moment: datetime, row_id: int | None = None):
+        row = VolumePriceSnapshot(
+            trade_date=now.date().isoformat(), code="600001", name="回踩样本",
+            captured_at=moment, price=10, vwap=9.98, vwap_reliable=True,
+            price_vs_vwap=0.20, minute_bar_count=30, active_buy_amount=12,
+            active_sell_amount=10, volume_acceleration=5, attack_efficiency=0.5,
+            pattern="回踩不破重新站回VWAP", data_quality="realtime", data_source="test",
+        )
+        if row_id is not None:
+            row.id = row_id
+        db_session.add(row)
+        db_session.commit()
+
+    db_session.add(expectation)
+    db_session.commit()
+    add_volume(now - timedelta(seconds=20))
+    first = run_shadow_experiments(
+        db_session, account, now=now, quote_loader=lambda _: _quote(10, now),
+    )
+    assert len(first.order_ids) == 1
+    first_order = db_session.get(SimulationOrder, first.order_ids[0])
+    assert first_order.quantity > 0
+    assert "回踩试探仓" in first_order.client_note
+    process_open_orders(
+        db_session, account, now=now + timedelta(minutes=1),
+        quote_loader=lambda _: _quote(10.01, now + timedelta(minutes=1)),
+    )
+
+    second_at = now + timedelta(minutes=2)
+    add_volume(second_at - timedelta(seconds=10))
+    second = run_shadow_experiments(
+        db_session, account, now=second_at,
+        quote_loader=lambda _: _quote(10.05, second_at),
+    )
+    assert len(second.order_ids) == 1
+    second_order = db_session.get(SimulationOrder, second.order_ids[0])
+    assert second_order.quantity > 0
+    assert "第二段确认仓" in second_order.client_note
+    process_open_orders(
+        db_session, account, now=second_at + timedelta(minutes=1),
+        quote_loader=lambda _: _quote(10.06, second_at + timedelta(minutes=1)),
+    )
+
+    third_at = now + timedelta(minutes=4)
+    add_volume(third_at - timedelta(seconds=10))
+    third = run_shadow_experiments(
+        db_session, account, now=third_at,
+        quote_loader=lambda _: _quote(10.08, third_at),
+    )
+    assert third.order_ids == []
+    assert any("最多两段建仓" in item["reason"] for item in third.skipped)
 
 
 def test_shadow_limit_up_rejects_stale_plan_even_with_fresh_quote_and_volume(db_session):

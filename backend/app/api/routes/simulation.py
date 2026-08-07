@@ -1,3 +1,5 @@
+import json
+
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
@@ -248,6 +250,40 @@ def get_simulation_calibration_proposal(
     db: Session = Depends(get_db),
 ) -> dict:
     return simulation_calibration_proposal(db, _account_or_404(db, account_id))
+
+
+@router.get("/accounts/{account_id}/rule-releases")
+def list_simulation_rule_releases(
+    account_id: int,
+    db: Session = Depends(get_db),
+) -> list[dict]:
+    """Expose the training/promotion/rollback audit without mutating it."""
+    from app.models.trading import SimulationRuleRelease
+
+    _account_or_404(db, account_id)
+    rows = db.query(SimulationRuleRelease).filter(
+        SimulationRuleRelease.account_id == account_id,
+    ).order_by(SimulationRuleRelease.id.desc()).limit(50).all()
+    return [
+        {
+            "id": row.id,
+            "rule_version": row.rule_version,
+            "baseline_rule_version": row.baseline_rule_version,
+            "status": row.status,
+            "parameters": json.loads(row.parameters_json or "{}"),
+            "rationale": json.loads(row.rationale_json or "[]"),
+            "forward_control_samples": row.forward_control_samples,
+            "forward_candidate_samples": row.forward_candidate_samples,
+            "control_metrics": json.loads(row.control_metrics_json or "{}"),
+            "candidate_metrics": json.loads(row.candidate_metrics_json or "{}"),
+            "created_at": row.created_at,
+            "validated_at": row.validated_at,
+            "activated_at": row.activated_at,
+            "rolled_back_at": row.rolled_back_at,
+            "rollback_reason": row.rollback_reason,
+        }
+        for row in rows
+    ]
 
 
 @router.get(

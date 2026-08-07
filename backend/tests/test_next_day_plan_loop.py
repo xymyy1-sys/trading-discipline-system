@@ -13,6 +13,7 @@ from app.schemas.trading import VolumePriceSnapshotOut
 from app.services import trading_calendar
 from app.services.intraday_collector import _refresh_collected_holding_plan
 from app.services.next_day_expectations import (
+    generate_automatic_limit_up_plans,
     generate_next_day_expectations,
     rotate_watchlist_and_generate_next_day_expectations,
 )
@@ -142,6 +143,10 @@ def test_watchlist_provider_delay_does_not_block_holding_plan(db_session, monkey
     monkeypatch.setattr(stocks, "_watchlist_generation_completed", lambda _db, _date: False)
     monkeypatch.setattr(stocks, "_watchlist_recommendations", lambda _db, persist_rotation=False: [])
     monkeypatch.setattr(stocks, "watchlist_recommendations", lambda _db: [])
+    monkeypatch.setattr(
+        "app.services.next_day_expectations.generate_automatic_limit_up_plans",
+        lambda _db, *, completed_trade_date=None: 0,
+    )
 
     completed = rotate_watchlist_and_generate_next_day_expectations(
         db_session,

@@ -42,10 +42,11 @@ from app.services.simulation import (
 )
 from app.services.autonomous_selection import latest_autonomous_selection
 from app.services.simulation_risk import SimulationRiskGuard, account_risk_guard
+from app.services.simulation_rule_promotion import active_rule_parameters
 
 
 logger = logging.getLogger(__name__)
-RULE_VERSION = "shadow-v4-frozen-hard-stop"
+RULE_VERSION = "shadow-v5-multi-entry"
 AI_TRADER_AUTOMATION_KEY = "codex-ai-paper-trader-v1"
 AI_TRADER_ACCOUNT_NAME = "Codex AI模拟交易员（2万元）"
 AI_TRADER_INITIAL_CASH = 20_000
@@ -60,6 +61,7 @@ MAX_ENTRY_POSITION_RATIO = 0.85
 MAX_CONCURRENT_POSITIONS = 3
 MAX_NEW_POSITIONS_PER_DAY = 2
 ENTRY_CONFIRMATION_START = time(9, 50)
+LIMIT_UP_ENTRY_START = time(9, 30)
 OPENING_EXIT_OBSERVATION_END = time(9, 45)
 
 
@@ -286,6 +288,31 @@ def _positive_volume(row: VolumePriceSnapshot | None) -> bool:
     return pattern_confirmed or numeric_confirmed
 
 
+def _pullback_reclaim_volume(row: VolumePriceSnapshot | None) -> bool:
+    """Confirm a low-risk reclaim, never a blind average-down."""
+    if row is None or not _quality_ok(row.data_quality) or not row.vwap_reliable:
+        return False
+    pattern = str(row.pattern or "").upper()
+    if any(token in pattern for token in (
+        "BROKEN", "BREAKDOWN", "DISTRIBUTION", "FAIL", "WEAKNESS",
+        "跌破", "放量下跌", "量价转弱", "资金流出加速", "诱多",
+    )):
+        return False
+    reclaim_pattern = any(token in pattern for token in (
+        "RECLAIM", "SUPPORT", "V_REVERSE", "回踩不破", "站回", "支撑", "V形修复",
+    ))
+    deviation = float(row.price_vs_vwap or 0)
+    buy = float(row.active_buy_amount or 0)
+    sell = float(row.active_sell_amount or 0)
+    flow_recovered = buy > 0 and sell > 0 and buy >= sell * 1.10
+    momentum_recovered = (
+        float(row.volume_acceleration or 0) >= 0
+        or float(row.attack_efficiency or 0) > 0
+    )
+    near_reclaim = -0.20 <= deviation <= 0.80
+    return bool(near_reclaim and flow_recovered and momentum_recovered and (reclaim_pattern or deviation >= 0))
+
+
 def _negative_volume(row: VolumePriceSnapshot | None) -> bool:
     if row is None or not _quality_ok(row.data_quality):
         return False
@@ -448,7 +475,8 @@ def _expectation_candidate(
         evidence += tuple(_json_list(volume.evidence_json))
         evidence += (f"量价形态={volume.pattern}",)
     if positive:
-        confirmed = _positive_volume(volume)
+        pullback_reclaim = _pullback_reclaim_volume(volume)
+        confirmed = pullback_reclaim or _positive_volume(volume)
         gap_score = int(expectation.expectation_gap_score or 0)
         if gap_score >= 18:
             entry_ratio, position_tier = 0.65, "主攻仓"
@@ -456,9 +484,12 @@ def _expectation_candidate(
             entry_ratio, position_tier = 0.50, "确认仓"
         else:
             entry_ratio, position_tier = 0.35, "进攻仓"
+        source_kind = "pullback_reclaim_confirmation" if pullback_reclaim else "expectation_volume_pair"
+        if pullback_reclaim:
+            entry_ratio, position_tier = 0.30, "回踩试探仓"
         return ShadowCandidate(
             strategy_source="expectation_volume_price",
-            source_kind="expectation_volume_pair",
+            source_kind=source_kind,
             source_id=expectation.id,
             source_version=version,
             source_at=source_at,
@@ -468,7 +499,12 @@ def _expectation_candidate(
             side="BUY",
             ratio=entry_ratio,
             ready=confirmed,
-            reason=f"正预期差与真实量价确认共振，按{position_tier}{entry_ratio:.0%}执行" if confirmed else "正预期差尚未获得真实量价确认",
+            reason=(
+                f"正预期差、缩量回踩与买盘重新承接，按{position_tier}{entry_ratio:.0%}执行"
+                if pullback_reclaim
+                else f"正预期差与真实量价确认共振，按{position_tier}{entry_ratio:.0%}执行"
+                if confirmed else "正预期差尚未获得真实量价确认"
+            ),
             evidence=evidence + (f"预期差={expectation.expectation_gap_score}", f"仓位等级={position_tier}"),
             dependencies=dependencies,
             invalidation_price=float(getattr(volume, "vwap", 0) or 0) * 0.99,
@@ -683,13 +719,18 @@ def _autonomous_candidates(
     return result
 
 
-def _signal_key(account_id: int, candidate: ShadowCandidate, trade_date: str) -> str:
+def _signal_key(
+    account_id: int,
+    candidate: ShadowCandidate,
+    trade_date: str,
+    rule_version: str = RULE_VERSION,
+) -> str:
     # The database unique tuple includes account_id as well; retaining it in
     # the key makes exported audit records self-contained.
     return "|".join(
         (
             str(account_id), candidate.strategy_source, candidate.code, trade_date,
-            RULE_VERSION, candidate.source_version, candidate.side,
+            rule_version, candidate.source_version, candidate.side,
         )
     )[:160]
 
@@ -699,9 +740,10 @@ def _claim_decision(
     account: SimulationAccount,
     candidate: ShadowCandidate,
     evaluated_at: datetime,
+    rule_version: str = RULE_VERSION,
 ) -> tuple[SimulationShadowDecision | None, bool]:
     trade_date = evaluated_at.date().isoformat()
-    key = _signal_key(account.id, candidate, trade_date)
+    key = _signal_key(account.id, candidate, trade_date, rule_version)
     existing = db.query(SimulationShadowDecision).filter(
         SimulationShadowDecision.account_id == account.id,
         SimulationShadowDecision.signal_key == key,
@@ -714,7 +756,7 @@ def _claim_decision(
         strategy_source=candidate.strategy_source,
         source_kind=candidate.source_kind,
         source_id=candidate.source_id,
-        rule_version=RULE_VERSION,
+        rule_version=rule_version,
         source_version=candidate.source_version,
         trade_date=trade_date,
         source_at=_local(candidate.source_at),
@@ -761,6 +803,37 @@ def _has_open_order(db: Session, account_id: int, code: str, side: str) -> bool:
 def _entry_quantity(account: SimulationAccount, price: float, ratio: float) -> int:
     budget = max(float(account.cash or 0), 0) * min(max(ratio, 0.01), MAX_ENTRY_POSITION_RATIO)
     return max(int(math.floor(budget / max(price, 0.01) / 100) * 100), 0)
+
+
+def _additional_entry_quantity(
+    db: Session,
+    account: SimulationAccount,
+    position: SimulationPosition,
+    price: float,
+    target_ratio: float,
+) -> int:
+    """Size stage two to a total portfolio target rather than remaining cash."""
+    positions = db.query(SimulationPosition).filter(
+        SimulationPosition.account_id == account.id,
+        SimulationPosition.quantity > 0,
+    ).all()
+    total_equity = float(account.cash or 0) + sum(
+        float(row.market_value or (row.quantity * row.market_price) or (row.quantity * row.average_cost) or 0)
+        for row in positions
+    )
+    current_value = float(position.quantity or 0) * price
+    target_value = total_equity * min(max(target_ratio, 0.01), MAX_ENTRY_POSITION_RATIO)
+    additional_budget = min(max(target_value - current_value, 0), float(account.cash or 0))
+    return max(int(math.floor(additional_budget / max(price, 0.01) / 100) * 100), 0)
+
+
+def _entry_lot_count(db: Session, account_id: int, code: str) -> int:
+    return int(db.query(func.count(SimulationTradeLot.id)).filter(
+        SimulationTradeLot.account_id == account_id,
+        SimulationTradeLot.code == code,
+        SimulationTradeLot.status == "OPEN",
+        SimulationTradeLot.remaining_quantity > 0,
+    ).scalar() or 0)
 
 
 def _risk_adjusted_entry_ratio(
@@ -948,7 +1021,11 @@ def _hard_stop_candidate(
     )
 
 
-def _market_entry_gate(db: Session, evaluated_at: datetime) -> tuple[bool, str]:
+def _market_entry_gate(
+    db: Session,
+    evaluated_at: datetime,
+    parameters: dict[str, Any] | None = None,
+) -> tuple[bool, str]:
     row = (
         db.query(MarketRegimeSnapshot)
         .filter(
@@ -967,6 +1044,9 @@ def _market_entry_gate(db: Session, evaluated_at: datetime) -> tuple[bool, str]:
         return False, f"全市场证据覆盖率仅{float(row.coverage_ratio or 0):.0%}"
     if row.up_count is None or row.down_count is None or row.advance_ratio is None:
         return False, "全市场上涨/下跌广度缺失"
+    blocked = set((parameters or {}).get("blocked_market_regimes") or [])
+    if str(row.regime_code or "") in blocked:
+        return False, f"当前市场状态{row.regime_code}处于前向验证后冻结入场名单"
     return True, f"全市场核心广度可用，证据质量{row.data_quality or 'unknown'}"
 
 
@@ -974,6 +1054,7 @@ def _ai_entry_confirmation_gate(
     db: Session,
     candidate: ShadowCandidate,
     evaluated_at: datetime,
+    parameters: dict[str, Any] | None = None,
 ) -> tuple[bool, str]:
     """Stricter confirmation contract for the autonomous 20k account."""
     if candidate.source_kind == "limit_up_plan_confirmation":
@@ -991,12 +1072,23 @@ def _ai_entry_confirmation_gate(
     sell = float(row.active_sell_amount or 0)
     if int(row.minute_bar_count or 0) < 15:
         return False, "分钟样本不足15根"
-    if not 0.10 <= price_vs_vwap <= 2.00:
-        return False, f"价格相对VWAP {price_vs_vwap:+.2f}%，不在0.10%～2.00%的可追踪区间"
-    if acceleration < -35.0:
+    params = parameters or {}
+    minimum_deviation = float(params.get("entry_price_vs_vwap_min", 0.10))
+    maximum_deviation = float(params.get("entry_price_vs_vwap_max", 2.00))
+    minimum_acceleration = float(params.get("entry_volume_acceleration_min", -35.0))
+    minimum_buy_sell = float(params.get("entry_buy_sell_ratio_min", 1.05))
+    if candidate.source_kind == "pullback_reclaim_confirmation":
+        minimum_deviation = min(minimum_deviation, -0.20)
+        maximum_deviation = min(maximum_deviation, 0.80)
+    if not minimum_deviation <= price_vs_vwap <= maximum_deviation:
+        return False, (
+            f"价格相对VWAP {price_vs_vwap:+.2f}%，不在"
+            f"{minimum_deviation:.2f}%～{maximum_deviation:.2f}%的当前规则区间"
+        )
+    if acceleration < minimum_acceleration:
         return False, f"量能加速度{acceleration:+.2f}%，短时修复缺少持续动能"
-    if buy <= 0 or sell <= 0 or buy < sell * 1.05:
-        return False, "主动买盘未持续领先主动卖盘至少5%"
+    if buy <= 0 or sell <= 0 or buy < sell * minimum_buy_sell:
+        return False, f"主动买盘未持续领先主动卖盘至少{(minimum_buy_sell - 1) * 100:.0f}%"
     return True, "回踩/突破后的量价承接确认通过"
 
 
@@ -1144,10 +1236,21 @@ def run_shadow_experiments(
             SimulationFill.side == "BUY",
         ).distinct().all()
     }
-    market_entry_allowed, market_entry_reason = _market_entry_gate(db, evaluated_at)
+    active_rule_version, rule_parameters = active_rule_parameters(db, account.id)
+    market_entry_allowed, market_entry_reason = _market_entry_gate(
+        db, evaluated_at, rule_parameters,
+    )
     entries_created_run = 0
     autonomous_account = account.automation_key == AI_TRADER_AUTOMATION_KEY
     for candidate in candidates:
+        if candidate.side == "BUY":
+            candidate = replace(
+                candidate,
+                risk_budget_ratio=min(
+                    candidate.risk_budget_ratio,
+                    float(rule_parameters.get("default_risk_budget_ratio", 0.03)),
+                ),
+            )
         if candidate.side == "BUY" and not _is_ai_trader_supported_code(candidate.code):
             result.skipped.append({
                 "code": candidate.code,
@@ -1161,7 +1264,9 @@ def run_shadow_experiments(
                 reason=f"{candidate.reason}；账户风控：{risk_guard.reason}",
                 evidence=candidate.evidence + (f"账户风控状态={risk_guard.state}", risk_guard.reason),
             )
-        decision, duplicate = _claim_decision(db, account, candidate, evaluated_at)
+        decision, duplicate = _claim_decision(
+            db, account, candidate, evaluated_at, active_rule_version,
+        )
         if duplicate:
             if decision is not None:
                 result.duplicate_signal_keys.append(decision.signal_key)
@@ -1196,18 +1301,34 @@ def run_shadow_experiments(
                 continue
         if autonomous_account and candidate.side == "BUY":
             entry_rejection = ""
+            existing_position_for_gate = _position(db, account.id, candidate.code)
+            is_new_position_signal = existing_position_for_gate is None
             volume_entry_allowed, volume_entry_reason = _ai_entry_confirmation_gate(
-                db, candidate, evaluated_at,
+                db, candidate, evaluated_at, rule_parameters,
             )
-            if evaluated_at.time() < ENTRY_CONFIRMATION_START:
+            entry_start = (
+                LIMIT_UP_ENTRY_START
+                if candidate.source_kind == "limit_up_plan_confirmation"
+                else ENTRY_CONFIRMATION_START
+            )
+            if evaluated_at.time() < entry_start:
                 entry_rejection = "09:50前只观察竞价和第一轮冲高回落，不追逐早盘瞬时强势"
+                if candidate.source_kind == "limit_up_plan_confirmation":
+                    entry_rejection = "09:30连续竞价开始前只记录竞价证据，不生成打板委托"
             elif not market_entry_allowed:
                 entry_rejection = f"市场入场闸门未通过：{market_entry_reason}"
             elif not volume_entry_allowed:
                 entry_rejection = f"量价入场闸门未通过：{volume_entry_reason}"
-            elif len(bought_codes_today) + entries_created_run >= MAX_NEW_POSITIONS_PER_DAY:
+            elif (
+                is_new_position_signal
+                and candidate.code not in bought_codes_today
+                and len(bought_codes_today) + entries_created_run >= MAX_NEW_POSITIONS_PER_DAY
+            ):
                 entry_rejection = f"当日新开仓上限为{MAX_NEW_POSITIONS_PER_DAY}只，优先保留最高质量样本"
-            elif int(open_position_count) + entries_created_run >= MAX_CONCURRENT_POSITIONS:
+            elif (
+                is_new_position_signal
+                and int(open_position_count) + entries_created_run >= MAX_CONCURRENT_POSITIONS
+            ):
                 entry_rejection = f"2万元账户最多同时持有{MAX_CONCURRENT_POSITIONS}只，避免过度分仓"
             elif entries_created_run >= 1:
                 entry_rejection = "同一轮扫描只接受评分最高的一只，其他机会等待下一次独立确认"
@@ -1245,22 +1366,44 @@ def run_shadow_experiments(
 
         position = _position(db, account.id, candidate.code)
         if candidate.side == "BUY":
-            if position is not None or _has_open_order(db, account.id, candidate.code, "BUY"):
+            staged_add = bool(
+                position is not None
+                and candidate.source_kind == "pullback_reclaim_confirmation"
+            )
+            if _has_open_order(db, account.id, candidate.code, "BUY"):
                 decision.status = "SKIPPED"
-                decision.reason = "模拟账户已有该标的仓位或待成交买单，禁止叠加影子样本"
+                decision.reason = "该标的已有待成交买单，禁止重复委托"
+                db.commit()
+                result.skipped.append({"code": candidate.code, "reason": decision.reason})
+                continue
+            if position is not None and not staged_add:
+                decision.status = "SKIPPED"
+                decision.reason = "已有持仓；只有新的回踩收复证据可触发第二段确认仓，禁止情绪化加仓"
+                db.commit()
+                result.skipped.append({"code": candidate.code, "reason": decision.reason})
+                continue
+            if staged_add and _entry_lot_count(db, account.id, candidate.code) >= 2:
+                decision.status = "SKIPPED"
+                decision.reason = "同一标的最多两段建仓，已经完成试探仓和确认仓，禁止第三次加仓"
                 db.commit()
                 result.skipped.append({"code": candidate.code, "reason": decision.reason})
                 continue
             entry_price = _safe_float(quote.get("price"))
+            target_ratio = 0.55 if staged_add else candidate.ratio
             effective_ratio, stop_distance_ratio, inferred_stop = _risk_adjusted_entry_ratio(
                 entry_price,
-                candidate.ratio,
+                target_ratio,
                 candidate.invalidation_price,
                 candidate.risk_budget_ratio,
             )
-            quantity = _entry_quantity(account, entry_price, effective_ratio)
+            quantity = (
+                _additional_entry_quantity(db, account, position, entry_price, effective_ratio)
+                if staged_add and position is not None
+                else _entry_quantity(account, entry_price, effective_ratio)
+            )
             sizing_reason = (
-                f"仓位按置信度上限{candidate.ratio:.0%}与单笔风险预算{candidate.risk_budget_ratio:.0%}共同计算，"
+                f"{'第二段确认仓，目标总仓位' if staged_add else '仓位按置信度上限'}{target_ratio:.0%}"
+                f"与单笔风险预算{candidate.risk_budget_ratio:.0%}共同计算，"
                 f"失效距离{stop_distance_ratio:.2%}，实际资金上限{effective_ratio:.0%}"
                 + ("（缺少有效数值止损，按8%保守距离估算）" if inferred_stop else f"（失效价{candidate.invalidation_price:.2f}）")
             )
@@ -1295,7 +1438,7 @@ def run_shadow_experiments(
 
         decision.quantity = quantity
         order_reason = decision.reason or candidate.reason
-        note = f"shadow:{decision.signal_key};rule={RULE_VERSION};reason={order_reason}"
+        note = f"shadow:{decision.signal_key};rule={active_rule_version};reason={order_reason}"
         order = submit_order(
             db,
             account,

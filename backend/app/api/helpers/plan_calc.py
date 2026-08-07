@@ -926,8 +926,8 @@ def _limit_up_next_day_plan(
     board_level = f"{max(payload.level, 1)}板"
     evidence = _limit_up_auction_evidence(payload, concepts)
     risk_notes = evidence["risk_notes"]
-    requested_cap = max(0.0, min(0.10, float(payload.max_position_ratio or 0)))
-    evidence_cap = max(0.0, min(0.10, float(evidence.get("max_position_ratio") or 0)))
+    requested_cap = max(0.0, min(0.50, float(payload.max_position_ratio or 0)))
+    evidence_cap = max(0.0, min(0.50, float(evidence.get("max_position_ratio") or 0)))
     approved_cap = min(requested_cap, evidence_cap)
     weak_reduce_price = round(payload.price, 2)
     weak_exit_price = round(payload.price * 0.97, 2)

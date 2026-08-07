@@ -1247,6 +1247,16 @@ async def _collector_iteration() -> None:
                 now.date().isoformat(),
                 now=now,
             )
+            # Rule evolution is also a close-only workload.  It can create a
+            # candidate, advance its strictly-future validation, promote it,
+            # or roll it back; it never touches a broker/live account.
+            from app.models.trading import SimulationAccount
+            from app.services.simulation_rule_promotion import advance_rule_promotion
+            ai_account = notify_db.query(SimulationAccount).filter(
+                SimulationAccount.automation_key == "codex-ai-paper-trader-v1",
+            ).first()
+            if ai_account is not None:
+                await asyncio.to_thread(advance_rule_promotion, notify_db, ai_account)
         finally:
             notify_db.close()
 
