@@ -925,7 +925,10 @@ def _hard_stop_candidate(
         strategy_source="holding_execution",
         source_kind="simulation_hard_stop",
         source_id=position.id,
-        source_version=f"hard-stop:p{position.id}:d{volume.trade_date}:s{stop:.4f}",
+        # Include the evidence snapshot so a transient provider clock-skew or
+        # stale-quote rejection can retry on the next real minute.  Open-order
+        # and position checks still prevent duplicate exits.
+        source_version=f"hard-stop:p{position.id}:d{volume.trade_date}:s{stop:.4f}:v{volume.id}",
         source_at=volume.captured_at,
         code=_normalize_code(position.code),
         name=position.name,
