@@ -19,6 +19,7 @@ from app.models.trading import (
 )
 from app.services.dingtalk import dingtalk_status, send_dingtalk_markdown
 from app.services.simulation_shadow import AI_TRADER_AUTOMATION_KEY
+from app.services.simulation_learning import build_ai_trader_daily_learning
 from app.services.trading_calendar import next_a_share_trading_day
 
 
@@ -121,6 +122,13 @@ def notify_ai_trader_close_review(db: Session, trade_date: str, *, now: datetime
         SimulationFill.account_id == account.id,
         SimulationFill.trade_date == trade_date,
     ).all()
+    evaluated_at = shanghai_now_naive(now)
+    learning = build_ai_trader_daily_learning(
+        db,
+        account,
+        trade_date,
+        now=evaluated_at,
+    )
     position_text = "；".join(f"{row.name}{row.quantity}股" for row in positions) or "空仓"
     next_date = next_a_share_trading_day(date.fromisoformat(trade_date)).isoformat()
     expectations = {
@@ -147,6 +155,8 @@ def notify_ai_trader_close_review(db: Session, trade_date: str, *, now: datetime
         )
     plan_text = "\n".join(position_plan_lines) or "- 当前空仓，次日不为凑交易而开仓。"
     grade = "A" if equity.daily_pnl > 0 and equity.drawdown_pct <= 2 else "B" if equity.drawdown_pct <= 4 else "C"
+    corrections = list(learning.get("corrections") or [])[:3]
+    correction_text = "\n".join(f"- {item}" for item in corrections) or "- 今日没有形成足以修改规则的新证据，继续保留原规则采样。"
     title = f"AI模拟盘{trade_date}收盘复盘"
     text = (
         f"### {title}\n\n"
@@ -156,9 +166,20 @@ def notify_ai_trader_close_review(db: Session, trade_date: str, *, now: datetime
         f"- 当前策略评级：{grade}\n"
         f"- 下一交易日：{next_date}\n\n"
         f"#### 明日持仓预期\n{plan_text}\n\n"
-        f"- 校准方向：逐笔比较交易后表现与不操作基准；只调整有足够样本支持的选股、买点和退出阈值。\n\n"
+        f"#### 今日模型学习\n"
+        f"- 已写入可计算成交样本：{learning.get('evaluated_sample_count', 0)}笔；"
+        f"正式闭环样本：{learning.get('formal_closed_sample_count', 0)}/30。\n"
+        f"{correction_text}\n\n"
+        f"- 校准纪律：逐笔保存最大有利/不利波动及不操作对照；样本不足时只记账，不自动迎合单日结果改参。\n\n"
         f"> 全部为前向模拟记录，不回填历史成交。"
     )
     send_dingtalk_markdown(title, text)
-    _record(db, key, title, {"equity_id": equity.id, "fill_count": len(fills), "grade": grade}, shanghai_now_naive(now))
+    _record(db, key, title, {
+        "equity_id": equity.id,
+        "fill_count": len(fills),
+        "grade": grade,
+        "learning_sample_count": learning.get("evaluated_sample_count", 0),
+        "formal_closed_sample_count": learning.get("formal_closed_sample_count", 0),
+        "corrections": corrections,
+    }, evaluated_at)
     return True

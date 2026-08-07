@@ -11,6 +11,7 @@ from app.core.database import SessionLocal
 from app.models.trading import Holding
 from app.services.ai_analysis import generate_analysis
 from app.services.ai_position_qa import generate_position_answer
+from app.services.ai_trading_chat import answer_trading_question
 
 
 LOGGER = logging.getLogger("dingtalk_stream_bot")
@@ -170,10 +171,11 @@ class TradingChatbotHandler(dingtalk_stream.AsyncChatbotHandler):
                     + "\n\n---\n仅依据系统当前数据，不会自动下单。",
                 )
                 return
+            answer = answer_trading_question(db, question)
             self._reply(
                 incoming,
-                "需要明确标的",
-                "未识别到当前持仓代码或名称。\n\n" + HELP_TEXT,
+                "交易证据问答",
+                compact_reply(answer) + "\n\n---\n由当前系统证据与DeepSeek模型生成；不会自动下单。",
             )
         except Exception as exc:
             LOGGER.exception("DingTalk question failed")

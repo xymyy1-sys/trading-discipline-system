@@ -1,5 +1,6 @@
 from datetime import datetime, timedelta
 import json
+from types import SimpleNamespace
 
 from app.models.trading import (
     ExpectationSnapshot,
@@ -16,11 +17,51 @@ from app.services.simulation_shadow import (
     RULE_VERSION,
     _autonomous_position_ratio,
     _entry_quantity,
+    _ai_entry_confirmation_gate,
     _is_ai_trader_supported_code,
+    _profit_protection_candidate,
     _risk_adjusted_entry_ratio,
     mark_shadow_equity_after_close,
     run_shadow_experiments,
 )
+
+
+def test_ai_entry_gate_rejects_fading_vwap_reclaim(db_session):
+    now = datetime(2026, 8, 6, 9, 51)
+    row = VolumePriceSnapshot(
+        trade_date=now.date().isoformat(), code="002345", name="潮宏基",
+        captured_at=now - timedelta(seconds=20), price=11.09, vwap=11.01,
+        vwap_reliable=True, price_vs_vwap=0.73, minute_bar_count=22,
+        active_buy_amount=3.0, active_sell_amount=2.0,
+        volume_acceleration=-50.59, pattern="重新站回VWAP且低点抬高",
+        data_quality="realtime",
+    )
+    db_session.add(row)
+    db_session.commit()
+    candidate = SimpleNamespace(code="002345", source_kind="expectation_volume_pair")
+    allowed, reason = _ai_entry_confirmation_gate(db_session, candidate, now)
+    assert allowed is False
+    assert "量能加速度" in reason
+
+
+def test_dynamic_profit_protection_uses_peak_retreat_and_vwap_weakness():
+    position = SimulationPosition(
+        account_id=1, code="600961", name="株冶集团", quantity=100,
+        available_quantity=100, average_cost=26.13,
+    )
+    volume = VolumePriceSnapshot(
+        id=1, trade_date="2026-08-06", code="600961", name="株冶集团",
+        captured_at=datetime(2026, 8, 6, 13, 34), price=26.47,
+        high_price=28.12, vwap=27.34, vwap_reliable=True,
+        price_vs_vwap=-3.18, active_buy_amount=12.04,
+        active_sell_amount=9.71, volume_acceleration=-58.63,
+        pattern="冲高回落跌破VWAP", data_quality="realtime",
+    )
+    candidate = _profit_protection_candidate(position, volume)
+    assert candidate is not None
+    assert candidate.side == "SELL"
+    assert candidate.ratio == 0.5
+    assert "移动利润保护" in candidate.reason
 
 
 def test_ai_trader_scope_only_allows_shanghai_shenzhen_main_boards():

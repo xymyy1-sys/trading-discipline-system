@@ -97,7 +97,22 @@ def _source_payload_quality_ok(field: str, payload: dict[str, Any]) -> bool:
     if field == "expectation_json":
         return True
     if field == "market_json":
-        return quality in _MARKET_USABLE_QUALITY
+        if quality in _MARKET_USABLE_QUALITY:
+            return True
+        # A snapshot may be labelled ``missing`` because a non-essential
+        # turnover comparison is absent while the point-in-time breadth/risk
+        # evidence used by the entry gate is complete.  Admit only that narrow
+        # core contract; this never accepts an empty or quote-only market row.
+        try:
+            coverage = float(payload.get("coverage_ratio") or 0)
+        except (TypeError, ValueError):
+            coverage = 0
+        return bool(
+            coverage >= 0.75
+            and payload.get("advance_ratio") is not None
+            and payload.get("limit_up_count") is not None
+            and payload.get("limit_down_count") is not None
+        )
     return quality in _USABLE_QUALITY
 
 

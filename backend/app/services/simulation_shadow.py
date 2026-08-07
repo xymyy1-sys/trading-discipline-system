@@ -18,10 +18,12 @@ from app.api.helpers.quotes import _normalize_code
 from app.core.trading_clock import shanghai_now_naive
 from app.models.trading import (
     ExpectationSnapshot,
+    MarketRegimeSnapshot,
     NextDayPlan,
     PositionExecutionState,
     SimulationAccount,
     SimulationDailyEquity,
+    SimulationFill,
     SimulationOrder,
     SimulationPosition,
     SimulationShadowDecision,
@@ -42,7 +44,7 @@ from app.services.simulation_risk import SimulationRiskGuard, account_risk_guard
 
 
 logger = logging.getLogger(__name__)
-RULE_VERSION = "shadow-v2-conviction"
+RULE_VERSION = "shadow-v3-confirmation-profit-protection"
 AI_TRADER_AUTOMATION_KEY = "codex-ai-paper-trader-v1"
 AI_TRADER_ACCOUNT_NAME = "Codex AI模拟交易员（2万元）"
 AI_TRADER_INITIAL_CASH = 20_000
@@ -54,6 +56,10 @@ EXPLORATION_START = time(10, 0)
 EXPLORATION_END = time(14, 30)
 EXPLORATION_POSITION_RATIO = 0.50
 MAX_ENTRY_POSITION_RATIO = 0.85
+MAX_CONCURRENT_POSITIONS = 3
+MAX_NEW_POSITIONS_PER_DAY = 2
+ENTRY_CONFIRMATION_START = time(9, 50)
+OPENING_EXIT_OBSERVATION_END = time(9, 45)
 
 
 def _is_ai_trader_supported_code(code: str) -> bool:
@@ -93,6 +99,7 @@ class ShadowCandidate:
     dependencies: tuple[SourceDependency, ...] = ()
     invalidation_price: float = 0.0
     risk_budget_ratio: float = 0.03
+    priority: float = 0.0
 
 
 @dataclass
@@ -464,6 +471,9 @@ def _expectation_candidate(
             evidence=evidence + (f"预期差={expectation.expectation_gap_score}", f"仓位等级={position_tier}"),
             dependencies=dependencies,
             invalidation_price=float(getattr(volume, "vwap", 0) or 0) * 0.99,
+            priority=float(gap_score) * 3.0
+            + max(float(getattr(volume, "price_vs_vwap", 0) or 0), 0)
+            + max(float(getattr(volume, "volume_acceleration", 0) or 0), 0) / 10.0,
         )
     confirmed = _negative_volume(volume)
     return ShadowCandidate(
@@ -481,6 +491,7 @@ def _expectation_candidate(
         reason="负预期差与量价转弱共同确认失效/降风险" if confirmed else "负预期差尚未获得量价转弱确认",
         evidence=evidence + (f"预期差={expectation.expectation_gap_score}",),
         dependencies=dependencies,
+        priority=100.0 + abs(float(expectation.expectation_gap_score or 0)),
     )
 
 
@@ -606,6 +617,7 @@ def _autonomous_candidates(
                 SourceDependency("分钟量价快照", getattr(volume, "captured_at", None), MAX_SIGNAL_AGE_SECONDS),
             ),
             invalidation_price=float(getattr(volume, "vwap", 0) or 0) * 0.99,
+            priority=score,
         ))
 
     ready_normal = any(candidate.ready for candidate in result)
@@ -793,6 +805,117 @@ def _exit_quantity(position: SimulationPosition, ratio: float, trade_date: str) 
     return rounded if rounded > 0 else (100 if available >= 100 else available)
 
 
+def _profit_protection_candidate(
+    position: SimulationPosition,
+    volume: VolumePriceSnapshot | None,
+) -> ShadowCandidate | None:
+    """Create a trailing profit-protection signal from current-day evidence.
+
+    This is intentionally not a fixed take-profit price.  Profit first has to
+    reach an activation threshold; only a material retreat with VWAP/volume
+    deterioration releases part of the position.  It therefore protects a
+    spike such as 28.12 -> 26.57 without selling merely because a stock rose.
+    """
+    if volume is None or not _quality_ok(volume.data_quality):
+        return None
+    cost = float(position.average_cost or 0)
+    price = float(volume.price or 0)
+    high = float(volume.high_price or 0)
+    if min(cost, price, high) <= 0:
+        return None
+    current_profit = (price / cost - 1) * 100
+    peak_profit = (high / cost - 1) * 100
+    retreat = (high - price) / high * 100
+    below_vwap = bool(volume.vwap_reliable and float(volume.price_vs_vwap or 0) <= -0.35)
+    weak_flow = bool(
+        float(volume.active_sell_amount or 0) > float(volume.active_buy_amount or 0) * 1.15
+        or float(volume.volume_acceleration or 0) <= -35
+        or _negative_volume(volume)
+    )
+    if peak_profit < 5.0 or retreat < 2.0 or not (below_vwap and weak_flow):
+        return None
+    ratio = 0.25
+    if peak_profit >= 8.0 or retreat >= 4.0:
+        ratio = 0.50
+    if peak_profit >= 12.0 and retreat >= 5.0:
+        ratio = 0.75
+    evidence = (
+        f"持仓成本{cost:.2f}，日内最高{high:.2f}，当前{price:.2f}",
+        f"峰值浮盈{peak_profit:.2f}%，当前浮盈{current_profit:.2f}%，高点回撤{retreat:.2f}%",
+        f"相对VWAP {float(volume.price_vs_vwap or 0):+.2f}%，量能加速度{float(volume.volume_acceleration or 0):+.2f}%",
+        "利润保护只分批兑现；若重新站回VWAP且主动买盘恢复，撤销剩余减仓。",
+    )
+    return ShadowCandidate(
+        strategy_source="holding_execution",
+        source_kind="dynamic_profit_protection",
+        source_id=volume.id,
+        source_version=f"profit:v{volume.id}:r{int(ratio * 100)}",
+        source_at=volume.captured_at,
+        code=_normalize_code(position.code),
+        name=position.name,
+        intent="EXIT",
+        side="SELL",
+        ratio=ratio,
+        ready=True,
+        reason=f"移动利润保护触发：峰值浮盈{peak_profit:.2f}%后回撤{retreat:.2f}%，分批兑现{ratio:.0%}",
+        evidence=evidence,
+        dependencies=(SourceDependency("利润保护量价快照", volume.captured_at, MAX_SIGNAL_AGE_SECONDS),),
+        priority=200.0 + retreat,
+    )
+
+
+def _market_entry_gate(db: Session, evaluated_at: datetime) -> tuple[bool, str]:
+    row = (
+        db.query(MarketRegimeSnapshot)
+        .filter(
+            MarketRegimeSnapshot.trade_date == evaluated_at.date().isoformat(),
+            MarketRegimeSnapshot.captured_at <= evaluated_at,
+        )
+        .order_by(MarketRegimeSnapshot.captured_at.desc(), MarketRegimeSnapshot.id.desc())
+        .first()
+    )
+    if row is None:
+        return False, "缺少当日全市场风险快照"
+    age = (evaluated_at - _local(row.captured_at)).total_seconds()
+    if age > MAX_SIGNAL_AGE_SECONDS:
+        return False, "全市场风险快照已陈旧"
+    if float(row.coverage_ratio or 0) < 0.75:
+        return False, f"全市场证据覆盖率仅{float(row.coverage_ratio or 0):.0%}"
+    if row.up_count is None or row.down_count is None or row.advance_ratio is None:
+        return False, "全市场上涨/下跌广度缺失"
+    return True, f"全市场核心广度可用，证据质量{row.data_quality or 'unknown'}"
+
+
+def _ai_entry_confirmation_gate(
+    db: Session,
+    candidate: ShadowCandidate,
+    evaluated_at: datetime,
+) -> tuple[bool, str]:
+    """Stricter confirmation contract for the autonomous 20k account."""
+    if candidate.source_kind == "limit_up_plan_confirmation":
+        return True, "打板策略使用独立触板确认"
+    row = db.query(VolumePriceSnapshot).filter(
+        VolumePriceSnapshot.trade_date == evaluated_at.date().isoformat(),
+        VolumePriceSnapshot.code == candidate.code,
+        VolumePriceSnapshot.captured_at <= evaluated_at,
+    ).order_by(VolumePriceSnapshot.captured_at.desc(), VolumePriceSnapshot.id.desc()).first()
+    if row is None or not _quality_ok(row.data_quality):
+        return False, "缺少实时量价快照"
+    price_vs_vwap = float(row.price_vs_vwap or 0)
+    acceleration = float(row.volume_acceleration or 0)
+    buy = float(row.active_buy_amount or 0)
+    sell = float(row.active_sell_amount or 0)
+    if int(row.minute_bar_count or 0) < 15:
+        return False, "分钟样本不足15根"
+    if not 0.10 <= price_vs_vwap <= 2.00:
+        return False, f"价格相对VWAP {price_vs_vwap:+.2f}%，不在0.10%～2.00%的可追踪区间"
+    if acceleration < -35.0:
+        return False, f"量能加速度{acceleration:+.2f}%，短时修复缺少持续动能"
+    if buy <= 0 or sell <= 0 or buy < sell * 1.05:
+        return False, "主动买盘未持续领先主动卖盘至少5%"
+    return True, "回踩/突破后的量价承接确认通过"
+
+
 def _discover_candidates(
     db: Session,
     evaluated_at: datetime,
@@ -828,6 +951,18 @@ def _discover_candidates(
         if candidate:
             candidates.append(candidate)
 
+    ai_account = db.query(SimulationAccount).filter(
+        SimulationAccount.automation_key == AI_TRADER_AUTOMATION_KEY,
+    ).first()
+    positions = db.query(SimulationPosition).filter(
+        SimulationPosition.account_id == (ai_account.id if ai_account else -1),
+        SimulationPosition.quantity > 0,
+    ).all()
+    for position in positions:
+        candidate = _profit_protection_candidate(position, volumes.get(_normalize_code(position.code)))
+        if candidate:
+            candidates.append(candidate)
+
     quote_cache: dict[str, dict[str, Any]] = {}
     plans = (
         db.query(NextDayPlan)
@@ -840,7 +975,7 @@ def _discover_candidates(
         candidates.append(_limit_up_candidate(plan, volumes.get(code), quote_cache[code]))
     candidates.extend(_autonomous_candidates(db, evaluated_at, volumes))
     # Exits must reserve the simulated holding before any same-run entry signal.
-    candidates.sort(key=lambda item: (0 if item.side == "SELL" else 1, item.code, item.strategy_source))
+    candidates.sort(key=lambda item: (0 if item.side == "SELL" else 1, -item.priority, item.code, item.strategy_source))
     return candidates, quote_cache
 
 
@@ -909,6 +1044,20 @@ def run_shadow_experiments(
         risk_guard = account_risk_guard(db, account, evaluated_at)
 
     trade_date = evaluated_at.date().isoformat()
+    open_position_count = db.query(func.count(SimulationPosition.id)).filter(
+        SimulationPosition.account_id == account.id,
+        SimulationPosition.quantity > 0,
+    ).scalar() or 0
+    bought_codes_today = {
+        str(code) for (code,) in db.query(SimulationFill.code).filter(
+            SimulationFill.account_id == account.id,
+            SimulationFill.trade_date == trade_date,
+            SimulationFill.side == "BUY",
+        ).distinct().all()
+    }
+    market_entry_allowed, market_entry_reason = _market_entry_gate(db, evaluated_at)
+    entries_created_run = 0
+    autonomous_account = account.automation_key == AI_TRADER_AUTOMATION_KEY
     for candidate in candidates:
         if candidate.side == "BUY" and not _is_ai_trader_supported_code(candidate.code):
             result.skipped.append({
@@ -929,6 +1078,56 @@ def run_shadow_experiments(
                 result.duplicate_signal_keys.append(decision.signal_key)
             continue
         assert decision is not None
+        if (
+            autonomous_account
+            and candidate.side == "SELL"
+            and candidate.source_kind == "expectation_volume_pair"
+            and evaluated_at.time() < OPENING_EXIT_OBSERVATION_END
+        ):
+            decision.status = "SKIPPED"
+            decision.reason = "开盘恐慌观察窗尚未结束：先观察至09:45，除硬止损外不因单次低开直接卖出"
+            db.commit()
+            result.skipped.append({"code": candidate.code, "reason": decision.reason})
+            continue
+        if autonomous_account and candidate.side == "SELL" and candidate.source_kind == "expectation_volume_pair":
+            prior_sell = db.query(SimulationFill.id).join(
+                SimulationOrder, SimulationOrder.id == SimulationFill.order_id,
+            ).filter(
+                SimulationFill.account_id == account.id,
+                SimulationFill.trade_date == trade_date,
+                SimulationFill.code == candidate.code,
+                SimulationFill.side == "SELL",
+                SimulationOrder.strategy_source == "expectation_volume_price",
+            ).first()
+            if prior_sell:
+                decision.status = "SKIPPED"
+                decision.reason = "当日预期证伪已执行过一次降风险；等待新阶段或硬止损，禁止分钟快照重复卖出"
+                db.commit()
+                result.skipped.append({"code": candidate.code, "reason": decision.reason})
+                continue
+        if autonomous_account and candidate.side == "BUY":
+            entry_rejection = ""
+            volume_entry_allowed, volume_entry_reason = _ai_entry_confirmation_gate(
+                db, candidate, evaluated_at,
+            )
+            if evaluated_at.time() < ENTRY_CONFIRMATION_START:
+                entry_rejection = "09:50前只观察竞价和第一轮冲高回落，不追逐早盘瞬时强势"
+            elif not market_entry_allowed:
+                entry_rejection = f"市场入场闸门未通过：{market_entry_reason}"
+            elif not volume_entry_allowed:
+                entry_rejection = f"量价入场闸门未通过：{volume_entry_reason}"
+            elif len(bought_codes_today) + entries_created_run >= MAX_NEW_POSITIONS_PER_DAY:
+                entry_rejection = f"当日新开仓上限为{MAX_NEW_POSITIONS_PER_DAY}只，优先保留最高质量样本"
+            elif int(open_position_count) + entries_created_run >= MAX_CONCURRENT_POSITIONS:
+                entry_rejection = f"2万元账户最多同时持有{MAX_CONCURRENT_POSITIONS}只，避免过度分仓"
+            elif entries_created_run >= 1:
+                entry_rejection = "同一轮扫描只接受评分最高的一只，其他机会等待下一次独立确认"
+            if entry_rejection:
+                decision.status = "SKIPPED"
+                decision.reason = entry_rejection
+                db.commit()
+                result.skipped.append({"code": candidate.code, "reason": decision.reason})
+                continue
         if candidate.side == "BUY" and risk_guard.block_new_entries:
             decision.status = "SKIPPED"
             decision.reason = risk_guard.reason
@@ -1031,6 +1230,8 @@ def run_shadow_experiments(
             db.add(decision)
             db.commit()
         result.order_ids.append(order.id)
+        if candidate.side == "BUY" and order.status in {"OPEN", "PENDING"}:
+            entries_created_run += 1
     return result
 
 
