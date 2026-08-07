@@ -20,10 +20,34 @@ from app.services.simulation_shadow import (
     _ai_entry_confirmation_gate,
     _is_ai_trader_supported_code,
     _profit_protection_candidate,
+    _hard_stop_candidate,
     _risk_adjusted_entry_ratio,
     mark_shadow_equity_after_close,
     run_shadow_experiments,
 )
+
+
+def test_frozen_hard_stop_exits_full_position_without_waiting_for_repair(db_session, monkeypatch):
+    position = SimulationPosition(
+        account_id=1, code="002345", name="潮宏基", quantity=500,
+        available_quantity=500, average_cost=11.1001,
+    )
+    volume = VolumePriceSnapshot(
+        id=9, trade_date="2026-08-07", code="002345", name="潮宏基",
+        captured_at=datetime(2026, 8, 7, 14, 12), price=10.48,
+        high_price=10.77, vwap=10.4759, vwap_reliable=True,
+        data_quality="realtime",
+    )
+    monkeypatch.setattr(
+        "app.services.simulation_shadow._frozen_position_stop",
+        lambda _db, _position: (10.90, "入场冻结失效价10.90"),
+    )
+    candidate = _hard_stop_candidate(db_session, position, volume)
+    assert candidate is not None
+    assert candidate.side == "SELL"
+    assert candidate.ratio == 1.0
+    assert candidate.priority == 10_000.0
+    assert "全部退出" in candidate.reason
 
 
 def test_ai_entry_gate_rejects_fading_vwap_reclaim(db_session):

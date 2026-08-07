@@ -27,6 +27,7 @@ from app.models.trading import (
     SimulationOrder,
     SimulationPosition,
     SimulationShadowDecision,
+    SimulationTradeLot,
     VolumePriceSnapshot,
 )
 from app.schemas.simulation import SimulationOrderCreate
@@ -44,7 +45,7 @@ from app.services.simulation_risk import SimulationRiskGuard, account_risk_guard
 
 
 logger = logging.getLogger(__name__)
-RULE_VERSION = "shadow-v3-confirmation-profit-protection"
+RULE_VERSION = "shadow-v4-frozen-hard-stop"
 AI_TRADER_AUTOMATION_KEY = "codex-ai-paper-trader-v1"
 AI_TRADER_ACCOUNT_NAME = "Codex AI模拟交易员（2万元）"
 AI_TRADER_INITIAL_CASH = 20_000
@@ -864,6 +865,86 @@ def _profit_protection_candidate(
     )
 
 
+def _frozen_position_stop(
+    db: Session,
+    position: SimulationPosition,
+) -> tuple[float, str]:
+    """Return the immutable entry stop for an open paper position."""
+    lots = db.query(SimulationTradeLot).filter(
+        SimulationTradeLot.account_id == position.account_id,
+        SimulationTradeLot.code == position.code,
+        SimulationTradeLot.status == "OPEN",
+        SimulationTradeLot.remaining_quantity > 0,
+    ).order_by(SimulationTradeLot.opened_at.asc(), SimulationTradeLot.id.asc()).all()
+    stops: list[float] = []
+    sources: list[str] = []
+    for lot in lots:
+        order_id = int(lot.entry_order_id or 0)
+        if not order_id:
+            continue
+        decision = db.query(SimulationShadowDecision).filter(
+            SimulationShadowDecision.account_id == position.account_id,
+            SimulationShadowDecision.order_id == order_id,
+        ).order_by(SimulationShadowDecision.id.desc()).first()
+        payload = _json_dict(getattr(decision, "payload_json", "{}")) if decision else {}
+        stop = _safe_float(payload.get("invalidation_price"))
+        if stop <= 0:
+            order = db.get(SimulationOrder, order_id)
+            text = " ".join(
+                value for value in (
+                    getattr(decision, "reason", "") if decision else "",
+                    getattr(order, "client_note", "") if order else "",
+                ) if value
+            )
+            match = re.search(r"失效价\s*([0-9]+(?:\.[0-9]+)?)", text)
+            stop = _safe_float(match.group(1)) if match else 0.0
+        if 0 < stop < float(lot.entry_price or position.average_cost or 0):
+            stops.append(stop)
+            sources.append(f"入场批次{lot.id}冻结失效价{stop:.2f}")
+    if stops:
+        return max(stops), "；".join(sources)
+    fallback = round(float(position.average_cost or 0) * 0.96, 2)
+    return fallback, f"入场未保存有效失效价，按成本价4%固定保护线{fallback:.2f}"
+
+
+def _hard_stop_candidate(
+    db: Session,
+    position: SimulationPosition,
+    volume: VolumePriceSnapshot | None,
+) -> ShadowCandidate | None:
+    """Generate an unconditional full exit after a frozen hard stop breaks."""
+    if volume is None or not _quality_ok(volume.data_quality):
+        return None
+    price = float(volume.price or 0)
+    stop, source = _frozen_position_stop(db, position)
+    if price <= 0 or stop <= 0 or price > stop:
+        return None
+    cost = float(position.average_cost or 0)
+    loss_pct = (price / cost - 1) * 100 if cost > 0 else 0.0
+    return ShadowCandidate(
+        strategy_source="capital_protection",
+        source_kind="simulation_hard_stop",
+        source_id=position.id,
+        source_version=f"hard-stop:p{position.id}:d{volume.trade_date}:s{stop:.4f}",
+        source_at=volume.captured_at,
+        code=_normalize_code(position.code),
+        name=position.name,
+        intent="EXIT",
+        side="SELL",
+        ratio=1.0,
+        ready=True,
+        reason=f"固定硬止损触发：现价{price:.2f}不高于冻结止损{stop:.2f}，全部退出",
+        evidence=(
+            source,
+            f"成本{cost:.2f}，现价{price:.2f}，浮亏{loss_pct:.2f}%",
+            "硬止损不等待VWAP修复、板块反弹或开盘观察窗。",
+        ),
+        dependencies=(SourceDependency("模拟持仓实时量价", volume.captured_at, MAX_SIGNAL_AGE_SECONDS),),
+        invalidation_price=stop,
+        priority=10_000.0,
+    )
+
+
 def _market_entry_gate(db: Session, evaluated_at: datetime) -> tuple[bool, str]:
     row = (
         db.query(MarketRegimeSnapshot)
@@ -959,9 +1040,14 @@ def _discover_candidates(
         SimulationPosition.quantity > 0,
     ).all()
     for position in positions:
-        candidate = _profit_protection_candidate(position, volumes.get(_normalize_code(position.code)))
-        if candidate:
-            candidates.append(candidate)
+        volume = volumes.get(_normalize_code(position.code))
+        hard_stop = _hard_stop_candidate(db, position, volume)
+        if hard_stop:
+            candidates.append(hard_stop)
+            continue
+        profit_protection = _profit_protection_candidate(position, volume)
+        if profit_protection:
+            candidates.append(profit_protection)
 
     quote_cache: dict[str, dict[str, Any]] = {}
     plans = (
