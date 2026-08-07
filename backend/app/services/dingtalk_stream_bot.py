@@ -26,6 +26,14 @@ HELP_TEXT = """### 知行交易驾驶舱 · 群内问答
 回答仅用于证据审查，不会自动操作真实账户。"""
 
 
+def compact_reply(text: str, max_chars: int = 900) -> str:
+    content = str(text or "").strip()
+    if len(content) <= max_chars:
+        return content
+    shortened = content[:max_chars].rsplit("\n", 1)[0].rstrip()
+    return shortened + "\n\n（详细证据请在系统今日决策页查看。）"
+
+
 def _allowed_ids(raw: str) -> set[str]:
     return {item.strip() for item in re.split(r"[,;\s]+", raw or "") if item.strip()}
 
@@ -154,11 +162,12 @@ class TradingChatbotHandler(dingtalk_stream.AsyncChatbotHandler):
                 )
                 return
             if any(token in question for token in ("今日决策", "市场", "大盘", "今日策略")):
-                row = generate_analysis(db, "market", "today", force=False)
+                row = generate_analysis(db, "market", "today-dingtalk", force=False)
                 self._reply(
                     incoming,
                     "今日决策证据审查",
-                    row.content + "\n\n---\n仅依据系统当前数据，不会自动下单。",
+                    compact_reply(row.content)
+                    + "\n\n---\n仅依据系统当前数据，不会自动下单。",
                 )
                 return
             self._reply(

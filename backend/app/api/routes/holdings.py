@@ -90,6 +90,7 @@ from app.services.recommendation_feedback import (
     rematch_execution_feedback_for_codes,
     resolve_feedback_execution,
 )
+from app.services.action_recommendations import active_current_recommendations
 from app.core.trading_clock import shanghai_now_naive, shanghai_today
 
 router = APIRouter()
@@ -271,53 +272,13 @@ def _recommendation_out(row: ActionRecommendation, db: Session) -> ActionRecomme
     )
 
 
-def _current_holding_identity(db: Session) -> tuple[set[int], set[str]]:
-    rows = db.query(Holding.id, Holding.code).all()
-    return (
-        {int(row_id) for row_id, _ in rows if row_id is not None},
-        {_normalize_code(str(code)) for _, code in rows if code},
-    )
-
-
-def _recommendation_belongs_to_current_holding(
-    row: ActionRecommendation,
-    *,
-    holding_ids: set[int],
-    holding_codes: set[str],
-) -> bool:
-    if row.holding_id is not None and int(row.holding_id) in holding_ids:
-        return True
-    return _normalize_code(str(row.code or "")) in holding_codes
-
-
 @router.get("/alerts/active", response_model=list[ActionRecommendationOut])
 def list_active_alerts(include_acknowledged: bool = False, db: Session = Depends(get_db)) -> list[ActionRecommendationOut]:
-    now = shanghai_now_naive()
-    current_holding_ids, current_holding_codes = _current_holding_identity(db)
-    filter_to_current_holdings = bool(current_holding_ids or current_holding_codes)
-    rows = (
-        db.query(ActionRecommendation)
-        .filter(
-            ActionRecommendation.expires_at.is_not(None),
-            ActionRecommendation.expires_at >= now,
-        )
-        .order_by(ActionRecommendation.updated_at.desc(), ActionRecommendation.id.desc())
-        .limit(500)
-        .all()
+    rows = active_current_recommendations(
+        db,
+        include_acknowledged=include_acknowledged,
     )
-    latest_by_target: dict[str, ActionRecommendation] = {}
-    for row in rows:
-        if not include_acknowledged and row.acknowledged_at is not None:
-            continue
-        if filter_to_current_holdings and not _recommendation_belongs_to_current_holding(
-            row,
-            holding_ids=current_holding_ids,
-            holding_codes=current_holding_codes,
-        ):
-            continue
-        key = str(row.holding_id or row.code)
-        latest_by_target.setdefault(key, row)
-    return [_recommendation_out(row, db) for row in latest_by_target.values()]
+    return [_recommendation_out(row, db) for row in rows]
 
 
 @router.post("/alerts/{recommendation_id}/acknowledge", response_model=ActionRecommendationOut)

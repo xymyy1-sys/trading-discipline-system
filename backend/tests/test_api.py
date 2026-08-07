@@ -372,8 +372,17 @@ def test_protected_api_requires_session(client):
 
 def test_active_alert_can_be_acknowledged(client, db_session):
     from datetime import datetime, timedelta
-    from app.models.trading import ActionRecommendation
+    from app.models.trading import ActionRecommendation, Holding
 
+    db_session.add(Holding(
+        id=88,
+        code="600888",
+        name="alert test",
+        quantity=100,
+        cost_price=10,
+        current_price=10,
+        total_asset=100000,
+    ))
     row = ActionRecommendation(
         trade_date="2026-07-12",
         holding_id=88,
@@ -448,6 +457,34 @@ def test_active_alerts_filter_out_deleted_lifecycle_when_holdings_exist(client, 
     payload = client.get("/api/alerts/active").json()
 
     assert [item["code"] for item in payload] == ["600999"]
+
+
+def test_active_alerts_expire_when_portfolio_is_empty(client, db_session):
+    from datetime import datetime, timedelta
+    from app.models.trading import ActionRecommendation
+
+    row = ActionRecommendation(
+        trade_date="2026-07-12",
+        target_key="holding:88:old",
+        holding_id=88,
+        code="600888",
+        name="已删除持仓",
+        created_at=datetime.now(),
+        level="REDUCE",
+        state="REDUCE_REQUIRED",
+        action="历史减仓",
+        evidence_json='["old"]',
+        counter_evidence_json="[]",
+        invalid_conditions_json="[]",
+        recovery_conditions_json="[]",
+        expires_at=datetime.now() + timedelta(minutes=15),
+    )
+    db_session.add(row)
+    db_session.commit()
+
+    assert client.get("/api/alerts/active").json() == []
+    db_session.refresh(row)
+    assert row.expires_at <= datetime.now()
 
 
 def test_candidate_pool_excludes_invalid_execution(client, db_session):

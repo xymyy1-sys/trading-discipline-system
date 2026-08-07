@@ -1,6 +1,11 @@
 from types import SimpleNamespace
 
-from app.services.dingtalk_stream_bot import clean_question, is_sender_authorized, resolve_holding
+from app.services.dingtalk_stream_bot import (
+    clean_question,
+    compact_reply,
+    is_sender_authorized,
+    resolve_holding,
+)
 
 
 def holding(code: str, name: str):
@@ -8,7 +13,11 @@ def holding(code: str, name: str):
 
 
 def message(*, staff_id: str = "", sender_id: str = "", is_admin: bool = False):
-    return SimpleNamespace(sender_staff_id=staff_id, sender_id=sender_id, is_admin=is_admin)
+    return SimpleNamespace(
+        sender_staff_id=staff_id,
+        sender_id=sender_id,
+        is_admin=is_admin,
+    )
 
 
 def test_stream_bot_requires_allowlist_or_admin():
@@ -26,3 +35,9 @@ def test_resolve_holding_by_code_or_unique_name():
     assert resolve_holding("600584 该卖吗", holdings).name == "长电科技"
     assert resolve_holding("京东方A是否继续持有", holdings).code == "000725"
     assert resolve_holding("兆易创新怎么样", holdings) is None
+
+
+def test_compact_reply_enforces_group_message_limit():
+    result = compact_reply("第一行\n" + "证据" * 1000, max_chars=100)
+    assert len(result) < 160
+    assert "详细证据请在系统今日决策页查看" in result
