@@ -922,7 +922,7 @@ def _hard_stop_candidate(
     cost = float(position.average_cost or 0)
     loss_pct = (price / cost - 1) * 100 if cost > 0 else 0.0
     return ShadowCandidate(
-        strategy_source="capital_protection",
+        strategy_source="holding_execution",
         source_kind="simulation_hard_stop",
         source_id=position.id,
         source_version=f"hard-stop:p{position.id}:d{volume.trade_date}:s{stop:.4f}",
