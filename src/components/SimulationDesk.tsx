@@ -479,17 +479,34 @@ function SystemEvolutionPanel({ report }: { report: SystemEvolutionReport | null
   if (!report) return null
   return <section className="simulation-section panel system-evolution-panel">
     <div className="simulation-section-title">
-      <div><h4><FlaskConical size={17} />交易事实驱动的系统进化</h4><small>把候选、跳过、成交和结果归因到功能模块；发现问题只生成开发提案，不直接修改生产规则。</small></div>
+      <div><h4><FlaskConical size={17} />模块进化总览</h4><small>先看每个模块真实贡献，再决定调参数、改策略，还是提交产品改进单。</small></div>
       <span>{report.proposals.length}项待评审提案</span>
     </div>
-    <div className="system-evolution-scorecards">
-      {report.module_scorecards.slice(0, 6).map(item => <article key={item.module_key}>
-        <b>{item.module_key}</b>
-        <span>候选{item.candidate_count} · 成交{item.fill_count} · 闭环{item.closed_trade_count}</span>
-        <strong>{item.win_rate == null ? '等待闭环样本' : `胜率 ${item.win_rate.toFixed(1)}%`}</strong>
-        <small>{item.average_return_pct == null ? '暂不评价收益' : `平均收益 ${item.average_return_pct >= 0 ? '+' : ''}${item.average_return_pct.toFixed(2)}%`}</small>
-      </article>)}
+    <div className="evolution-governance-flow" aria-label="系统进化治理链">
+      {report.governance.required_flow.map((item, index) => <span key={item}>{index + 1}<b>{item}</b></span>)}
     </div>
+    <div className="evolution-layer-grid">
+      <article><b>参数层</b><strong>影子候选 → 30/30前向验证</strong><p>只调整阈值和权重；验证合格后仍需人工确认。</p></article>
+      <article><b>策略逻辑层</b><strong>重复错误 → 可证伪提案</strong><p>识别追高、假突破、恐慌卖出等重复模式，不因单笔盈亏改规则。</p></article>
+      <article><b>功能与产品层</b><strong>模块成绩 → 开发改进单</strong><p>比较候选覆盖、成交转化和闭环收益；只生成提案，不自行改生产代码。</p></article>
+    </div>
+    <div className="system-evolution-table-wrap">
+      <table className="system-evolution-table">
+        <thead><tr><th>功能模块</th><th>候选</th><th>实际入选</th><th>实际成交</th><th>闭环交易</th><th>胜率</th><th>平均收益</th><th>主要问题</th></tr></thead>
+        <tbody>{report.module_scorecards.map(item => <tr key={item.module_key}>
+          <td><b>{item.module_key}</b></td>
+          <td>{item.candidate_count}</td>
+          <td>{item.selected_count}<small>{item.candidate_count ? `${(item.selected_count / item.candidate_count * 100).toFixed(0)}%` : '--'}</small></td>
+          <td>{item.fill_count}<small>{item.selected_count ? `${(item.fill_count / item.selected_count * 100).toFixed(0)}%` : '--'}</small></td>
+          <td>{item.closed_trade_count}</td>
+          <td>{item.win_rate == null ? '待积累' : `${item.win_rate.toFixed(1)}%`}</td>
+          <td className={(item.average_return_pct ?? 0) >= 0 ? 'num-up' : 'num-down'}>{item.average_return_pct == null ? '--' : `${item.average_return_pct >= 0 ? '+' : ''}${item.average_return_pct.toFixed(2)}%`}</td>
+          <td>{item.top_skip_reasons[0]?.reason || (item.closed_trade_count ? '等待更多闭环样本' : '尚未形成结果样本')}</td>
+        </tr>)}</tbody>
+      </table>
+      {!report.module_scorecards.length && <p className="plain-text">尚无可归因的交易事实。发生候选评估、跳过、成交或平仓后，这里会自动形成模块成绩单。</p>}
+    </div>
+    <div className="evolution-proposal-heading"><b>自动生成的开发改进单</b><span>达到重复样本门槛才出现；不会直接修改代码</span></div>
     <div className="system-evolution-proposals">
       {report.proposals.slice(0, 4).map(item => <article key={item.id} className={`tone-${item.priority === 'P1' ? 'danger' : 'warning'}`}>
         <header><b>[{item.priority}] {item.module_key} · {item.title}</b><span>{item.sample_count}个重复样本</span></header>
@@ -500,7 +517,7 @@ function SystemEvolutionPanel({ report }: { report: SystemEvolutionReport | null
       </article>)}
       {!report.proposals.length && <p className="plain-text">当前还没有达到重复样本门槛的功能改进提案。异常交易仍会逐笔入账，重复出现后才升级为开发任务，避免迎合单日盈亏。</p>}
     </div>
-    <p className="system-evolution-governance">治理链：{report.governance.required_flow.join(' → ')}。Codex只在你批准提案后修改代码，随后必须影子验证并保留回滚。</p>
+    <p className="system-evolution-governance">当前边界：系统自动发现和生成提案；你确认后由 Codex 开发；新旧逻辑必须前向影子验证，最后人工发布或回滚。</p>
   </section>
 }
 
@@ -552,7 +569,8 @@ export function SimulationEvolutionDesk() {
       onRefresh={load}
     />
     {message && <p className="simulation-form-message">{message}</p>}
-    <section className="simulation-section panel">
+    <SystemEvolutionPanel report={report} />
+    <section className="simulation-section panel parameter-release-panel">
       <div className="simulation-section-title">
         <div><h4><ShieldAlert size={17} />参数候选与人工确认</h4><small>候选与对照均至少30笔严格前向样本；验证通过后仍需你点击确认才会启用。</small></div>
         <span>{releases.length}个版本</span>
@@ -568,7 +586,6 @@ export function SimulationEvolutionDesk() {
         {!releases.length && <p className="plain-text">当前尚未形成达到30/30前向样本门槛的参数候选，系统继续积累交易事实。</p>}
       </div>
     </section>
-    <SystemEvolutionPanel report={report} />
   </section>
 }
 

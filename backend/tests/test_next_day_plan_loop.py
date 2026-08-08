@@ -13,10 +13,36 @@ from app.schemas.trading import VolumePriceSnapshotOut
 from app.services import trading_calendar
 from app.services.intraday_collector import _refresh_collected_holding_plan
 from app.services.next_day_expectations import (
+    _rank_limit_up_plan_candidates,
     generate_automatic_limit_up_plans,
     generate_next_day_expectations,
     rotate_watchlist_and_generate_next_day_expectations,
 )
+
+
+def test_limit_up_shortlist_uses_promotion_probability_before_board_height():
+    stocks = {
+        "600101": SimpleNamespace(consecutive_limit_days=1),
+        "600102": SimpleNamespace(consecutive_limit_days=4),
+        "600103": SimpleNamespace(consecutive_limit_days=2),
+    }
+    roles = [
+        SimpleNamespace(code="600101", max_position_ratio=0.15, role_score=70, level=1),
+        SimpleNamespace(code="600102", max_position_ratio=0.08, role_score=95, level=4),
+        SimpleNamespace(code="600103", max_position_ratio=0.12, role_score=80, level=2),
+    ]
+    atmosphere = SimpleNamespace(theme_ladders=[SimpleNamespace(name="主线", identity_roles=roles)])
+    promotion = {
+        "600101": {"probability": 52, "same_level_rank": 1},
+        "600102": {"probability": 31, "same_level_rank": 1},
+        "600103": {"probability": 43, "same_level_rank": 1},
+    }
+
+    ranked = _rank_limit_up_plan_candidates(stocks, atmosphere, promotion, maximum_plans=2)
+
+    assert [row["code"] for row in ranked] == ["600101", "600103"]
+    assert ranked[0]["selection_rank"] == 1
+    assert "概率52.0%" in ranked[0]["selection_reason"]
 
 
 def _holding(code: str = "600101", *, current_price: float = 10) -> Holding:

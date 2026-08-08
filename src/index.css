@@ -125,6 +125,27 @@ a:focus-visible {
 .system-evolution-proposals header { display: flex; justify-content: space-between; gap: 12px; }
 .system-evolution-proposals p { margin: 0; }
 .system-evolution-governance { margin: 14px 0 0; font-size: 13px; }
+.evolution-governance-flow { display: grid; grid-template-columns: repeat(6, minmax(90px, 1fr)); gap: 8px; margin: 15px 0; }
+.evolution-governance-flow span { display: flex; align-items: center; gap: 8px; padding: 10px; border-radius: 8px; background: #eef4fa; color: #547087; font-size: 12px; }
+.evolution-governance-flow b { color: #20364a; }
+.evolution-layer-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; margin: 14px 0; }
+.evolution-layer-grid article { display: grid; gap: 6px; padding: 14px; border: 1px solid var(--border-color); border-top: 4px solid #3979bd; border-radius: 9px; background: #fbfdff; }
+.evolution-layer-grid article:nth-child(2) { border-top-color: #a96d09; }
+.evolution-layer-grid article:nth-child(3) { border-top-color: #6c54a3; }
+.evolution-layer-grid p { margin: 0; color: var(--text-muted); font-size: 13px; }
+.system-evolution-table-wrap { overflow-x: auto; border: 1px solid var(--border-color); border-radius: 9px; }
+.system-evolution-table { width: 100%; min-width: 820px; border-collapse: collapse; font-size: 13px; }
+.system-evolution-table th { background: #eef3f8; color: var(--text-muted); text-align: left; }
+.system-evolution-table th, .system-evolution-table td { padding: 11px 12px; border-bottom: 1px solid var(--border-color); vertical-align: top; }
+.system-evolution-table tbody tr:last-child td { border-bottom: 0; }
+.system-evolution-table td small { display: block; margin-top: 3px; color: var(--text-muted); }
+.system-evolution-table td:last-child { max-width: 300px; color: var(--text-muted); }
+.evolution-proposal-heading { display: flex; justify-content: space-between; gap: 12px; margin: 18px 0 9px; }
+.evolution-proposal-heading span { color: var(--text-muted); font-size: 12px; }
+@media (max-width: 900px) {
+  .evolution-governance-flow { grid-template-columns: repeat(3, 1fr); }
+  .evolution-layer-grid { grid-template-columns: 1fr; }
+}
 .promotion-dashboard { margin-bottom: 16px; padding: 16px; }
 .promotion-dashboard-head { display: flex; justify-content: space-between; gap: 12px; align-items: center; }
 .promotion-dashboard-head > div { display: grid; gap: 3px; }
@@ -160,4 +181,46 @@ a:focus-visible {
 .promotion-credibility.credibility-2 { background: #e9f3ff; color: #1f63b5; }
 .promotion-credibility.credibility-3 { background: #e7f7ee; color: #18794e; }
 .promotion-probability-primary { margin: 14px 0 4px; box-shadow: 0 8px 22px rgb(35 91 145 / 8%); }
+.plan-list-explainer { margin: 0 0 4px; color: var(--text-muted); font-size: 12px; line-height: 1.65; }
+.plan-selection-rank { color: #1f63b5 !important; font-weight: 650; }
+.auction-selection-reason { margin-top: 4px; color: #1f63b5 !important; }
+.limit-detail-tabs {
+  position: sticky;
+  top: 8px;
+  z-index: 4;
+  display: flex;
+  gap: 6px;
+  padding: 7px;
+  border: 1px solid var(--border-color);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, .96);
+  box-shadow: 0 7px 18px rgb(20 49 82 / 8%);
+}
+.limit-detail-tabs button { border: 0; border-radius: 7px; padding: 9px 15px; background: transparent; color: var(--text-muted); cursor: pointer; font-weight: 700; }
+.limit-detail-tabs button.active { background: #e7f2ff; color: #185da8; }
+.limit-detail.detail-summary .plan-primary-panel > .auction-evidence-grid,
+.limit-detail.detail-summary .plan-primary-panel > .form-grid,
+.limit-detail.detail-summary .auction-plan-panel .stage-check-grid,
+.limit-detail.detail-summary .auction-plan-panel .action-ladder,
+.limit-detail.detail-summary .auction-plan-panel > .auction-evidence-grid,
+.limit-detail.detail-summary .auction-plan-panel > .form-grid,
+.limit-detail.detail-summary .auction-plan-panel > textarea,
+.limit-detail.detail-summary .classification-panel,
+.limit-detail.detail-summary .review-panel { display: none; }
+.limit-detail.detail-evidence .plan-primary-panel > .form-grid,
+.limit-detail.detail-evidence .auction-plan-panel > .form-grid,
+.limit-detail.detail-evidence .auction-plan-panel > textarea,
+.limit-detail.detail-evidence .classification-panel,
+.limit-detail.detail-evidence .scenario-panel,
+.limit-detail.detail-evidence .review-panel { display: none; }
+.limit-detail.detail-edit .plan-primary-panel .promotion-probability-panel,
+.limit-detail.detail-edit .plan-primary-panel .condition-order-advice,
+.limit-detail.detail-edit .plan-primary-panel .auction-evidence-grid,
+.limit-detail.detail-edit .auction-plan-panel .stage-decision-bar,
+.limit-detail.detail-edit .auction-plan-panel .limit-mainline-decision,
+.limit-detail.detail-edit .auction-plan-panel .stage-check-grid,
+.limit-detail.detail-edit .auction-plan-panel .action-ladder,
+.limit-detail.detail-edit .auction-plan-panel .auction-metrics,
+.limit-detail.detail-edit .auction-plan-panel > .auction-evidence-grid { display: none; }
+.limit-detail.detail-edit .auction-plan-panel > h3::after { content: ' · 原始字段'; color: var(--text-muted); font-weight: 500; font-size: 13px; }
 .promotion-dashboard > p { margin: 0; font-size: 13px; }

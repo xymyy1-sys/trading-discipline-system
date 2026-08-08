@@ -112,6 +112,7 @@ export default function NextDayPlans({ mode = 'holding' }: { mode?: 'holding' | 
   const [seesaw, setSeesaw] = useState<SeesawMonitor | null>(null)
   const [promotionDashboard, setPromotionDashboard] = useState<PromotionDashboard | null>(null)
   const [promotionSort, setPromotionSort] = useState<{ key: PromotionSortKey, direction: SortDirection }>({ key: 'probability', direction: 'desc' })
+  const [limitDetailTab, setLimitDetailTab] = useState<'summary' | 'evidence' | 'edit'>('summary')
   const [loading, setLoading] = useState(false)
   const [statusText, setStatusText] = useState('')
   const selectedIdRef = useRef<number | null>(null)
@@ -264,6 +265,7 @@ export default function NextDayPlans({ mode = 'holding' }: { mode?: 'holding' | 
     selectedIdRef.current = plan.id
     setSelectedId(plan.id)
     setDraft(structuredClone(plan))
+    if (plan.plan_type === 'limit_up_auction') setLimitDetailTab('summary')
   }
 
   const generatePlans = () => {
@@ -423,7 +425,8 @@ export default function NextDayPlans({ mode = 'holding' }: { mode?: 'holding' | 
 
       <div className="plan-layout">
         <aside className="panel plan-list">
-          <h3>持仓计划</h3>
+          <h3>{mode === 'limit' ? '自动打板候选' : '持仓计划'}</h3>
+          {mode === 'limit' && <p className="plan-list-explainer">从当日真实涨停天梯中，按“仓位资格 → 本级晋级概率 → 同身位排名 → 题材身份 → 连板高度”选取前12名；未通过仓位闸门的只作观察。</p>}
           {plans.map(plan => (
             <div className="plan-row-wrap" key={plan.id}>
               <button
@@ -434,9 +437,17 @@ export default function NextDayPlans({ mode = 'holding' }: { mode?: 'holding' | 
                 <strong>{plan.name}</strong>
                 <span>{plan.code} · {plan.holding_category}</span>
                 {plan.plan_type === 'limit_up_auction' && <em>打板/竞价预案</em>}
+                {plan.plan_type === 'limit_up_auction' && <small className="plan-selection-rank">
+                  候选第{plan.auction_plan.auto_selection_rank ?? '--'}名 / 天梯{plan.auction_plan.auto_selection_pool_size ?? '--'}只
+                  {' · '}{plan.auction_plan.promotion_transition || '晋级待确认'} {(plan.auction_plan.promotion_probability ?? 0).toFixed(1)}%
+                </small>}
                 <small>
-                  {plan.plan_date} · 仓位 <SensitiveValue>{(plan.position_ratio * 100).toFixed(1)}%</SensitiveValue>
-                  {' · '}浮盈 <SensitiveValue>{(plan.profit_ratio * 100).toFixed(2)}%</SensitiveValue>
+                  {plan.plan_type === 'limit_up_auction' ? (
+                    <>验证日 {plan.plan_date} · 仓位上限 <SensitiveValue>{(plan.auction_plan.max_position_ratio * 100).toFixed(0)}%</SensitiveValue></>
+                  ) : (
+                    <>{plan.plan_date} · 仓位 <SensitiveValue>{(plan.position_ratio * 100).toFixed(1)}%</SensitiveValue>
+                    {' · '}浮盈 <SensitiveValue>{(plan.profit_ratio * 100).toFixed(2)}%</SensitiveValue></>
+                  )}
                 </small>
               </button>
               <button className="plan-delete-btn" type="button" title="删除计划" onClick={() => deletePlan(plan)}>
@@ -448,8 +459,13 @@ export default function NextDayPlans({ mode = 'holding' }: { mode?: 'holding' | 
         </aside>
 
         {draft ? (
-          <div className="plan-editor">
-            <section className="panel">
+          <div className={`plan-editor ${mode === 'limit' ? `limit-detail detail-${limitDetailTab}` : ''}`}>
+            {mode === 'limit' && <nav className="limit-detail-tabs" aria-label="打板预案详情视图">
+              <button type="button" className={limitDetailTab === 'summary' ? 'active' : ''} onClick={() => setLimitDetailTab('summary')}>决策摘要</button>
+              <button type="button" className={limitDetailTab === 'evidence' ? 'active' : ''} onClick={() => setLimitDetailTab('evidence')}>证据与阶段</button>
+              <button type="button" className={limitDetailTab === 'edit' ? 'active' : ''} onClick={() => setLimitDetailTab('edit')}>编辑与复盘</button>
+            </nav>}
+            <section className="panel plan-primary-panel">
               <div className="selected-theme-head">
                 <div>
                   <strong>{draft.name} <span className="mono">{draft.code}</span></strong>
@@ -471,6 +487,9 @@ export default function NextDayPlans({ mode = 'holding' }: { mode?: 'holding' | 
                     <span className="auction-headline">
                       明日涨停价 {draft.limit_up_price.toFixed(2)} · 隔夜委托价 {draft.auction_plan.order_price.toFixed(2)}
                     </span>
+                  )}
+                  {draft.plan_type === 'limit_up_auction' && draft.auction_plan.auto_selection_reason && (
+                    <span className="auction-selection-reason">{draft.auction_plan.auto_selection_reason}</span>
                   )}
                 </div>
                 <button className="refresh-btn inline" type="button" onClick={savePlan}>
@@ -743,7 +762,7 @@ export default function NextDayPlans({ mode = 'holding' }: { mode?: 'holding' | 
               </section>
             )}
 
-            <section className="panel">
+            <section className="panel classification-panel">
               <h3>分类依据</h3>
               <div className="form-grid">
                 <input placeholder="板块" value={draft.classification_basis.sector} onChange={e => updateBasis('sector', e.target.value)} />
@@ -757,14 +776,14 @@ export default function NextDayPlans({ mode = 'holding' }: { mode?: 'holding' | 
               </div>
             </section>
 
-            <section className="plan-scripts">
+            <section className="plan-scripts scenario-panel">
               <Scenario title="超预期" condition={draft.outperform_condition} action={draft.outperform_action} onCondition={v => updateDraft('outperform_condition', v)} onAction={v => updateDraft('outperform_action', v)} />
               <Scenario title="符合预期" condition={draft.expected_condition} action={draft.expected_action} onCondition={v => updateDraft('expected_condition', v)} onAction={v => updateDraft('expected_action', v)} />
               <Scenario title="弱于预期" condition={draft.underperform_condition} action={draft.underperform_action} onCondition={v => updateDraft('underperform_condition', v)} onAction={v => updateDraft('underperform_action', v)} />
             </section>
 
-            <section className="panel">
-              <h3>高抛低吸约束</h3>
+            <section className="panel review-panel">
+              <h3>{draft.plan_type === 'limit_up_auction' ? '失败条件与盘后复盘' : '高抛低吸约束'}</h3>
               <div className="form-grid">
                 <input placeholder="高抛条件" value={draft.trim_condition} onChange={e => updateDraft('trim_condition', e.target.value)} />
                 <input placeholder="买回条件" value={draft.buyback_condition} onChange={e => updateDraft('buyback_condition', e.target.value)} />

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from datetime import date, datetime
+from typing import Any
 
 from sqlalchemy.orm import Session
 
@@ -20,6 +21,77 @@ from app.models.trading import (
     VolumePriceSnapshot,
 )
 from app.services.trading_calendar import next_a_share_trading_day
+
+
+def _rank_limit_up_plan_candidates(
+    stocks: dict[str, Any],
+    atmosphere: Any,
+    promotion_by_code: dict[str, dict[str, Any]],
+    *,
+    maximum_plans: int,
+) -> list[dict[str, Any]]:
+    """Rank next-session board candidates using the active promotion model.
+
+    The old implementation chose eligible names mainly by board height and
+    role score, while the learned k -> k+1 probability was only displayed
+    after selection.  That made the visible shortlist inconsistent with the
+    probability ledger.  The promotion probability and same-level rank are
+    now the primary ordering evidence after the hard position gate.
+    """
+    context_by_code: dict[str, dict[str, Any]] = {}
+    for theme in atmosphere.theme_ladders:
+        for role in theme.identity_roles:
+            role_cap = float(role.max_position_ratio or 0)
+            candidate = {
+                "code": role.code,
+                "theme": theme,
+                "role": role,
+                "eligible": role_cap > 0,
+                "role_score": float(role.role_score or 0),
+                "board_level": int(role.level or 0),
+            }
+            previous = context_by_code.get(role.code)
+            if previous is None or (
+                int(candidate["eligible"]), candidate["role_score"], candidate["board_level"]
+            ) > (
+                int(previous["eligible"]), previous["role_score"], previous["board_level"]
+            ):
+                context_by_code[role.code] = candidate
+
+    rows: list[dict[str, Any]] = []
+    for code, stock in stocks.items():
+        context = context_by_code.get(code, {})
+        promotion = promotion_by_code.get(code) or {}
+        probability = float(promotion.get("probability") or 0)
+        same_level_rank = int(promotion.get("same_level_rank") or 9999)
+        row = {
+            "code": code,
+            "theme": context.get("theme"),
+            "role": context.get("role"),
+            "eligible": bool(context.get("eligible", False)),
+            "probability": probability,
+            "same_level_rank": same_level_rank,
+            "role_score": float(context.get("role_score") or 0),
+            "board_level": max(1, int(getattr(stock, "consecutive_limit_days", 1) or 1)),
+        }
+        rows.append(row)
+
+    rows.sort(key=lambda row: (
+        int(row["eligible"]),
+        row["probability"],
+        -row["same_level_rank"],
+        row["role_score"],
+        row["board_level"],
+    ), reverse=True)
+    selected = rows[:max(1, maximum_plans)]
+    for rank, row in enumerate(selected, start=1):
+        row["selection_rank"] = rank
+        gate = "具备题材身份与试错仓资格" if row["eligible"] else "仅观察，尚未通过题材身份仓位闸门"
+        row["selection_reason"] = (
+            f"自动候选第{rank}名：{row['board_level']}进{row['board_level'] + 1}概率"
+            f"{row['probability']:.1f}%，同身位第{row['same_level_rank']}；{gate}。"
+        )
+    return selected
 
 
 def generate_automatic_limit_up_plans(
@@ -57,39 +129,19 @@ def generate_automatic_limit_up_plans(
         for group in ladder.groups
         for stock in group.stocks
     }
-    ranked: dict[str, tuple[int, int, float, object, object]] = {}
-    for theme in atmosphere.theme_ladders:
-        for role in theme.identity_roles:
-            # Eligible mainline identities sort first, then height and role
-            # score.  A high board with a zero cap remains useful as a
-            # next-morning observation plan but can never create an order.
-            key = (
-                1 if float(role.max_position_ratio or 0) > 0 else 0,
-                int(role.level or 0),
-                float(role.role_score or 0),
-                theme,
-                role,
-            )
-            previous = ranked.get(role.code)
-            if previous is None or key[:3] > previous[:3]:
-                ranked[role.code] = key
-    # Provider theme classification can be incomplete.  Never lose the true
-    # market/sector high board merely because it lacked a matched theme; it is
-    # included as a zero-cap observation plan and must earn eligibility live.
-    for stock in stocks.values():
-        ranked.setdefault(
-            stock.code,
-            (0, int(stock.consecutive_limit_days or 1), 0.0, None, None),
-        )
-    selected = sorted(
-        ranked.items(),
-        key=lambda item: item[1][:3],
-        reverse=True,
-    )[:max(1, maximum_plans)]
+    selected = _rank_limit_up_plan_candidates(
+        stocks,
+        atmosphere,
+        promotion_by_code,
+        maximum_plans=maximum_plans,
+    )
     plan_date = next_trading_date(date.fromisoformat(completed_trade_date))
     selected_codes: set[str] = set()
     created = 0
-    for code, (_, _, _, theme, role) in selected:
+    for selection in selected:
+        code = str(selection["code"])
+        theme = selection.get("theme")
+        role = selection.get("role")
         stock = stocks.get(code)
         if stock is None:
             continue
@@ -144,7 +196,11 @@ def generate_automatic_limit_up_plans(
             "source_trade_date": completed_trade_date,
             "source_ladder": ladder.source,
             "source_atmosphere": atmosphere.source,
-            "promotion_model_version": "promotion-v1",
+            "promotion_model_version": str((promotion_by_code.get(code) or {}).get("champion_model") or "promotion-v1"),
+            "auto_selection_rank": selection["selection_rank"],
+            "auto_selection_pool_size": len(stocks),
+            "auto_selection_reason": selection["selection_reason"],
+            "auto_selection_basis": "仓位资格→本级晋级概率→同身位排名→题材身份分→连板高度",
         })
         promotion = promotion_by_code.get(code) or {}
         if promotion:

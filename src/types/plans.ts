@@ -115,6 +115,10 @@ export interface AuctionPlan {
   promotion_trial_position_ratio?: number;
   promotion_role_position_ratio?: number;
   promotion_position_rule?: string;
+  auto_selection_rank?: number;
+  auto_selection_pool_size?: number;
+  auto_selection_reason?: string;
+  auto_selection_basis?: string;
 }
 
 export interface NextDayPlan {
