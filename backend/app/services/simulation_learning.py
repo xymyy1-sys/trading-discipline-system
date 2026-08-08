@@ -13,9 +13,11 @@ from app.models.trading import (
     SimulationEvidenceSnapshot,
     SimulationFill,
     SimulationOrder,
+    SimulationShadowDecision,
     VolumePriceSnapshot,
 )
 from app.services.simulation_calibration import simulation_calibration_proposal
+from app.services.system_evolution import decision_modules, generate_system_improvement_proposals
 
 
 SAMPLE_TYPE = "ai_trade_learning"
@@ -115,6 +117,9 @@ def build_ai_trader_daily_learning(
         max_up = (maximum / basis - 1) * 100 if basis > 0 else 0.0
         max_down = (minimum / basis - 1) * 100 if basis > 0 else 0.0
         order = db.get(SimulationOrder, fill.order_id)
+        decision = db.query(SimulationShadowDecision).filter(
+            SimulationShadowDecision.order_id == fill.order_id,
+        ).first()
         evidence = db.get(
             SimulationEvidenceSnapshot,
             int(getattr(order, "decision_evidence_snapshot_id", 0) or 0),
@@ -140,12 +145,16 @@ def build_ai_trader_daily_learning(
             else:
                 tags.append("卖点结果中性")
         sample = {
+            "account_id": account.id,
             "fill_id": fill.id,
             "order_id": fill.order_id,
             "trade_date": trade_date,
             "code": fill.code,
             "name": fill.name,
             "side": fill.side,
+            "strategy_source": fill.strategy_source,
+            "source_kind": decision.source_kind if decision else "",
+            "source_modules": decision_modules(decision) if decision else [fill.strategy_source],
             "quantity": fill.quantity,
             "fill_price": round(basis, 4),
             "fill_time": fill.filled_at.isoformat(),
@@ -173,6 +182,11 @@ def build_ai_trader_daily_learning(
         samples.append(sample)
 
     calibration = simulation_calibration_proposal(db, account)
+    improvement_proposals = generate_system_improvement_proposals(
+        db,
+        account,
+        trade_date=trade_date,
+    )
     summary = {
         "trade_date": trade_date,
         "account_id": account.id,
@@ -183,6 +197,16 @@ def build_ai_trader_daily_learning(
         "formal_closed_sample_count": int((calibration.get("overall") or {}).get("sample_count") or 0),
         "minimum_formal_samples": 30,
         "calibration_candidates": calibration.get("candidates") or [],
+        "improvement_proposals": [
+            {
+                "proposal_key": row.proposal_key,
+                "priority": row.priority,
+                "module_key": row.module_key,
+                "title": row.title,
+                "sample_count": row.sample_count,
+            }
+            for row in improvement_proposals
+        ],
         "rule_application": "每日生成诊断；规则只有达到样本门槛并通过前向对照后才升级，AI文字不能直接改交易参数。",
     }
     _upsert_snapshot(

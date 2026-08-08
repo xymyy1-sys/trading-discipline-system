@@ -156,6 +156,11 @@ def notify_ai_trader_close_review(db: Session, trade_date: str, *, now: datetime
     plan_text = "\n".join(position_plan_lines) or "- 当前空仓，次日不为凑交易而开仓。"
     grade = "A" if equity.daily_pnl > 0 and equity.drawdown_pct <= 2 else "B" if equity.drawdown_pct <= 4 else "C"
     corrections = list(learning.get("corrections") or [])[:3]
+    evolution = list(learning.get("improvement_proposals") or [])[:2]
+    evolution_text = "\n".join(
+        f"- [{item.get('priority', 'P2')}] {item.get('module_key', '系统')}：{item.get('title', '待复核')}（{item.get('proposal_key', '')}）"
+        for item in evolution
+    ) or "- 今日没有达到重复样本门槛的新开发提案。"
     correction_text = "\n".join(f"- {item}" for item in corrections) or "- 今日没有形成足以修改规则的新证据，继续保留原规则采样。"
     title = f"AI模拟盘{trade_date}收盘复盘"
     text = (
@@ -170,6 +175,7 @@ def notify_ai_trader_close_review(db: Session, trade_date: str, *, now: datetime
         f"- 已写入可计算成交样本：{learning.get('evaluated_sample_count', 0)}笔；"
         f"正式闭环样本：{learning.get('formal_closed_sample_count', 0)}/30。\n"
         f"{correction_text}\n\n"
+        f"#### 系统进化提案\n{evolution_text}\n\n"
         f"- 校准纪律：逐笔保存最大有利/不利波动及不操作对照；样本不足时只记账，不自动迎合单日结果改参。\n\n"
         f"> 全部为前向模拟记录，不回填历史成交。"
     )
@@ -181,5 +187,6 @@ def notify_ai_trader_close_review(db: Session, trade_date: str, *, now: datetime
         "learning_sample_count": learning.get("evaluated_sample_count", 0),
         "formal_closed_sample_count": learning.get("formal_closed_sample_count", 0),
         "corrections": corrections,
+        "improvement_proposals": evolution,
     }, evaluated_at)
     return True

@@ -839,6 +839,22 @@ def refresh_plan_stage_from_evidence(
         )
     if branch_reason:
         advice_reason = f"{branch_reason} {advice_reason}".strip()
+    prior_promotion = _safe_float(auction.get("promotion_probability"))
+    if plan.plan_type == "limit_up_auction" and prior_promotion > 0:
+        passed_count = len(passed)
+        failed_count = len(failed)
+        live_probability = max(
+            1.0,
+            min(90.0, prior_promotion + passed_count * 3.0 - failed_count * 10.0),
+        )
+        auction["live_promotion_probability"] = round(live_probability, 1)
+        auction["promotion_probability_change"] = round(live_probability - prior_promotion, 1)
+        auction["promotion_dynamic_evidence"] = [
+            f"当前阶段通过{passed_count}项、失败{failed_count}项",
+            "动态概率只用于逐级晋级比较；真实操作仍必须通过市场、题材、量价和成交可行性门控。",
+        ]
+        auction["promotion_updated_at"] = evaluated_at.strftime("%Y-%m-%d %H:%M:%S")
+
     auction.update(
         {
             "current_stage": stage,

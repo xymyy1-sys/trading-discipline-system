@@ -37,6 +37,7 @@ import type {
   SimulationStrategyType,
   SimulationValidation,
   SimulationRiskGuard,
+  SystemEvolutionReport,
 } from '../types'
 
 const ACTIVE_ACCOUNT_KEY = 'simulation-account-id'
@@ -259,6 +260,7 @@ export function SimulationAiTrader() {
   const [riskGuard, setRiskGuard] = useState<SimulationRiskGuard | null>(null)
   const [collector, setCollector] = useState<IntradayCollectorStatus | null>(null)
   const [selection, setSelection] = useState<AutonomousSelection | null>(null)
+  const [evolution, setEvolution] = useState<SystemEvolutionReport | null>(null)
   const [loading, setLoading] = useState(false)
   const [running, setRunning] = useState(false)
   const [error, setError] = useState('')
@@ -282,9 +284,10 @@ export function SimulationAiTrader() {
           simulationRequest<SimulationRiskGuard>(`/api/simulation/accounts/${row.id}/risk-guard`).catch(() => null),
           simulationRequest<IntradayCollectorStatus>('/api/intraday-collector/status'),
           simulationRequest<AutonomousSelection>('/api/simulation/ai-trader/candidates'),
+          simulationRequest<SystemEvolutionReport>(`/api/simulation/accounts/${row.id}/system-evolution`).catch(() => null),
         ])
       })
-      .then(([positionRows, orderRows, equityRows, decisionRows, report, calibrationProposal, validationReport, guard, collectorStatus, selectionRows]) => {
+      .then(([positionRows, orderRows, equityRows, decisionRows, report, calibrationProposal, validationReport, guard, collectorStatus, selectionRows, evolutionReport]) => {
         setPositions(positionRows)
         setOrders(orderRows)
         setEquities(equityRows)
@@ -295,6 +298,7 @@ export function SimulationAiTrader() {
         setRiskGuard(guard)
         setCollector(collectorStatus)
         setSelection(selectionRows)
+        setEvolution(evolutionReport)
       })
       .catch(value => setError(value instanceof Error ? value.message : 'AI模拟交易员账本读取失败'))
       .finally(() => setLoading(false))
@@ -416,6 +420,7 @@ export function SimulationAiTrader() {
       </div>
       <AiTraderFeedbackPanel decisions={todayDecisions} orders={todayOrders} performance={performance} calibration={calibration} />
       <AiTraderValidationPanel validation={validation} />
+      <SystemEvolutionPanel report={evolution} />
       <section className="simulation-section panel">
         <div className="simulation-section-title"><h4><History size={17} />今日AI操作</h4><span>{createdOrders.length}笔委托 / {todayDecisions.length}条信号</span></div>
         <div className="ai-trader-actions">
@@ -450,6 +455,35 @@ export function SimulationAiTrader() {
         </ul>
       </section>
     </div>}
+  </section>
+}
+
+function SystemEvolutionPanel({ report }: { report: SystemEvolutionReport | null }) {
+  if (!report) return null
+  return <section className="simulation-section panel system-evolution-panel">
+    <div className="simulation-section-title">
+      <div><h4><FlaskConical size={17} />交易事实驱动的系统进化</h4><small>把候选、跳过、成交和结果归因到功能模块；发现问题只生成开发提案，不直接修改生产规则。</small></div>
+      <span>{report.proposals.length}项待评审提案</span>
+    </div>
+    <div className="system-evolution-scorecards">
+      {report.module_scorecards.slice(0, 6).map(item => <article key={item.module_key}>
+        <b>{item.module_key}</b>
+        <span>候选{item.candidate_count} · 成交{item.fill_count} · 闭环{item.closed_trade_count}</span>
+        <strong>{item.win_rate == null ? '等待闭环样本' : `胜率 ${item.win_rate.toFixed(1)}%`}</strong>
+        <small>{item.average_return_pct == null ? '暂不评价收益' : `平均收益 ${item.average_return_pct >= 0 ? '+' : ''}${item.average_return_pct.toFixed(2)}%`}</small>
+      </article>)}
+    </div>
+    <div className="system-evolution-proposals">
+      {report.proposals.slice(0, 4).map(item => <article key={item.id} className={`tone-${item.priority === 'P1' ? 'danger' : 'warning'}`}>
+        <header><b>[{item.priority}] {item.module_key} · {item.title}</b><span>{item.sample_count}个重复样本</span></header>
+        <p>{item.problem}</p>
+        <p><b>建议改造：</b>{item.proposed_change}</p>
+        <small>验收：{item.acceptance.slice(0, 2).join('；')}</small>
+        <footer>{item.proposal_key} · 状态：待用户评审</footer>
+      </article>)}
+      {!report.proposals.length && <p className="plain-text">当前还没有达到重复样本门槛的功能改进提案。异常交易仍会逐笔入账，重复出现后才升级为开发任务，避免迎合单日盈亏。</p>}
+    </div>
+    <p className="system-evolution-governance">治理链：{report.governance.required_flow.join(' → ')}。Codex只在你批准提案后修改代码，随后必须影子验证并保留回滚。</p>
   </section>
 }
 

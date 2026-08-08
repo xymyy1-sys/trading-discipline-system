@@ -41,6 +41,8 @@ from app.services.simulation import (
 from app.services.simulation_calibration import simulation_calibration_proposal
 from app.services.simulation_validation import validation_report
 from app.services.simulation_risk import account_risk_guard
+from app.services.system_evolution import system_evolution_report
+from app.services.limit_up_promotion import promotion_dashboard
 from app.core.trading_clock import shanghai_now_naive
 from app.services.simulation_shadow import get_or_create_ai_trader_account, run_shadow_experiments
 from app.services.autonomous_selection import latest_autonomous_selection, refresh_autonomous_selection
@@ -103,6 +105,15 @@ def ai_trader_candidates(
         "items": [],
         "scope_note": "候选范围为全A实时行情，不依赖观察池或涨停类模块。",
     }
+
+
+@router.get("/ai-trader/promotion-dashboard")
+def ai_trader_promotion_dashboard(
+    signal_date: str = "",
+    db: Session = Depends(get_db),
+) -> dict:
+    """Read the frozen k -> k+1 promotion cohorts and their outcomes."""
+    return promotion_dashboard(db, signal_date=signal_date or None)
 
 
 @router.post("/accounts", response_model=SimulationAccountOut)
@@ -229,6 +240,20 @@ def list_simulation_evidence(
 @router.get("/accounts/{account_id}/performance", response_model=SimulationPerformanceOut)
 def simulation_performance(account_id: int, db: Session = Depends(get_db)) -> dict:
     return performance_report(db, _account_or_404(db, account_id))
+
+
+@router.get("/accounts/{account_id}/system-evolution")
+def get_system_evolution_report(
+    account_id: int,
+    trade_date: str = "",
+    db: Session = Depends(get_db),
+) -> dict:
+    """Expose module scorecards and Codex-ready improvement proposals."""
+    return system_evolution_report(
+        db,
+        _account_or_404(db, account_id),
+        trade_date=trade_date or None,
+    )
 
 
 @router.get("/accounts/{account_id}/validation", response_model=SimulationValidationOut)

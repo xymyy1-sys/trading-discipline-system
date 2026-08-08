@@ -250,3 +250,48 @@ export interface SimulationRiskGuard {
   daily_loss_pct: number
   consecutive_formal_losses: number
 }
+
+export interface SystemEvolutionModuleScorecard {
+  module_key: string
+  candidate_count: number
+  selected_count: number
+  skipped_count: number
+  fill_count: number
+  closed_trade_count: number
+  wins: number
+  win_rate: number | null
+  average_return_pct: number | null
+  top_skip_reasons: Array<{ reason: string; count: number }>
+}
+
+export interface SystemImprovementProposal {
+  id: number
+  proposal_key: string
+  trade_date: string
+  level: 'parameter' | 'strategy' | 'module' | string
+  module_key: string
+  title: string
+  problem: string
+  evidence: Array<{ data_type: string; snapshot_id: number }>
+  proposed_change: string
+  expected_effect: string
+  risks: string[]
+  acceptance: string[]
+  sample_count: number
+  priority: string
+  status: string
+  created_at: string
+}
+
+export interface SystemEvolutionReport {
+  account_id: number
+  trade_date: string
+  generated_at: string
+  module_scorecards: SystemEvolutionModuleScorecard[]
+  proposals: SystemImprovementProposal[]
+  governance: {
+    automatic_discovery: boolean
+    automatic_code_change: boolean
+    required_flow: string[]
+  }
+}

@@ -44,6 +44,14 @@ def generate_automatic_limit_up_plans(
     if not _is_valid_limit_up_ladder(ladder) or ladder.trade_date != completed_trade_date:
         return 0
     atmosphere = provider.limit_up_atmosphere(completed_trade_date, force_refresh=False)
+    from app.services.limit_up_promotion import record_closing_promotion_cohort
+
+    promotion_by_code = record_closing_promotion_cohort(
+        db,
+        completed_trade_date=completed_trade_date,
+        ladder=ladder,
+        atmosphere=atmosphere,
+    )
     stocks = {
         stock.code: stock
         for group in ladder.groups
@@ -103,6 +111,9 @@ def generate_automatic_limit_up_plans(
         if theme_name and theme_name not in concepts:
             concepts.insert(0, theme_name)
         role_cap = float(getattr(role, "max_position_ratio", 0) or 0)
+        board_level = max(1, int(stock.consecutive_limit_days or 1))
+        stage_trial_cap = 0.15 if board_level == 1 else 0.12 if board_level == 2 else 0.08
+        effective_cap = min(role_cap, stage_trial_cap) if role_cap > 0 else 0.0
         roles = list(getattr(role, "roles", []) or [])
         expectation = (
             f"系统盘后自动预案：{stock.consecutive_limit_days}板；"
@@ -113,7 +124,7 @@ def generate_automatic_limit_up_plans(
             code=stock.code,
             name=stock.name,
             price=float(stock.price or 0),
-            level=max(1, int(stock.consecutive_limit_days or 1)),
+            level=board_level,
             industry=stock.industry,
             concepts=concepts,
             sealed_amount=float(stock.sealed_amount or 0),
@@ -123,7 +134,7 @@ def generate_automatic_limit_up_plans(
             first_limit_time=stock.first_limit_time,
             last_limit_time=stock.last_limit_time,
             expectation=expectation,
-            max_position_ratio=role_cap,
+            max_position_ratio=effective_cap,
         )
         plan = _limit_up_next_day_plan(payload, plan_date, existing)
         auction = json.loads(plan.auction_plan or "{}")
@@ -133,7 +144,25 @@ def generate_automatic_limit_up_plans(
             "source_trade_date": completed_trade_date,
             "source_ladder": ladder.source,
             "source_atmosphere": atmosphere.source,
+            "promotion_model_version": "promotion-v1",
         })
+        promotion = promotion_by_code.get(code) or {}
+        if promotion:
+            auction.update({
+                "promotion_transition": promotion.get("transition", ""),
+                "promotion_probability": promotion.get("probability"),
+                "promotion_confidence_low": promotion.get("confidence_low"),
+                "promotion_confidence_high": promotion.get("confidence_high"),
+                "promotion_sample_count": promotion.get("historical_sample_count", 0),
+                "promotion_promoted_count": promotion.get("historical_promoted_count", 0),
+                "same_level_rank": promotion.get("same_level_rank"),
+                "same_level_count": promotion.get("same_level_count"),
+                "promotion_evidence": promotion.get("probability_evidence", []),
+                "live_promotion_probability": promotion.get("probability"),
+                "promotion_trial_position_ratio": effective_cap,
+                "promotion_role_position_ratio": role_cap,
+                "promotion_position_rule": "逐级独立、小仓试错；晋级失败不补仓，赢家由后续真实晋级自然保留。",
+            })
         plan.auction_plan = json.dumps(auction, ensure_ascii=False)
         if existing is None:
             db.add(plan)

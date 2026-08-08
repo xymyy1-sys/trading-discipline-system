@@ -14,15 +14,40 @@ import type {
 
 const categories = ['超预期', '强预期', '符合预期', '弱转强', '弱于预期', '分歧转弱']
 
+type PromotionDashboard = {
+  model_version: string
+  signal_date: string
+  history: Array<{
+    from_level: number
+    transition: string
+    sample_count: number
+    promoted_count: number
+    posterior: number
+    confidence_low: number
+    confidence_high: number
+  }>
+  items: Array<{ status: string }>
+  note: string
+}
+
 export default function NextDayPlans({ mode = 'holding' }: { mode?: 'holding' | 'limit' }) {
   const privacyMode = usePrivacyMode()
   const [plans, setPlans] = useState<Plan[]>([])
   const [selectedId, setSelectedId] = useState<number | null>(null)
   const [draft, setDraft] = useState<Plan | null>(null)
   const [seesaw, setSeesaw] = useState<SeesawMonitor | null>(null)
+  const [promotionDashboard, setPromotionDashboard] = useState<PromotionDashboard | null>(null)
   const [loading, setLoading] = useState(false)
   const [statusText, setStatusText] = useState('')
   const selectedIdRef = useRef<number | null>(null)
+
+  const loadPromotionDashboard = useCallback(() => {
+    if (mode !== 'limit') return
+    fetch(`${API_BASE}/api/simulation/ai-trader/promotion-dashboard`)
+      .then(response => response.ok ? response.json() : Promise.reject(new Error('晋级统计读取失败')))
+      .then((data: PromotionDashboard) => setPromotionDashboard(data))
+      .catch(() => {})
+  }, [mode])
 
   const loadPlans = useCallback((refresh = false) => {
     setLoading(true)
@@ -70,7 +95,8 @@ export default function NextDayPlans({ mode = 'holding' }: { mode?: 'holding' | 
         .catch(() => {})
     }
     loadSeesaw()
-  }, [loadPlans, mode])
+    loadPromotionDashboard()
+  }, [loadPlans, loadPromotionDashboard, mode])
 
   useEffect(() => {
     const refreshVisiblePlan = () => {
@@ -161,6 +187,7 @@ export default function NextDayPlans({ mode = 'holding' }: { mode?: 'holding' | 
 
   const refreshPlanStatus = () => {
     loadPlans(true)
+    loadPromotionDashboard()
   }
 
   const updateDraft = <K extends keyof Plan>(key: K, value: Plan[K]) => {
@@ -248,6 +275,23 @@ export default function NextDayPlans({ mode = 'holding' }: { mode?: 'holding' | 
         </div>
       </header>
       {statusText && <p className="refresh-note">{statusText}</p>}
+
+      {mode === 'limit' && promotionDashboard && <section className="panel promotion-dashboard">
+        <div className="promotion-dashboard-head">
+          <div><b>逐级晋级样本账本</b><span>行情日 {promotionDashboard.signal_date || '等待收盘'} · {promotionDashboard.model_version}</span></div>
+          <small>本期候选 {promotionDashboard.items.length}只</small>
+        </div>
+        <div className="promotion-dashboard-grid">
+          {promotionDashboard.history.map(item => <article key={item.from_level}>
+            <b>{item.transition}</b>
+            <strong>{item.posterior.toFixed(1)}%</strong>
+            <span>{item.promoted_count}/{item.sample_count}笔晋级</span>
+            <small>90%区间 {item.confidence_low.toFixed(1)}%～{item.confidence_high.toFixed(1)}%</small>
+          </article>)}
+          {!promotionDashboard.history.length && <p className="plain-text">从本次上线后开始前向积累每一级晋级样本，不回填历史结果。</p>}
+        </div>
+        <p>{promotionDashboard.note}</p>
+      </section>}
 
       <div className="plan-layout">
         <aside className="panel plan-list">
@@ -428,6 +472,33 @@ export default function NextDayPlans({ mode = 'holding' }: { mode?: 'holding' | 
                   </div>
                   <span>{draft.auction_plan.refreshed_at || '未刷新'}</span>
                 </div>
+                {draft.auction_plan.promotion_transition && (
+                  <div className="promotion-probability-panel">
+                    <div className="promotion-probability-head">
+                      <div>
+                        <span>逐级晋级模型 · {draft.auction_plan.promotion_model_version || 'promotion-v1'}</span>
+                        <h4>{draft.auction_plan.promotion_transition}</h4>
+                      </div>
+                      <strong>
+                        {(draft.auction_plan.live_promotion_probability ?? draft.auction_plan.promotion_probability ?? 0).toFixed(1)}%
+                      </strong>
+                    </div>
+                    <div className="promotion-probability-grid">
+                      <span>收盘先验 <b>{(draft.auction_plan.promotion_probability ?? 0).toFixed(1)}%</b></span>
+                      <span>置信区间 <b>{(draft.auction_plan.promotion_confidence_low ?? 0).toFixed(1)}%～{(draft.auction_plan.promotion_confidence_high ?? 100).toFixed(1)}%</b></span>
+                      <span>同身位竞争 <b>{draft.auction_plan.same_level_rank ?? '--'}/{draft.auction_plan.same_level_count ?? '--'}</b></span>
+                      <span>历史样本 <b>{draft.auction_plan.promotion_sample_count ?? 0}</b></span>
+                      <span>试错仓上限 <b>{((draft.auction_plan.promotion_trial_position_ratio ?? 0) * 100).toFixed(0)}%</b></span>
+                    </div>
+                    <p>
+                      概率按每一级分别统计，竞价和开盘证据只会动态修正本级判断；它不是“终极龙头预测”，也不能单独触发买入。
+                    </p>
+                    {draft.auction_plan.promotion_position_rule && <p>{draft.auction_plan.promotion_position_rule}</p>}
+                    {!!draft.auction_plan.promotion_evidence?.length && (
+                      <ul>{draft.auction_plan.promotion_evidence.slice(0, 5).map(item => <li key={item}>{item}</li>)}</ul>
+                    )}
+                  </div>
+                )}
                 {draft.plan_type === 'limit_up_auction' && (
                   <div className={`limit-mainline-decision ${limitOrderEligibility.allowed ? 'eligible' : 'blocked'}`}>
                     <div className="limit-mainline-head">

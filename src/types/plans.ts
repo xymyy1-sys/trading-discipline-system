@@ -98,6 +98,23 @@ export interface AuctionPlan {
   auto_refreshed_at?: string;
   advice_history?: PlanAdviceHistoryItem[];
   volume_shape_guidance?: string;
+  promotion_model_version?: string;
+  promotion_transition?: string;
+  promotion_probability?: number;
+  promotion_confidence_low?: number;
+  promotion_confidence_high?: number;
+  promotion_sample_count?: number;
+  promotion_promoted_count?: number;
+  same_level_rank?: number;
+  same_level_count?: number;
+  promotion_evidence?: string[];
+  live_promotion_probability?: number;
+  promotion_probability_change?: number;
+  promotion_dynamic_evidence?: string[];
+  promotion_updated_at?: string;
+  promotion_trial_position_ratio?: number;
+  promotion_role_position_ratio?: number;
+  promotion_position_rule?: string;
 }
 
 export interface NextDayPlan {

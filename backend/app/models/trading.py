@@ -1259,3 +1259,68 @@ class SimulationShadowDecision(Base):
     reason: Mapped[str] = mapped_column(Text, default="")
     order_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
     evidence_json: Mapped[str] = mapped_column(Text, default="[]")
+
+
+class LimitUpPromotionSample(Base):
+    """Point-in-time sample for one concrete k -> k+1 board promotion.
+
+    The feature payload is frozen after the close.  Only the outcome fields are
+    populated on the following trading day, which prevents look-ahead leakage.
+    """
+
+    __tablename__ = "limit_up_promotion_samples"
+    __table_args__ = (
+        UniqueConstraint("signal_date", "code", "from_level", name="uq_limit_up_promotion_signal"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    signal_date: Mapped[str] = mapped_column(String(16), index=True)
+    evaluation_date: Mapped[str] = mapped_column(String(16), index=True)
+    code: Mapped[str] = mapped_column(String(16), index=True)
+    name: Mapped[str] = mapped_column(String(64), default="")
+    from_level: Mapped[int] = mapped_column(Integer, index=True)
+    target_level: Mapped[int] = mapped_column(Integer, index=True)
+    theme: Mapped[str] = mapped_column(String(96), default="", index=True)
+    roles_json: Mapped[str] = mapped_column(Text, default="[]")
+    features_json: Mapped[str] = mapped_column(Text, default="{}")
+    model_version: Mapped[str] = mapped_column(String(32), default="promotion-v1", index=True)
+    prior_probability: Mapped[float] = mapped_column(Float, default=0)
+    confidence_low: Mapped[float] = mapped_column(Float, default=0)
+    confidence_high: Mapped[float] = mapped_column(Float, default=100)
+    historical_sample_count: Mapped[int] = mapped_column(Integer, default=0)
+    status: Mapped[str] = mapped_column(String(24), default="PENDING", index=True)
+    actual_level: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    outcome_json: Mapped[str] = mapped_column(Text, default="{}")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_shanghai_now_naive, index=True)
+    evaluated_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, index=True)
+
+
+class SystemImprovementProposal(Base):
+    """Auditable product/strategy improvement proposed from forward facts."""
+
+    __tablename__ = "system_improvement_proposals"
+    __table_args__ = (
+        UniqueConstraint("proposal_hash", name="uq_system_improvement_proposal_hash"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    proposal_key: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    proposal_hash: Mapped[str] = mapped_column(String(64), index=True)
+    trade_date: Mapped[str] = mapped_column(String(16), index=True)
+    account_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
+    level: Mapped[str] = mapped_column(String(24), default="strategy", index=True)
+    module_key: Mapped[str] = mapped_column(String(64), index=True)
+    title: Mapped[str] = mapped_column(String(160))
+    problem: Mapped[str] = mapped_column(Text)
+    evidence_json: Mapped[str] = mapped_column(Text, default="[]")
+    proposed_change: Mapped[str] = mapped_column(Text)
+    expected_effect: Mapped[str] = mapped_column(Text, default="")
+    risks_json: Mapped[str] = mapped_column(Text, default="[]")
+    acceptance_json: Mapped[str] = mapped_column(Text, default="[]")
+    sample_count: Mapped[int] = mapped_column(Integer, default=0)
+    priority: Mapped[str] = mapped_column(String(8), default="P2", index=True)
+    status: Mapped[str] = mapped_column(String(32), default="PROPOSED", index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_shanghai_now_naive, index=True)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=_shanghai_now_naive, onupdate=_shanghai_now_naive
+    )
