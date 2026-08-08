@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from datetime import date, datetime
 from typing import Any
 
@@ -60,6 +61,10 @@ def _rank_limit_up_plan_candidates(
 
     rows: list[dict[str, Any]] = []
     for code, stock in stocks.items():
+        # Keep the board plan universe consistent with the user's executable
+        # market boundary: Shanghai/Shenzhen main-board A shares only.
+        if not re.fullmatch(r"(?:600|601|603|605|000|001|002|003)\d{3}", str(code)):
+            continue
         context = context_by_code.get(code, {})
         promotion = promotion_by_code.get(code) or {}
         probability = float(promotion.get("probability") or 0)

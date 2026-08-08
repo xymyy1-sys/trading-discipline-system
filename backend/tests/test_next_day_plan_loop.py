@@ -25,6 +25,7 @@ def test_limit_up_shortlist_uses_promotion_probability_before_board_height():
         "600101": SimpleNamespace(consecutive_limit_days=1),
         "600102": SimpleNamespace(consecutive_limit_days=4),
         "600103": SimpleNamespace(consecutive_limit_days=2),
+        "301008": SimpleNamespace(consecutive_limit_days=1),
     }
     roles = [
         SimpleNamespace(code="600101", max_position_ratio=0.15, role_score=70, level=1),
@@ -36,6 +37,7 @@ def test_limit_up_shortlist_uses_promotion_probability_before_board_height():
         "600101": {"probability": 52, "same_level_rank": 1},
         "600102": {"probability": 31, "same_level_rank": 1},
         "600103": {"probability": 43, "same_level_rank": 1},
+        "301008": {"probability": 75, "same_level_rank": 1},
     }
 
     ranked = _rank_limit_up_plan_candidates(stocks, atmosphere, promotion, maximum_plans=2)
