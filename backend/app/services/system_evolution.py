@@ -42,6 +42,9 @@ def _json(raw: str | None, default: Any) -> Any:
 
 
 def decision_modules(decision: SimulationShadowDecision) -> list[str]:
+    structured = _json(getattr(decision, "source_modules_json", "[]"), [])
+    if isinstance(structured, list) and any(str(item).strip() for item in structured):
+        return list(dict.fromkeys(str(item).strip() for item in structured if str(item).strip()))
     modules = [MODULE_LABELS.get(decision.source_kind, decision.source_kind or decision.strategy_source)]
     evidence = _json(decision.evidence_json, [])
     joined = " ".join(str(item) for item in evidence)

@@ -248,6 +248,23 @@ type IntradayCollectorStatus = {
   close_shadow_equity_completed_date: string | null
 }
 
+type SimulationRuleRelease = {
+  id: number
+  rule_version: string
+  baseline_rule_version: string
+  status: string
+  parameters: Record<string, unknown>
+  rationale: Array<{ field?: string; reason?: string }>
+  forward_control_samples: number
+  forward_candidate_samples: number
+  control_metrics: Record<string, number>
+  candidate_metrics: Record<string, number>
+  created_at: string
+  validated_at: string | null
+  activated_at: string | null
+  rollback_reason: string
+}
+
 export function SimulationAiTrader() {
   const [account, setAccount] = useState<SimulationAccount | null>(null)
   const [positions, setPositions] = useState<SimulationPosition[]>([])
@@ -484,6 +501,74 @@ function SystemEvolutionPanel({ report }: { report: SystemEvolutionReport | null
       {!report.proposals.length && <p className="plain-text">当前还没有达到重复样本门槛的功能改进提案。异常交易仍会逐笔入账，重复出现后才升级为开发任务，避免迎合单日盈亏。</p>}
     </div>
     <p className="system-evolution-governance">治理链：{report.governance.required_flow.join(' → ')}。Codex只在你批准提案后修改代码，随后必须影子验证并保留回滚。</p>
+  </section>
+}
+
+export function SimulationEvolutionDesk() {
+  const [account, setAccount] = useState<SimulationAccount | null>(null)
+  const [report, setReport] = useState<SystemEvolutionReport | null>(null)
+  const [releases, setReleases] = useState<SimulationRuleRelease[]>([])
+  const [loading, setLoading] = useState(false)
+  const [message, setMessage] = useState('')
+
+  const load = useCallback(() => {
+    setLoading(true)
+    setMessage('')
+    simulationRequest<SimulationAccount>('/api/simulation/ai-trader/account', { method: 'POST' })
+      .then(row => {
+        setAccount(row)
+        return Promise.all([
+          simulationRequest<SystemEvolutionReport>(`/api/simulation/accounts/${row.id}/system-evolution`),
+          simulationRequest<SimulationRuleRelease[]>(`/api/simulation/accounts/${row.id}/rule-releases`),
+        ])
+      })
+      .then(([evolution, ruleRows]) => {
+        setReport(evolution)
+        setReleases(ruleRows)
+      })
+      .catch(value => setMessage(value instanceof Error ? value.message : '系统进化台读取失败'))
+      .finally(() => setLoading(false))
+  }, [])
+
+  useEffect(() => load(), [load])
+
+  const approve = (release: SimulationRuleRelease) => {
+    if (!account) return
+    setMessage(`正在确认规则 ${release.rule_version}……`)
+    simulationRequest<{ message: string }>(
+      `/api/simulation/accounts/${account.id}/rule-releases/${release.id}/approve`,
+      { method: 'POST' },
+    ).then(result => {
+      load()
+      setMessage(result.message)
+    }).catch(value => setMessage(value instanceof Error ? value.message : '规则确认失败'))
+  }
+
+  return <section className="simulation-page system-evolution-page">
+    <ModuleHeading
+      title="系统进化台"
+      subtitle="真实交易事实分别反哺参数、策略逻辑和功能模块；开发改进单只生成并展示，不自动修改代码。"
+      loading={loading}
+      onRefresh={load}
+    />
+    {message && <p className="simulation-form-message">{message}</p>}
+    <section className="simulation-section panel">
+      <div className="simulation-section-title">
+        <div><h4><ShieldAlert size={17} />参数候选与人工确认</h4><small>候选与对照均至少30笔严格前向样本；验证通过后仍需你点击确认才会启用。</small></div>
+        <span>{releases.length}个版本</span>
+      </div>
+      <div className="system-evolution-proposals">
+        {releases.map(row => <article key={row.id} className={`tone-${row.status === 'ACTIVE' ? 'ok' : row.status === 'READY_FOR_APPROVAL' ? 'warning' : 'pending'}`}>
+          <header><b>{row.rule_version}</b><span>{row.status === 'READY_FOR_APPROVAL' ? '等待人工确认' : row.status}</span></header>
+          <p>对照样本 {row.forward_control_samples}/30 · 候选样本 {row.forward_candidate_samples}/30</p>
+          <small>候选平均收益 {row.candidate_metrics.average_return_pct == null ? '--' : `${row.candidate_metrics.average_return_pct.toFixed(2)}%`} · 对照平均收益 {row.control_metrics.average_return_pct == null ? '--' : `${row.control_metrics.average_return_pct.toFixed(2)}%`}</small>
+          {row.rollback_reason && <p>{row.rollback_reason}</p>}
+          {row.status === 'READY_FOR_APPROVAL' && <button className="refresh-btn inline" type="button" onClick={() => approve(row)}>确认启用并保留回滚</button>}
+        </article>)}
+        {!releases.length && <p className="plain-text">当前尚未形成达到30/30前向样本门槛的参数候选，系统继续积累交易事实。</p>}
+      </div>
+    </section>
+    <SystemEvolutionPanel report={report} />
   </section>
 }
 

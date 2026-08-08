@@ -311,6 +311,29 @@ def list_simulation_rule_releases(
     ]
 
 
+@router.post("/accounts/{account_id}/rule-releases/{release_id}/approve")
+def approve_simulation_rule_release(
+    account_id: int,
+    release_id: int,
+    db: Session = Depends(get_db),
+) -> dict:
+    """Explicitly activate a candidate that passed 30/30 forward validation."""
+    from app.services.simulation_rule_promotion import approve_rule_release
+
+    account = _account_or_404(db, account_id)
+    try:
+        row = approve_rule_release(db, account, release_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return {
+        "id": row.id,
+        "rule_version": row.rule_version,
+        "status": row.status,
+        "activated_at": row.activated_at,
+        "message": "规则已人工确认启用，并保留自动回滚。",
+    }
+
+
 @router.get(
     "/accounts/{account_id}/shadow-decisions",
     response_model=list[SimulationShadowDecisionOut],

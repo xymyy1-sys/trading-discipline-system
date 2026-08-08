@@ -1258,6 +1258,7 @@ class SimulationShadowDecision(Base):
     status: Mapped[str] = mapped_column(String(24), index=True)
     reason: Mapped[str] = mapped_column(Text, default="")
     order_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
+    source_modules_json: Mapped[str] = mapped_column(Text, default="[]")
     evidence_json: Mapped[str] = mapped_column(Text, default="[]")
 
 

@@ -13,7 +13,11 @@ from app.models.trading import LimitUpPromotionSample
 from app.services.trading_calendar import next_a_share_trading_day
 
 
-MODEL_VERSION = "promotion-v1"
+V1_MODEL_VERSION = "promotion-v1"
+V2_MODEL_VERSION = "promotion-v2"
+MODEL_FAMILY_VERSION = "promotion-v2-champion-challenger"
+MINIMUM_V2_FORWARD_SAMPLES = 30
+MINIMUM_FEATURE_SAMPLES = 8
 
 
 def _wilson(successes: int, total: int, z: float = 1.645) -> tuple[float, float]:
@@ -110,7 +114,7 @@ def _cohort_statistics(db: Session) -> dict[int, dict[str, float | int]]:
     return result
 
 
-def _candidate_probability(stock: Any, context: dict[str, Any], cohort: dict[str, float | int]) -> tuple[float, float, float, list[str]]:
+def _candidate_probability_v1(stock: Any, context: dict[str, Any], cohort: dict[str, float | int]) -> tuple[float, float, float, list[str]]:
     base = float(cohort.get("posterior") or 33.3)
     adjustment = 0.0
     evidence: list[str] = []
@@ -156,6 +160,138 @@ def _candidate_probability(stock: Any, context: dict[str, Any], cohort: dict[str
     return round(probability, 1), round(low, 1), round(high, 1), evidence
 
 
+def _feature_flags(stock: Any, context: dict[str, Any]) -> dict[str, bool]:
+    amount = float(getattr(stock, "amount", 0) or 0)
+    sealed = float(getattr(stock, "sealed_amount", 0) or 0)
+    turnover = float(getattr(stock, "turnover", 0) or 0)
+    break_count = int(getattr(stock, "break_count", 0) or 0)
+    stage = str(context.get("theme_stage") or "")
+    first_limit_time = str(getattr(stock, "first_limit_time", "") or "")[:5]
+    return {
+        "mainline": context.get("is_mainline") is True,
+        "favorable_stage": stage in {"启动", "发酵", "修复"},
+        "crowded_stage": stage in {"高潮", "退潮"},
+        "identity_leader": float(context.get("role_score") or 0) >= 75,
+        "no_break": break_count == 0,
+        "repeated_break": break_count >= 2,
+        "strong_seal_ratio": amount > 0 and sealed / amount >= 0.15,
+        "healthy_turnover": 3 <= turnover <= 18,
+        "excessive_turnover": turnover >= 28,
+        "early_first_limit": bool(first_limit_time and first_limit_time <= "10:00"),
+    }
+
+
+def _flags_from_features(features: dict[str, Any]) -> dict[str, bool]:
+    stored = features.get("feature_flags")
+    if isinstance(stored, dict):
+        return {str(key): bool(value) for key, value in stored.items()}
+    amount = float(features.get("amount") or 0)
+    sealed = float(features.get("sealed_amount") or 0)
+    turnover = float(features.get("turnover") or 0)
+    break_count = int(features.get("break_count") or 0)
+    stage = str(features.get("theme_stage") or "")
+    first_limit_time = str(features.get("first_limit_time") or "")[:5]
+    return {
+        "mainline": features.get("is_mainline") is True,
+        "favorable_stage": stage in {"启动", "发酵", "修复"},
+        "crowded_stage": stage in {"高潮", "退潮"},
+        "identity_leader": float(features.get("role_score") or 0) >= 75,
+        "no_break": break_count == 0,
+        "repeated_break": break_count >= 2,
+        "strong_seal_ratio": amount > 0 and sealed / amount >= 0.15,
+        "healthy_turnover": 3 <= turnover <= 18,
+        "excessive_turnover": turnover >= 28,
+        "early_first_limit": bool(first_limit_time and first_limit_time <= "10:00"),
+    }
+
+
+def _learned_feature_statistics(db: Session) -> dict[int, dict[str, dict[str, float | int]]]:
+    rows = db.query(LimitUpPromotionSample).filter(
+        LimitUpPromotionSample.status.in_(["PROMOTED", "FAILED"]),
+    ).all()
+    level_totals: dict[int, list[int]] = defaultdict(lambda: [0, 0])
+    grouped: dict[int, dict[str, list[int]]] = defaultdict(lambda: defaultdict(lambda: [0, 0]))
+    for row in rows:
+        level = int(row.from_level)
+        success = int(row.status == "PROMOTED")
+        level_totals[level][0] += 1
+        level_totals[level][1] += success
+        try:
+            features = json.loads(row.features_json or "{}")
+        except (TypeError, ValueError, json.JSONDecodeError):
+            features = {}
+        for feature, enabled in _flags_from_features(features).items():
+            key = f"{feature}:{int(enabled)}"
+            grouped[level][key][0] += 1
+            grouped[level][key][1] += success
+    output: dict[int, dict[str, dict[str, float | int]]] = defaultdict(dict)
+    for level, groups in grouped.items():
+        total, successes = level_totals[level]
+        base = (successes + 2) / (total + 6) * 100
+        for key, (count, promoted) in groups.items():
+            posterior = (promoted + 2) / (count + 6) * 100
+            reliability = min(count / 30.0, 1.0)
+            output[level][key] = {
+                "sample_count": count,
+                "promoted_count": promoted,
+                "posterior": round(posterior, 2),
+                "lift": round(max(-6.0, min(6.0, (posterior - base) * reliability)), 2),
+            }
+    return output
+
+
+def _v2_validation(db: Session) -> dict[int, dict[str, float | int | str]]:
+    rows = db.query(LimitUpPromotionSample).filter(
+        LimitUpPromotionSample.status.in_(["PROMOTED", "FAILED"]),
+    ).all()
+    grouped: dict[int, list[tuple[float, float, int]]] = defaultdict(list)
+    for row in rows:
+        try:
+            features = json.loads(row.features_json or "{}")
+            champion = float(features["champion_probability"])
+            challenger = float(features["challenger_probability"])
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+            continue
+        grouped[int(row.from_level)].append((champion, challenger, int(row.status == "PROMOTED")))
+    output: dict[int, dict[str, float | int | str]] = {}
+    for level, values in grouped.items():
+        count = len(values)
+        champion_brier = sum((prediction / 100 - outcome) ** 2 for prediction, _, outcome in values) / count
+        challenger_brier = sum((prediction / 100 - outcome) ** 2 for _, prediction, outcome in values) / count
+        promoted = bool(count >= MINIMUM_V2_FORWARD_SAMPLES and challenger_brier <= champion_brier - 0.01)
+        output[level] = {
+            "validation_samples": count,
+            "champion_brier": round(champion_brier, 4),
+            "challenger_brier": round(challenger_brier, 4),
+            "champion": V2_MODEL_VERSION if promoted else V1_MODEL_VERSION,
+            "status": "V2已晋级" if promoted else "V2影子验证中",
+        }
+    return output
+
+
+def _candidate_probability_v2(
+    flags: dict[str, bool],
+    cohort: dict[str, float | int],
+    statistics: dict[str, dict[str, float | int]],
+) -> tuple[float, list[str], int]:
+    base = float(cohort.get("posterior") or 33.3)
+    adjustment = 0.0
+    evidence: list[str] = []
+    usable_samples = 0
+    for feature, enabled in flags.items():
+        stats = statistics.get(f"{feature}:{int(enabled)}")
+        if not stats or int(stats["sample_count"]) < MINIMUM_FEATURE_SAMPLES:
+            continue
+        lift = float(stats["lift"])
+        adjustment += lift
+        usable_samples = max(usable_samples, int(stats["sample_count"]))
+        evidence.append(
+            f"{feature}={int(enabled)}：{int(stats['promoted_count'])}/{int(stats['sample_count'])}晋级，学习贡献{lift:+.1f}"
+        )
+    probability = max(5.0, min(75.0, base + max(-15.0, min(15.0, adjustment))))
+    return round(probability, 1), evidence, usable_samples
+
+
 def record_closing_promotion_cohort(
     db: Session,
     *,
@@ -166,6 +302,8 @@ def record_closing_promotion_cohort(
     """Resolve yesterday and freeze today's k -> k+1 candidate cohort."""
     resolve_pending_promotion_samples(db, trade_date=completed_trade_date, ladder=ladder)
     cohorts = _cohort_statistics(db)
+    learned_statistics = _learned_feature_statistics(db)
+    validation = _v2_validation(db)
     contexts = _role_context(atmosphere)
     stocks = _stocks(ladder)
     evaluation_date = next_a_share_trading_day(date.fromisoformat(completed_trade_date)).isoformat()
@@ -181,7 +319,20 @@ def record_closing_promotion_cohort(
             "confidence_low": 5.0,
             "confidence_high": 55.0,
         })
-        probability, low, high, probability_evidence = _candidate_probability(stock, context, cohort)
+        v1_probability, low, high, v1_evidence = _candidate_probability_v1(stock, context, cohort)
+        flags = _feature_flags(stock, context)
+        challenger_probability, learned_evidence, learned_sample_count = _candidate_probability_v2(
+            flags,
+            cohort,
+            learned_statistics.get(level, {}),
+        )
+        champion_model = str(validation.get(level, {}).get("champion") or V1_MODEL_VERSION)
+        probability = challenger_probability if champion_model == V2_MODEL_VERSION else v1_probability
+        probability_evidence = learned_evidence if champion_model == V2_MODEL_VERSION else v1_evidence
+        if champion_model == V2_MODEL_VERSION:
+            half_width = max(5.0, (float(cohort.get("confidence_high") or 55) - float(cohort.get("confidence_low") or 5)) / 2)
+            low = max(0.0, probability - half_width)
+            high = min(95.0, probability + half_width)
         ranked_by_level[level].append((code, probability))
         prepared[code] = {
             "from_level": level,
@@ -195,6 +346,12 @@ def record_closing_promotion_cohort(
             "theme": str(context.get("theme") or getattr(stock, "industry", "") or ""),
             "roles": list(context.get("roles") or []),
             "probability_evidence": probability_evidence,
+            "v1_probability": v1_probability,
+            "challenger_probability": challenger_probability,
+            "challenger_evidence": learned_evidence,
+            "challenger_training_samples": learned_sample_count,
+            "champion_model": champion_model,
+            "feature_flags": flags,
             "context": context,
         }
     for level, rows in ranked_by_level.items():
@@ -225,6 +382,12 @@ def record_closing_promotion_cohort(
             "first_limit_time": str(getattr(stock, "first_limit_time", "") or ""),
             "last_limit_time": str(getattr(stock, "last_limit_time", "") or ""),
             "probability_evidence": data["probability_evidence"],
+            "feature_flags": data["feature_flags"],
+            "champion_probability": data["probability"],
+            "challenger_probability": data["challenger_probability"],
+            "challenger_evidence": data["challenger_evidence"],
+            "challenger_training_samples": data["challenger_training_samples"],
+            "active_model": data["champion_model"],
         }
         db.add(LimitUpPromotionSample(
             signal_date=completed_trade_date,
@@ -236,7 +399,7 @@ def record_closing_promotion_cohort(
             theme=data["theme"],
             roles_json=json.dumps(data["roles"], ensure_ascii=False),
             features_json=json.dumps(features, ensure_ascii=False, sort_keys=True),
-            model_version=MODEL_VERSION,
+            model_version=data["champion_model"],
             prior_probability=data["probability"],
             confidence_low=data["confidence_low"],
             confidence_high=data["confidence_high"],
@@ -260,6 +423,7 @@ def promotion_dashboard(db: Session, *, signal_date: str | None = None) -> dict[
     latest_date = signal_date or (rows[0].signal_date if rows else "")
     current = [row for row in rows if row.signal_date == latest_date]
     history = _cohort_statistics(db)
+    validation = _v2_validation(db)
     # The first deployed cohort has not had a following session in which it
     # can be resolved yet.  Still expose the shrinkage prior for every level
     # represented in today's cohort so the UI does not look like an empty
@@ -308,9 +472,24 @@ def promotion_dashboard(db: Session, *, signal_date: str | None = None) -> dict[
             "features": features,
         })
     return {
-        "model_version": MODEL_VERSION,
+        "model_version": MODEL_FAMILY_VERSION,
         "signal_date": latest_date,
         "history": history_rows,
         "items": items,
+        "model_diagnostics": [
+            {
+                "from_level": level,
+                "transition": f"{level}进{level + 1}",
+                "minimum_forward_samples": MINIMUM_V2_FORWARD_SAMPLES,
+                **validation.get(level, {
+                    "validation_samples": 0,
+                    "champion_brier": None,
+                    "challenger_brier": None,
+                    "champion": V1_MODEL_VERSION,
+                    "status": "V2等待首批影子样本",
+                }),
+            }
+            for level in sorted(visible_levels | set(history) | set(validation))
+        ],
         "note": "概率按每一级独立统计；样本不足时使用收缩先验并展示宽区间，不代表买入指令。",
     }

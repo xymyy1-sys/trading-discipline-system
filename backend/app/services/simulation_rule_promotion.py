@@ -30,8 +30,8 @@ DEFAULT_RULE_PARAMETERS: dict[str, Any] = {
     "blocked_market_regimes": [],
     "default_risk_budget_ratio": 0.03,
 }
-MINIMUM_FORWARD_CONTROL = 10
-MINIMUM_FORWARD_CANDIDATE = 6
+MINIMUM_FORWARD_CONTROL = 30
+MINIMUM_FORWARD_CANDIDATE = 30
 
 
 def _loads(raw: str, fallback: Any) -> Any:
@@ -50,6 +50,42 @@ def active_rule_parameters(db: Session, account_id: int) -> tuple[str, dict[str,
     if row is None:
         return "shadow-v5-multi-entry", dict(DEFAULT_RULE_PARAMETERS)
     return row.rule_version, {**DEFAULT_RULE_PARAMETERS, **_loads(row.parameters_json, {})}
+
+
+def approve_rule_release(
+    db: Session,
+    account: SimulationAccount,
+    release_id: int,
+) -> SimulationRuleRelease:
+    """Activate a validated paper-trading rule only after explicit approval."""
+    row = db.query(SimulationRuleRelease).filter(
+        SimulationRuleRelease.id == release_id,
+        SimulationRuleRelease.account_id == account.id,
+    ).first()
+    if row is None:
+        raise ValueError("规则候选不存在")
+    if row.status != "READY_FOR_APPROVAL":
+        raise ValueError("只有已通过前向验证的规则才能确认启用")
+    previous = db.query(SimulationRuleRelease).filter(
+        SimulationRuleRelease.account_id == account.id,
+        SimulationRuleRelease.status == "ACTIVE",
+    ).all()
+    for active in previous:
+        active.status = "SUPERSEDED"
+        active.rolled_back_at = shanghai_now_naive()
+        active.rollback_reason = f"由人工确认的新版本{row.rule_version}替代"
+        db.add(active)
+    row.status = "ACTIVE"
+    row.activated_at = shanghai_now_naive()
+    row.activation_closed_trade_id = (
+        db.query(SimulationClosedTrade.id).filter(
+            SimulationClosedTrade.account_id == account.id,
+        ).order_by(SimulationClosedTrade.id.desc()).scalar() or row.baseline_closed_trade_id
+    )
+    db.add(row)
+    db.commit()
+    db.refresh(row)
+    return row
 
 
 def _candidate_parameters(candidates: list[dict[str, Any]]) -> dict[str, Any]:
@@ -136,7 +172,11 @@ def advance_rule_promotion(db: Session, account: SimulationAccount) -> Simulatio
         SimulationRuleRelease.account_id == account.id,
         SimulationRuleRelease.status == "TRAINING",
     ).order_by(SimulationRuleRelease.id.desc()).first()
-    if training is None and active is None and proposal.get("status") == "READY_FOR_REVIEW":
+    awaiting_approval = db.query(SimulationRuleRelease).filter(
+        SimulationRuleRelease.account_id == account.id,
+        SimulationRuleRelease.status == "READY_FOR_APPROVAL",
+    ).order_by(SimulationRuleRelease.id.desc()).first()
+    if training is None and awaiting_approval is None and active is None and proposal.get("status") == "READY_FOR_REVIEW":
         candidates = list(proposal.get("candidates") or [])
         params = _candidate_parameters(candidates)
         encoded = json.dumps(params, ensure_ascii=False, sort_keys=True)
@@ -213,10 +253,9 @@ def advance_rule_promotion(db: Session, account: SimulationAccount) -> Simulatio
                 and float(candidate_metrics["pnl_drawdown"]) <= float(control_metrics["pnl_drawdown"])
             )
             training.validated_at = shanghai_now_naive()
-            training.status = "ACTIVE" if improves else "REJECTED"
+            training.status = "READY_FOR_APPROVAL" if improves else "REJECTED"
             if improves:
-                training.activated_at = training.validated_at
-                training.activation_closed_trade_id = formal_rows[-1].id
+                training.rollback_reason = "前向验证通过，等待用户人工确认后启用"
             else:
                 training.rollback_reason = "前向样本未同时改善期望收益、胜率、盈亏比和回撤"
         db.add(training)

@@ -34,6 +34,7 @@ import StrategyTemplates from './components/StrategyTemplates'
 import HistoricalReplay from './components/HistoricalReplay'
 import {
   SimulationAiTrader,
+  SimulationEvolutionDesk,
   SimulationAccountOverview,
   SimulationEvidenceLedger,
   SimulationOrdersAndPositions,
@@ -291,6 +292,7 @@ function SimulationWorkspace() {
       forbidden={['暗示真实下单', '用模拟成交替代真实执行', '缺少数据时伪造收益或胜率']}
       modules={[
         { key: 'ai-trader', label: 'AI实盘模拟', description: '2万元虚拟本金，自动选股、分仓、买卖与复盘', Component: SimulationAiTrader },
+        { key: 'evolution', label: '系统进化台', description: '模块成绩、改进提案、参数候选与人工确认', Component: SimulationEvolutionDesk },
         { key: 'account', label: '账户概览', description: '独立模拟资金、权益、持仓市值与盈亏', Component: SimulationAccountOverview },
         { key: 'orders', label: '模拟委托/持仓', description: '模拟委托、撮合状态、未成交原因和模拟持仓', Component: SimulationOrdersAndPositions },
         { key: 'strategies', label: '策略实验', description: '打板、预期量价与持仓执行三类实验', Component: SimulationStrategyLab },

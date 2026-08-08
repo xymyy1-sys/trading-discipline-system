@@ -1,3 +1,4 @@
+import json
 from types import SimpleNamespace
 
 from app.models.trading import LimitUpPromotionSample
@@ -100,3 +101,38 @@ def test_first_forward_cohort_exposes_priors_ranks_and_trial_caps(db_session):
     assert items["600001"]["same_level_rank"] == 1
     assert items["600001"]["trial_position_ratio"] == 0.1
     assert items["600002"]["trial_position_ratio"] == 0.1
+    assert report["model_version"] == "promotion-v2-champion-challenger"
+    diagnostics = {row["from_level"]: row for row in report["model_diagnostics"]}
+    assert diagnostics[1]["champion"] == "promotion-v1"
+    assert diagnostics[1]["validation_samples"] == 0
+
+
+def test_v2_only_becomes_champion_after_strict_forward_validation(db_session):
+    for index in range(30):
+        promoted = index < 15
+        champion = 10.0 if promoted else 90.0
+        challenger = 90.0 if promoted else 10.0
+        db_session.add(LimitUpPromotionSample(
+            signal_date="2026-08-01",
+            evaluation_date="2026-08-04",
+            code=f"60{index:04d}",
+            name=f"sample-{index}",
+            from_level=1,
+            target_level=2,
+            theme="test",
+            features_json=json.dumps({
+                "champion_probability": champion,
+                "challenger_probability": challenger,
+            }),
+            status="PROMOTED" if promoted else "FAILED",
+            actual_level=2 if promoted else 1,
+        ))
+    db_session.commit()
+
+    report = promotion_dashboard(db_session, signal_date="2026-08-01")
+    diagnostics = {row["from_level"]: row for row in report["model_diagnostics"]}
+
+    assert diagnostics[1]["validation_samples"] == 30
+    assert diagnostics[1]["champion"] == "promotion-v2"
+    assert diagnostics[1]["status"] == "V2已晋级"
+    assert diagnostics[1]["challenger_brier"] < diagnostics[1]["champion_brier"]

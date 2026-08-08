@@ -98,6 +98,7 @@ class ShadowCandidate:
     ratio: float
     ready: bool
     reason: str
+    source_modules: tuple[str, ...] = ()
     evidence: tuple[str, ...] = ()
     dependencies: tuple[SourceDependency, ...] = ()
     invalidation_price: float = 0.0
@@ -645,6 +646,7 @@ def _autonomous_candidates(
                 if confirmed
                 else f"全A独立评分{score:.1f}分，但尚未获得真实分钟量价确认"
             ),
+            source_modules=tuple(value for value in source_tags if value in {"自动观察池", "抓涨停", "断板反包", "强板块核心"}),
             evidence=reasons + risks + tuple(f"来源标签={value}" for value in source_tags) + (
                 f"市场闸门={gate.get('reason') or '缺失'}",
                 f"失效条件={item.get('invalidation') or '跌破分时均价并放量转弱'}",
@@ -702,6 +704,7 @@ def _autonomous_candidates(
             ratio=EXPLORATION_POSITION_RATIO,
             ready=True,
             reason=f"每日探索样本：全A评分{float(item.get('score') or 0):.1f}分，正常策略尚未成交，使用确认仓50%验证",
+            source_modules=tuple(value for value in source_tags if value in {"自动观察池", "抓涨停", "断板反包", "强板块核心"}),
             evidence=reasons + risks + tuple(f"来源标签={value}" for value in source_tags) + (
                 "样本类型=探索；仓位等级=确认仓50%；与正式策略分开审计",
                 f"市场闸门={gate.get('reason') or '缺失'}",
@@ -750,6 +753,21 @@ def _claim_decision(
     ).first()
     if existing is not None:
         return existing, True
+    default_module = {
+        "limit_up_plan_confirmation": "打板预案",
+        "autonomous_universe_selection": "全市场自主选股",
+        "autonomous_exploration_sample": "全市场探索样本",
+        "expectation_volume_pair": "预期×量价",
+        "pullback_reclaim_confirmation": "回踩确认",
+        "position_execution_state": "持仓执行",
+        "dynamic_profit_protection": "利润保护",
+        "simulation_hard_stop": "硬止损",
+    }.get(candidate.source_kind, candidate.source_kind)
+    source_modules = list(dict.fromkeys(
+        item for item in (default_module, *candidate.source_modules) if item
+    ))
+    if candidate.source_kind == "pullback_reclaim_confirmation" and "预期×量价" not in source_modules:
+        source_modules.append("预期×量价")
     row = SimulationShadowDecision(
         account_id=account.id,
         signal_key=key,
@@ -768,6 +786,7 @@ def _claim_decision(
         quantity=0,
         status="CLAIMED",
         reason=candidate.reason,
+        source_modules_json=json.dumps(source_modules, ensure_ascii=False),
         evidence_json=json.dumps(list(candidate.evidence), ensure_ascii=False),
     )
     try:

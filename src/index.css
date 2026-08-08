@@ -137,6 +137,12 @@ a:focus-visible {
 .promotion-dashboard-grid article { border: 1px solid var(--border-color); border-radius: 9px; padding: 12px; display: grid; gap: 4px; }
 .promotion-dashboard-grid article strong { font-size: 20px; }
 .promotion-dashboard-grid article em { margin-left: 5px; color: var(--text-muted); font-size: 11px; font-style: normal; font-weight: 500; }
+.promotion-model-diagnostics { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 10px; margin: 12px 0; }
+.promotion-model-diagnostics article { padding: 11px 12px; border: 1px solid var(--border-color); border-radius: 9px; background: #f8fafc; }
+.promotion-model-diagnostics header { display: flex; justify-content: space-between; gap: 8px; }
+.promotion-model-diagnostics header span { color: #9a5a00; }
+.promotion-model-diagnostics p { margin: 7px 0 3px; }
+.promotion-model-diagnostics small { color: var(--text-muted); }
 .promotion-candidate-table-wrap { max-height: 430px; margin: 12px 0; overflow: auto; border: 1px solid var(--border-color); border-radius: 9px; }
 .promotion-candidate-table { width: 100%; min-width: 920px; border-collapse: collapse; font-size: 13px; }
 .promotion-candidate-table th { position: sticky; top: 0; z-index: 1; background: #eef3f8; color: var(--text-muted); text-align: left; }

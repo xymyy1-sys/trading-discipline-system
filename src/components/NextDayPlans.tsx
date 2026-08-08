@@ -45,6 +45,16 @@ type PromotionDashboard = {
     same_level_count: number | null
     trial_position_ratio: number
   }>
+  model_diagnostics?: Array<{
+    from_level: number
+    transition: string
+    minimum_forward_samples: number
+    validation_samples: number
+    champion_brier: number | null
+    challenger_brier: number | null
+    champion: string
+    status: string
+  }>
   note: string
 }
 
@@ -375,6 +385,13 @@ export default function NextDayPlans({ mode = 'holding' }: { mode?: 'holding' | 
           </article>)}
           {!promotionDashboard.history.length && <p className="plain-text">从本次上线后开始前向积累每一级晋级样本，不回填历史结果。</p>}
         </div>
+        {!!promotionDashboard.model_diagnostics?.length && <div className="promotion-model-diagnostics">
+          {promotionDashboard.model_diagnostics.map(item => <article key={item.from_level}>
+            <header><b>{item.transition}</b><span>{item.status}</span></header>
+            <p>当前冠军：{item.champion} · 严格后置验证 {item.validation_samples}/{item.minimum_forward_samples}</p>
+            <small>V1 Brier：{item.champion_brier == null ? '--' : item.champion_brier.toFixed(4)} · V2 Brier：{item.challenger_brier == null ? '--' : item.challenger_brier.toFixed(4)}</small>
+          </article>)}
+        </div>}
         {!!sortedPromotionItems.length && <div className="promotion-candidate-table-wrap">
           <table className="promotion-candidate-table">
             <thead><tr>

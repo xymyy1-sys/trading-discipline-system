@@ -10,7 +10,7 @@ from app.models.trading import (
     SimulationShadowDecision,
     SystemImprovementProposal,
 )
-from app.services.system_evolution import generate_system_improvement_proposals, system_evolution_report
+from app.services.system_evolution import decision_modules, generate_system_improvement_proposals, system_evolution_report
 
 
 def add_learning_sample(db_session, *, account_id: int, suffix: str, diagnostic: str):
@@ -159,3 +159,24 @@ def test_losing_reference_module_creates_function_level_proposal(db_session):
     assert len(module_rows) == 1
     assert module_rows[0].sample_count == 3
     assert "漏选、误选" in module_rows[0].proposed_change
+
+
+def test_structured_source_modules_take_precedence_over_legacy_evidence_text():
+    decision = SimulationShadowDecision(
+        account_id=1,
+        signal_key="structured-attribution",
+        strategy_source="expectation_volume_price",
+        source_kind="autonomous_universe_selection",
+        trade_date="2026-08-08",
+        evaluated_at=datetime(2026, 8, 8, 10, 0),
+        code="600000",
+        name="structured",
+        intent="BUY",
+        side="BUY",
+        quantity=100,
+        status="SKIPPED",
+        source_modules_json=json.dumps(["抓涨停", "强板块核心"], ensure_ascii=False),
+        evidence_json='["this text intentionally has no module label"]',
+    )
+
+    assert decision_modules(decision) == ["抓涨停", "强板块核心"]
