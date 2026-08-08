@@ -48,6 +48,29 @@ type PromotionDashboard = {
   note: string
 }
 
+type PromotionItem = PromotionDashboard['items'][number]
+type PromotionSortKey = 'candidate' | 'theme' | 'transition' | 'probability' | 'interval' | 'rank' | 'samples' | 'credibility' | 'position'
+type SortDirection = 'asc' | 'desc'
+
+function promotionCredibility(item: PromotionItem) {
+  const intervalWidth = item.confidence_high - item.confidence_low
+  if (item.historical_sample_count >= 100 && intervalWidth <= 20) return { label: '高', score: 3 }
+  if (item.historical_sample_count >= 30 && intervalWidth <= 35) return { label: '中', score: 2 }
+  return { label: item.historical_sample_count === 0 ? '低·首批先验' : '低', score: 1 }
+}
+
+function promotionSortValue(item: PromotionItem, key: PromotionSortKey): string | number {
+  if (key === 'candidate') return `${item.name}${item.code}`
+  if (key === 'theme') return item.theme || ''
+  if (key === 'transition') return item.from_level
+  if (key === 'probability') return item.probability
+  if (key === 'interval') return item.confidence_high - item.confidence_low
+  if (key === 'rank') return item.same_level_rank ?? 9999
+  if (key === 'samples') return item.historical_sample_count
+  if (key === 'credibility') return promotionCredibility(item).score
+  return item.trial_position_ratio
+}
+
 function PromotionProbabilityPanel({ auctionPlan }: { auctionPlan: AuctionPlan }) {
   if (!auctionPlan.promotion_transition) return null
   return <div className="promotion-probability-panel promotion-probability-primary">
@@ -78,6 +101,7 @@ export default function NextDayPlans({ mode = 'holding' }: { mode?: 'holding' | 
   const [draft, setDraft] = useState<Plan | null>(null)
   const [seesaw, setSeesaw] = useState<SeesawMonitor | null>(null)
   const [promotionDashboard, setPromotionDashboard] = useState<PromotionDashboard | null>(null)
+  const [promotionSort, setPromotionSort] = useState<{ key: PromotionSortKey, direction: SortDirection }>({ key: 'probability', direction: 'desc' })
   const [loading, setLoading] = useState(false)
   const [statusText, setStatusText] = useState('')
   const selectedIdRef = useRef<number | null>(null)
@@ -159,6 +183,26 @@ export default function NextDayPlans({ mode = 'holding' }: { mode?: 'holding' | 
   }, [loadPlans, mode])
 
   const selected = useMemo(() => plans.find(p => p.id === selectedId) ?? null, [plans, selectedId])
+  const sortedPromotionItems = useMemo(() => {
+    const items = [...(promotionDashboard?.items ?? [])]
+    const multiplier = promotionSort.direction === 'asc' ? 1 : -1
+    return items.sort((left, right) => {
+      const leftValue = promotionSortValue(left, promotionSort.key)
+      const rightValue = promotionSortValue(right, promotionSort.key)
+      const compared = typeof leftValue === 'string'
+        ? leftValue.localeCompare(String(rightValue), 'zh-CN')
+        : Number(leftValue) - Number(rightValue)
+      return compared === 0 ? right.probability - left.probability || left.code.localeCompare(right.code) : compared * multiplier
+    })
+  }, [promotionDashboard, promotionSort])
+  const togglePromotionSort = (key: PromotionSortKey) => {
+    setPromotionSort(current => {
+      if (current.key === key) return { key, direction: current.direction === 'asc' ? 'desc' : 'asc' }
+      const ascendingFirst = ['candidate', 'theme', 'interval', 'rank'].includes(key)
+      return { key, direction: ascendingFirst ? 'asc' : 'desc' }
+    })
+  }
+  const promotionSortLabel = (key: PromotionSortKey) => promotionSort.key === key ? (promotionSort.direction === 'asc' ? ' ↑' : ' ↓') : ''
   const selectedSeesaw = useMemo(
     () => seesaw?.holding_alerts.find(item => item.code === selected?.code || item.name === selected?.name) ?? null,
     [seesaw, selected],
@@ -331,12 +375,20 @@ export default function NextDayPlans({ mode = 'holding' }: { mode?: 'holding' | 
           </article>)}
           {!promotionDashboard.history.length && <p className="plain-text">从本次上线后开始前向积累每一级晋级样本，不回填历史结果。</p>}
         </div>
-        {!!promotionDashboard.items.length && <div className="promotion-candidate-table-wrap">
+        {!!sortedPromotionItems.length && <div className="promotion-candidate-table-wrap">
           <table className="promotion-candidate-table">
             <thead><tr>
-              <th>候选</th><th>题材</th><th>本级晋级</th><th>概率</th><th>90%区间</th><th>同身位排名</th><th>已完成样本</th><th>试错仓上限</th>
+              <th><button type="button" onClick={() => togglePromotionSort('candidate')}>候选{promotionSortLabel('candidate')}</button></th>
+              <th><button type="button" onClick={() => togglePromotionSort('theme')}>题材{promotionSortLabel('theme')}</button></th>
+              <th><button type="button" onClick={() => togglePromotionSort('transition')}>本级晋级{promotionSortLabel('transition')}</button></th>
+              <th><button type="button" onClick={() => togglePromotionSort('probability')}>概率{promotionSortLabel('probability')}</button></th>
+              <th><button type="button" onClick={() => togglePromotionSort('interval')}>90%区间{promotionSortLabel('interval')}</button></th>
+              <th><button type="button" onClick={() => togglePromotionSort('rank')}>同身位排名{promotionSortLabel('rank')}</button></th>
+              <th><button type="button" onClick={() => togglePromotionSort('samples')}>已完成样本{promotionSortLabel('samples')}</button></th>
+              <th><button type="button" onClick={() => togglePromotionSort('credibility')}>模型可信度{promotionSortLabel('credibility')}</button></th>
+              <th><button type="button" onClick={() => togglePromotionSort('position')}>试错仓上限{promotionSortLabel('position')}</button></th>
             </tr></thead>
-            <tbody>{promotionDashboard.items.map(item => <tr key={item.id}>
+            <tbody>{sortedPromotionItems.map(item => <tr key={item.id}>
               <td><b>{item.name}</b><small>{item.code}</small></td>
               <td>{item.theme || '待验证'}</td>
               <td><b>{item.transition}</b></td>
@@ -344,6 +396,7 @@ export default function NextDayPlans({ mode = 'holding' }: { mode?: 'holding' | 
               <td>{item.confidence_low.toFixed(1)}%～{item.confidence_high.toFixed(1)}%</td>
               <td>{item.same_level_rank ?? '--'}/{item.same_level_count ?? '--'}</td>
               <td>{item.historical_sample_count}</td>
+              <td><span className={`promotion-credibility credibility-${promotionCredibility(item).score}`}>{promotionCredibility(item).label}</span></td>
               <td>{item.trial_position_ratio > 0 ? `${(item.trial_position_ratio * 100).toFixed(0)}%` : '仅观察'}</td>
             </tr>)}</tbody>
           </table>

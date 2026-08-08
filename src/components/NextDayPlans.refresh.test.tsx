@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { afterEach, describe, expect, test, vi } from 'vitest'
 import NextDayPlans from './NextDayPlans'
 
@@ -74,6 +74,12 @@ describe('次日计划显式刷新', () => {
           confidence_low: 10, confidence_high: 60, historical_sample_count: 0,
           status: 'PENDING', actual_level: null, same_level_rank: 1,
           same_level_count: 8, trial_position_ratio: 0.15,
+        }, {
+          id: 2, code: '600002', name: '候选乙', theme: '测试题材乙', from_level: 1,
+          target_level: 2, transition: '1进2', probability: 43.3,
+          confidence_low: 15, confidence_high: 65, historical_sample_count: 0,
+          status: 'PENDING', actual_level: null, same_level_rank: 2,
+          same_level_count: 8, trial_position_ratio: 0,
         }],
       })
       throw new Error(`unexpected request: ${url}`)
@@ -88,5 +94,13 @@ describe('次日计划显式刷新', () => {
     expect(screen.getByText('10.0%～60.0%')).toBeInTheDocument()
     expect(screen.getByText('1/8')).toBeInTheDocument()
     expect(screen.getByText('15%')).toBeInTheDocument()
+    expect(screen.getAllByText(/首批先验/).length).toBe(2)
+
+    const table = screen.getByRole('table')
+    expect(within(within(table).getAllByRole('row')[1]).getByText('候选乙')).toBeInTheDocument()
+    fireEvent.click(within(table).getByRole('button', { name: /概率/ }))
+    await waitFor(() => {
+      expect(within(within(table).getAllByRole('row')[1]).getByText('候选甲')).toBeInTheDocument()
+    })
   })
 })

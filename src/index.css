@@ -140,6 +140,8 @@ a:focus-visible {
 .promotion-candidate-table-wrap { max-height: 430px; margin: 12px 0; overflow: auto; border: 1px solid var(--border-color); border-radius: 9px; }
 .promotion-candidate-table { width: 100%; min-width: 920px; border-collapse: collapse; font-size: 13px; }
 .promotion-candidate-table th { position: sticky; top: 0; z-index: 1; background: #eef3f8; color: var(--text-muted); text-align: left; }
+.promotion-candidate-table th button { width: 100%; padding: 0; border: 0; background: transparent; color: inherit; font: inherit; font-weight: 700; text-align: left; cursor: pointer; white-space: nowrap; }
+.promotion-candidate-table th button:hover { color: #1f63b5; }
 .promotion-candidate-table th,
 .promotion-candidate-table td { padding: 10px 12px; border-bottom: 1px solid var(--border-color); white-space: nowrap; }
 .promotion-candidate-table tbody tr:last-child td { border-bottom: 0; }
@@ -147,5 +149,9 @@ a:focus-visible {
 .promotion-candidate-table td:first-child { display: grid; gap: 2px; }
 .promotion-candidate-table td:first-child small { color: var(--text-muted); }
 .promotion-candidate-table td strong { color: #1f63b5; }
+.promotion-credibility { display: inline-flex; padding: 3px 7px; border-radius: 999px; font-size: 12px; }
+.promotion-credibility.credibility-1 { background: #fff3e4; color: #9a5a00; }
+.promotion-credibility.credibility-2 { background: #e9f3ff; color: #1f63b5; }
+.promotion-credibility.credibility-3 { background: #e7f7ee; color: #18794e; }
 .promotion-probability-primary { margin: 14px 0 4px; box-shadow: 0 8px 22px rgb(35 91 145 / 8%); }
 .promotion-dashboard > p { margin: 0; font-size: 13px; }
