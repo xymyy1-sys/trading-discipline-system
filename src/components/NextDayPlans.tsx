@@ -25,9 +25,50 @@ type PromotionDashboard = {
     posterior: number
     confidence_low: number
     confidence_high: number
+    basis: '历史结果' | '收缩先验'
   }>
-  items: Array<{ status: string }>
+  items: Array<{
+    id: number
+    code: string
+    name: string
+    theme: string
+    from_level: number
+    target_level: number
+    transition: string
+    probability: number
+    confidence_low: number
+    confidence_high: number
+    historical_sample_count: number
+    status: string
+    actual_level: number | null
+    same_level_rank: number | null
+    same_level_count: number | null
+    trial_position_ratio: number
+  }>
   note: string
+}
+
+function PromotionProbabilityPanel({ auctionPlan }: { auctionPlan: AuctionPlan }) {
+  if (!auctionPlan.promotion_transition) return null
+  return <div className="promotion-probability-panel promotion-probability-primary">
+    <div className="promotion-probability-head">
+      <div>
+        <span>逐级晋级模型 · {auctionPlan.promotion_model_version || 'promotion-v1'}</span>
+        <h4>{auctionPlan.promotion_transition}</h4>
+      </div>
+      <strong>{(auctionPlan.live_promotion_probability ?? auctionPlan.promotion_probability ?? 0).toFixed(1)}%</strong>
+    </div>
+    <div className="promotion-probability-grid">
+      <span>收盘先验 <b>{(auctionPlan.promotion_probability ?? 0).toFixed(1)}%</b></span>
+      <span>置信区间 <b>{(auctionPlan.promotion_confidence_low ?? 0).toFixed(1)}%～{(auctionPlan.promotion_confidence_high ?? 100).toFixed(1)}%</b></span>
+      <span>同身位排名 <b>{auctionPlan.same_level_rank ?? '--'}/{auctionPlan.same_level_count ?? '--'}</b></span>
+      <span>已完成样本 <b>{auctionPlan.promotion_sample_count ?? 0}</b></span>
+      <span>试错仓上限 <b>{((auctionPlan.promotion_trial_position_ratio ?? 0) * 100).toFixed(0)}%</b></span>
+    </div>
+    <p>每一级独立统计；竞价和开盘证据只动态修正本级概率，不能单独触发买入。</p>
+    {auctionPlan.promotion_position_rule && <p>{auctionPlan.promotion_position_rule}</p>}
+    {!!auctionPlan.promotion_evidence?.length && <ul>{auctionPlan.promotion_evidence.slice(0, 5).map(item => <li key={item}>{item}</li>)}</ul>}
+  </div>
 }
 
 export default function NextDayPlans({ mode = 'holding' }: { mode?: 'holding' | 'limit' }) {
@@ -283,13 +324,30 @@ export default function NextDayPlans({ mode = 'holding' }: { mode?: 'holding' | 
         </div>
         <div className="promotion-dashboard-grid">
           {promotionDashboard.history.map(item => <article key={item.from_level}>
-            <b>{item.transition}</b>
+            <b>{item.transition} <em>{item.basis}</em></b>
             <strong>{item.posterior.toFixed(1)}%</strong>
             <span>{item.promoted_count}/{item.sample_count}笔晋级</span>
             <small>90%区间 {item.confidence_low.toFixed(1)}%～{item.confidence_high.toFixed(1)}%</small>
           </article>)}
           {!promotionDashboard.history.length && <p className="plain-text">从本次上线后开始前向积累每一级晋级样本，不回填历史结果。</p>}
         </div>
+        {!!promotionDashboard.items.length && <div className="promotion-candidate-table-wrap">
+          <table className="promotion-candidate-table">
+            <thead><tr>
+              <th>候选</th><th>题材</th><th>本级晋级</th><th>概率</th><th>90%区间</th><th>同身位排名</th><th>已完成样本</th><th>试错仓上限</th>
+            </tr></thead>
+            <tbody>{promotionDashboard.items.map(item => <tr key={item.id}>
+              <td><b>{item.name}</b><small>{item.code}</small></td>
+              <td>{item.theme || '待验证'}</td>
+              <td><b>{item.transition}</b></td>
+              <td><strong>{item.probability.toFixed(1)}%</strong></td>
+              <td>{item.confidence_low.toFixed(1)}%～{item.confidence_high.toFixed(1)}%</td>
+              <td>{item.same_level_rank ?? '--'}/{item.same_level_count ?? '--'}</td>
+              <td>{item.historical_sample_count}</td>
+              <td>{item.trial_position_ratio > 0 ? `${(item.trial_position_ratio * 100).toFixed(0)}%` : '仅观察'}</td>
+            </tr>)}</tbody>
+          </table>
+        </div>}
         <p>{promotionDashboard.note}</p>
       </section>}
 
@@ -354,6 +412,8 @@ export default function NextDayPlans({ mode = 'holding' }: { mode?: 'holding' | 
                   刷新阶段验收
                 </button>
               </div>
+
+              {draft.plan_type === 'limit_up_auction' && <PromotionProbabilityPanel auctionPlan={draft.auction_plan} />}
 
               {conditionOrderAdvice && (
                 <div className="condition-order-advice">
@@ -472,33 +532,6 @@ export default function NextDayPlans({ mode = 'holding' }: { mode?: 'holding' | 
                   </div>
                   <span>{draft.auction_plan.refreshed_at || '未刷新'}</span>
                 </div>
-                {draft.auction_plan.promotion_transition && (
-                  <div className="promotion-probability-panel">
-                    <div className="promotion-probability-head">
-                      <div>
-                        <span>逐级晋级模型 · {draft.auction_plan.promotion_model_version || 'promotion-v1'}</span>
-                        <h4>{draft.auction_plan.promotion_transition}</h4>
-                      </div>
-                      <strong>
-                        {(draft.auction_plan.live_promotion_probability ?? draft.auction_plan.promotion_probability ?? 0).toFixed(1)}%
-                      </strong>
-                    </div>
-                    <div className="promotion-probability-grid">
-                      <span>收盘先验 <b>{(draft.auction_plan.promotion_probability ?? 0).toFixed(1)}%</b></span>
-                      <span>置信区间 <b>{(draft.auction_plan.promotion_confidence_low ?? 0).toFixed(1)}%～{(draft.auction_plan.promotion_confidence_high ?? 100).toFixed(1)}%</b></span>
-                      <span>同身位竞争 <b>{draft.auction_plan.same_level_rank ?? '--'}/{draft.auction_plan.same_level_count ?? '--'}</b></span>
-                      <span>历史样本 <b>{draft.auction_plan.promotion_sample_count ?? 0}</b></span>
-                      <span>试错仓上限 <b>{((draft.auction_plan.promotion_trial_position_ratio ?? 0) * 100).toFixed(0)}%</b></span>
-                    </div>
-                    <p>
-                      概率按每一级分别统计，竞价和开盘证据只会动态修正本级判断；它不是“终极龙头预测”，也不能单独触发买入。
-                    </p>
-                    {draft.auction_plan.promotion_position_rule && <p>{draft.auction_plan.promotion_position_rule}</p>}
-                    {!!draft.auction_plan.promotion_evidence?.length && (
-                      <ul>{draft.auction_plan.promotion_evidence.slice(0, 5).map(item => <li key={item}>{item}</li>)}</ul>
-                    )}
-                  </div>
-                )}
                 {draft.plan_type === 'limit_up_auction' && (
                   <div className={`limit-mainline-decision ${limitOrderEligibility.allowed ? 'eligible' : 'blocked'}`}>
                     <div className="limit-mainline-head">

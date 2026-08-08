@@ -82,3 +82,21 @@ def test_each_board_level_is_recorded_and_resolved_independently(db_session):
     assert history[2]["sample_count"] == 1
     assert history[2]["promoted_count"] == 1
 
+
+def test_first_forward_cohort_exposes_priors_ranks_and_trial_caps(db_session):
+    record_closing_promotion_cohort(
+        db_session,
+        completed_trade_date="2026-08-07",
+        ladder=ladder(stock("600001", "一板甲", 1), stock("600002", "二板甲", 2)),
+        atmosphere=atmosphere("600001", "600002"),
+    )
+    db_session.commit()
+
+    report = promotion_dashboard(db_session, signal_date="2026-08-07")
+    history = {row["from_level"]: row for row in report["history"]}
+    assert history[1]["basis"] == "收缩先验"
+    assert history[1]["posterior"] == 33.3
+    items = {row["code"]: row for row in report["items"]}
+    assert items["600001"]["same_level_rank"] == 1
+    assert items["600001"]["trial_position_ratio"] == 0.1
+    assert items["600002"]["trial_position_ratio"] == 0.1

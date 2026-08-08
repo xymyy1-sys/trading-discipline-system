@@ -260,32 +260,57 @@ def promotion_dashboard(db: Session, *, signal_date: str | None = None) -> dict[
     latest_date = signal_date or (rows[0].signal_date if rows else "")
     current = [row for row in rows if row.signal_date == latest_date]
     history = _cohort_statistics(db)
+    # The first deployed cohort has not had a following session in which it
+    # can be resolved yet.  Still expose the shrinkage prior for every level
+    # represented in today's cohort so the UI does not look like an empty
+    # model.  These rows are explicitly marked as priors rather than results.
+    visible_levels = {int(row.from_level) for row in current}
+    history_rows = []
+    for level in sorted(set(history) | visible_levels):
+        metrics = history.get(level, {
+            "sample_count": 0,
+            "promoted_count": 0,
+            "posterior": 33.3,
+            "confidence_low": 5.0,
+            "confidence_high": 55.0,
+        })
+        history_rows.append({
+            "from_level": level,
+            "transition": f"{level}进{level + 1}",
+            "basis": "历史结果" if int(metrics["sample_count"]) > 0 else "收缩先验",
+            **metrics,
+        })
+
+    items = []
+    for row in current:
+        features = json.loads(row.features_json or "{}")
+        stage_cap = 0.15 if row.from_level == 1 else 0.12 if row.from_level == 2 else 0.08
+        role_cap = float(features.get("max_position_ratio") or 0)
+        trial_cap = min(role_cap, stage_cap) if role_cap > 0 else 0.0
+        items.append({
+            "id": row.id,
+            "code": row.code,
+            "name": row.name,
+            "theme": row.theme,
+            "from_level": row.from_level,
+            "target_level": row.target_level,
+            "transition": f"{row.from_level}进{row.target_level}",
+            "probability": row.prior_probability,
+            "confidence_low": row.confidence_low,
+            "confidence_high": row.confidence_high,
+            "historical_sample_count": row.historical_sample_count,
+            "status": row.status,
+            "actual_level": row.actual_level,
+            "same_level_rank": features.get("same_level_rank"),
+            "same_level_count": features.get("same_level_count"),
+            "trial_position_ratio": trial_cap,
+            "roles": json.loads(row.roles_json or "[]"),
+            "features": features,
+        })
     return {
         "model_version": MODEL_VERSION,
         "signal_date": latest_date,
-        "history": [
-            {"from_level": level, "transition": f"{level}进{level + 1}", **metrics}
-            for level, metrics in sorted(history.items())
-        ],
-        "items": [
-            {
-                "id": row.id,
-                "code": row.code,
-                "name": row.name,
-                "theme": row.theme,
-                "from_level": row.from_level,
-                "target_level": row.target_level,
-                "transition": f"{row.from_level}进{row.target_level}",
-                "probability": row.prior_probability,
-                "confidence_low": row.confidence_low,
-                "confidence_high": row.confidence_high,
-                "historical_sample_count": row.historical_sample_count,
-                "status": row.status,
-                "actual_level": row.actual_level,
-                "roles": json.loads(row.roles_json or "[]"),
-                "features": json.loads(row.features_json or "{}"),
-            }
-            for row in current
-        ],
+        "history": history_rows,
+        "items": items,
         "note": "概率按每一级独立统计；样本不足时使用收缩先验并展示宽区间，不代表买入指令。",
     }
