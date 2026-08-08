@@ -2419,6 +2419,30 @@ class AuctionPlan(BaseModel):
     identity_action: str = "只观察"
     position_rule: str = "数据不足时禁止新开打板仓"
     theme_evidence: list[str] = Field(default_factory=list)
+    auto_generated: bool = False
+    generation_source: str = ""
+    source_trade_date: str = ""
+    source_ladder: str = ""
+    source_atmosphere: str = ""
+    auto_selection_rank: int | None = None
+    auto_selection_pool_size: int | None = None
+    auto_selection_reason: str = ""
+    auto_selection_basis: str = ""
+    promotion_model_version: str = ""
+    promotion_transition: str = ""
+    promotion_probability: float | None = None
+    promotion_confidence_low: float | None = None
+    promotion_confidence_high: float | None = None
+    promotion_sample_count: int = 0
+    promotion_promoted_count: int = 0
+    same_level_rank: int | None = None
+    same_level_count: int | None = None
+    promotion_evidence: list[str] = Field(default_factory=list)
+    live_promotion_probability: float | None = None
+    promotion_probability_change: float | None = None
+    promotion_trial_position_ratio: float = 0
+    promotion_role_position_ratio: float = 0
+    promotion_position_rule: str = ""
 
 
 class NextDayPlanBase(BaseModel):
